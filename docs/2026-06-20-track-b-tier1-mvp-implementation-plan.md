@@ -8,7 +8,7 @@
 
 > **执行顺序门：** 本方案是**计划文档**，现在即可写定。**实质代码实施押在上游商业线 i18n 完成之后**（母文档 §6 / onboarding §5）。本文给出"第一周改哪些文件"的落地蓝图，代码动笔以 i18n 完成为准。
 
-> **修订史：** **v2** 纳入 6 路多 agent 对抗复审 26 项 + 3 决策（① 仅直传去 yt-dlp；② CF Queues 首选 + Oracle A1 常驻主 host；③ 境外/海外用户·不备案·EU 式标识）。**v3** 纳入 CodeX 评审 4 项：R2 presign 改"签发-session + PUT 后 HEAD 校验"（content-length-range 不当硬依赖）；ffmpeg/ffprobe **自身 SSRF**（playlist/外链协议）防线；全局**分钟池**；AIGC 标识定**可测 MVP 默认形态**。并把灰度起步默认值定下来 + **新增 §14 运行时配置（后台可配，含"可调 vs 红线锁"两类分法）**。
+> **修订史：** **v2** 纳入 6 路多 agent 对抗复审 26 项 + 3 决策（① 仅直传去 yt-dlp；② CF Queues 首选 + Oracle A1 常驻主 host；③ 境外/海外用户·不备案·EU 式标识）。**v3** 纳入 CodeX 评审 4 项：R2 presign 改"签发-session + PUT 后 HEAD 校验"（content-length-range 不当硬依赖）；ffmpeg/ffprobe **自身 SSRF**（playlist/外链协议）防线；全局**分钟池**；AIGC 标识定**可测 MVP 默认形态**。并把灰度起步默认值定下来 + **新增 §14 运行时配置（后台可配，含"可调 vs 红线锁"两类分法）**。**v3.1（项目主决策）：AIGC 标识开关由红线锁改为🟢高敏可调——默认开、关闭需 audited acknowledgment、责任项目主自行承担；标识能力代码路径始终保留，§14 只控开关、不删能力。**
 
 ---
 
@@ -97,10 +97,10 @@
 **移植时必须改/加：**
 1. **`job_id→user` 命名空间 + 路径包含校验**；**ingest 路径 pin** 到内核 `JobPaths`（`video/original.<ext>`）使 `ingest()` cache-hit。
 2. 写 `manifest.json` = job/user/标识元数据。
-3. **AIGC 标识 mux 步骤（新增，默认开、hosted 不可静默关）—— v3 可测 MVP 默认形态：**
+3. **AIGC 标识 mux 步骤（新增，默认开；开关为 §14 高敏可调、关闭需 audited acknowledgment，非静默）—— v3 可测 MVP 默认形态：**
    - **隐式**（机读，不可见）：MP4 容器 metadata 标（"AI 生成合成 / 服务方 / 内容编号"）+ `JobManifest.aigc_marking` + SRT 文件头 `NOTE`。满足 EU AI Act 50(2) 机读标注。
    - **显式**（可感知，轻量）：**片尾 1 秒轻提示**（"AI 配音 / AI-dubbed"，优先于常驻角标）+ 下载页披露。满足 deepfake 披露。
-   - **形态可配（§14 `aigc_explicit_form` ∈ {tail_notice, corner_label, disclosure_only}），但 hosted 不可关闭**；自托管可关/调。律师后置精修措辞/位置——**M1 即测此默认机制，不被律师 gate 阻塞**。
+   - **形态 + 开关均可配（§14，项目主决策）：默认开（安全默认）；`aigc_explicit_form ∈ {tail_notice, corner_label, disclosure_only}`；`aigc_marking_enabled` 可关，但关闭需 audited acknowledgment（项目主明确接受法律责任、记审计），不是静默开关。** 自托管可关/调。**标识能力代码路径始终存在，§14 只控开关、不删能力。** 律师后置精修措辞/位置——**M1 即测此默认机制，不被律师 gate 阻塞**。
 4. **默认 TTS = piper**（commercial-safe；edge-tts 仅实验/非商用 lane，AD-6 / §7.5）。
 5. **模型/二进制供应链 pin**（build 时）：piper `.onnx` / faster-whisper 权重 / ffmpeg pin 版本 + **sha256** + 许可 gate（XTTS/F5 非商用禁入默认镜像）；与 §14 `tts_model_registry` 一致。
 
@@ -185,7 +185,9 @@ loop:
 4. **每日 cap（双池，CodeX P2）**：per-IP/anon（默认 1）/ per-user（默认 2）+ **全局任务数**（默认 20-30）**与全局 `accepted_video_minutes/day`（默认 100-120）双池，先到先停**。**P8/§4.7.4** 要求 per-IP/user/**global**（**不是 §5.4.10**，那是 F2 试用专属）。原子计数、失败也计数；计数存储不可用即拒。用户侧仍显示"每日任务数"，后台用分钟池护成本。
 5. cap 单位 = **"配音任务数 / 分钟"**，不是 provider 调用额度（守红线 2 / P5，前向兼容 #4）。cap 满 → 文案引导，**不自动升级付费**。
 
-**B. AIGC 标识（生成嵌入，默认开）：** v3 可测默认形态见 §4 第 3 点（隐式 MP4 metadata + manifest + SRT NOTE；显式 片尾 1s 提示 + 下载页披露）。境外/海外用户·**不备案**（PRC 专属）→ EU 式（AI Act 50）。形态 §14 可配、**hosted 不可关**；律师后置精修。§12 加"成片带隐式标 + 显式披露"断言。
+**B. AIGC 标识（生成嵌入，默认开）：** v3 可测默认形态见 §4 第 3 点（隐式 MP4 metadata + manifest + SRT NOTE；显式 片尾 1s 提示 + 下载页披露）。境外/海外用户·**不备案**（PRC 专属）→ EU 式（AI Act 50）。**形态 + 开关 §14 均可配（默认开；`aigc_marking_enabled` 关闭需 audited acknowledgment、责任项目主自负）**；律师后置精修。§12 断言：默认开时成片带隐式标 + 显式披露。
+
+> **项目主决策（记录在案）：** AIGC 标识开关后台可调、默认开、关闭需 audited acknowledgment、**责任项目主自行承担**——属对母文档红线 3「深度合成法定标识保留」在 open Tier 1 admin 层的**有意软化**（管辖相关；标识*能力*始终存在，只是可被有意识地按辖区关闭）。是否同步标注母文档红线 3 由项目主定。
 
 **C. 内容/数据合规（决策 ③，MVP 务实档）：** AUP/ToS（禁违法/侵权/假冒/CSAM）+ 反应式 **DMCA/DSA 下架入口**（删对应 R2 对象 + job）+ 24h TTL 兜底 + 隐私告知/数据最小化（含 EU GDPR）+ 分层日志留存（§14：job_meta 30d / abuse 90d / takedown 180d，与产物 24h 是两类数据）。**押后放量前 gate**：proactive 审核 / CSAM 扫描上报 / 完整留存制度（M3）。
 
@@ -205,8 +207,8 @@ loop:
 - **`autodub-core` 硬边界 lint**：禁 core import gateway/控制面/计费/真实 key。
 - **SSRF 防回归（v3 强化）**：CI 断言托管 worker 无 yt-dlp、URL 分支关闭；**ffmpeg/ffprobe 带 `-protocol_whitelist file,crypto`、worker egress 仅 CP/R2**；**负测"上传伪装 playlist/m3u8 不触网、被格式 allowlist 拒"**。
 - **presign 绑定（v3）**：CI/审查断言 PUT 短期 + key 派生 + **`POST /api/jobs` 必 HEAD 校验真实 size/type 后才建 job**；下载 GET 校归属 + 过期拒绝。
-- **AIGC 标识**：CI 断言成片带隐式标 + 显式披露；**删水印的改动不得触碰任何标识路径**；**hosted 标识不可经 §14 关闭**（admin 只调形态）；交付 download-unlocked。
-- **§14 配置守卫**：CI/校验层断言**红线类不在可改集**（`allow_paid` / PAID 集 / AIGC 默认开 / SSRF 防线 / core 边界 / presign HEAD 逻辑）；可改项有安全上下界。
+- **AIGC 标识**：CI 断言**默认配置下**成片带隐式标 + 显式披露；**删水印的改动不得触碰任何标识路径、标识代码能力路径必须始终存在（即便 §14 配置关闭）**；§14 关闭走 audited acknowledgment + 审计记录（高敏可调，非静默）；交付 download-unlocked。
+- **§14 配置守卫**：CI/校验层断言**红线类不在可改集**（`allow_paid` / PAID 集 / SSRF 防线 / core 边界 / presign HEAD 逻辑）；**AIGC 标识开关 = 高敏可调项**（默认开 + 关闭需 audited acknowledgment，非红线锁——项目主决策）；可改项有安全上下界。
 - **open/private**（AD-15/AD-14）：站方 key/计费/风控/托管调度策略/**admin 运营 UI 与线上数值**不进开源默认配置；开源只给配置**机制 + schema + 安全默认 + 红线锁**。不卖原始额度（红线 2）。独立用户/财务/物理设备，仅共享 `autodub-core`。
 
 ---
@@ -242,7 +244,7 @@ loop:
 | `log_retention` | job_meta 30d / abuse 90d / takedown 180d | 与产物 24h 两类 |
 | `asr_default` / faster-whisper | 默认镜像含 faster-whisper（pin tiny/base int8）或首启预热 | 不全压 Groq/CF 免费 API |
 | `tts_model_registry` / `no_model_policy` | registry(lang/voice/license/sha256/size/enabled)；无模型 **fail-closed + 文案**（不默认落 edge-tts）；MeloTTS 确认 ToS 后作显式 experimental fallback | — |
-| `aigc_explicit_form` | `tail_notice`（片尾 1s）+ metadata + SRT NOTE + 下载页披露 | hosted 不可关、可调形态 |
+| `aigc_marking_enabled` / `aigc_explicit_form` | 默认开；`tail_notice`（片尾 1s）+ metadata + SRT NOTE + 下载页披露 | 开关高敏可调（关闭需 audited ack、责任自负），形态可调，§14 |
 
 **待校准 / 待确认（非数值开关）：** AIGC 显式标确切措辞/位置（律师，M1 前定可测默认即可）；内容审核 proactive/CSAM 何时纳入（M3 gate）；R2 是否支持签精确 `Content-Length`（实施时验）。
 
@@ -265,9 +267,11 @@ loop:
 | 留存 | `artifact_ttl_hours`(AD-17 内) · `log_retention`{job_meta/abuse/takedown} |
 | 成本 | free-pool 预算/阈值（auto-degrade / kill-switch 触发点）· 告警阈值 |
 | 模型 | `tts_model_registry`(每模型 enabled) · `asr_default` · `no_model_policy` |
-| 合规文案 | `takedown_contact` · `aigc_explicit_form`(tail_notice/corner_label/disclosure_only，**hosted 不可关、仅调形态**) · AUP/隐私告知版本指针 |
+| 合规文案 | `takedown_contact` · `aigc_marking_enabled`(**高敏项：默认开；关闭需 audited acknowledgment、责任项目主自负——项目主决策**) · `aigc_explicit_form`(tail_notice/corner_label/disclosure_only) · AUP/隐私告知版本指针 |
 
-**🔒 不可改（红线锁，代码/CI）：** `allow_paid`=false 恒定 · `PAID_PROVIDERS` + 5 不变量 · **AIGC 标识默认开（hosted 不可关闭，只能调形态）** · SSRF 防线（无 yt-dlp / ffmpeg 协议白名单 / worker egress 限制）· autodub-core 硬边界 · presign 的 HEAD 校验 / key 派生逻辑。
+**🔒 不可改（红线锁，代码/CI）：** `allow_paid`=false 恒定 · `PAID_PROVIDERS` + 5 不变量 · SSRF 防线（无 yt-dlp / ffmpeg 协议白名单 / worker egress 限制）· autodub-core 硬边界 · presign 的 HEAD 校验 / key 派生逻辑。
+
+> **AIGC 标识开关**（原列此处）已按项目主决策移至 🟢 **高敏可调项**：默认开、关闭需 audited acknowledgment、责任项目主自负。**注**：可调的只是"开关"，标识**能力代码路径必须始终存在**（§14 不删能力，只控开关）；属对母文档红线 3「法定标识保留」在 admin 层的有意软化（管辖相关）。
 
 **机制：**
 - **存储**：D1 `settings`(`key, value, type, min?, max?, updated_by, updated_at`) 真源 + 变更审计；KV 缓存热读（控制面每请求读、TTL 短）；worker 启动 + claim 时拉 `GET /internal/config`。**复刻上游"运行时热配置"模式但独立**（AD-15，不复用 SaaS 配置）。
