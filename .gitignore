@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Node / TypeScript / Cloudflare
+node_modules/
+.next/
+.wrangler/
+*.tsbuildinfo
+.dev.vars
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+
+# Media scratch & job artifacts (large, regenerable)
+/work/
+/output/
+/artifacts/
+/tmp/
+**/_scratch/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
