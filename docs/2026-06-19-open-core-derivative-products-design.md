@@ -40,7 +40,7 @@
 | # | 子方案 | Track | scope 边界 | 状态 | 落点 |
 |---|--------|-------|-----------|------|------|
 | — | 本文（母文档 / ADR 源） | — | 方向 + 决策 + 边界 + 原则 | ✅ 冻结 | 本 repo |
-| 1 | Track B Tier 1 MVP 实施方案 | B | 新 repo 目录 + CF Pages/Workers/R2/D1/Queues + Python media worker + free-video-dub 移植范围 + 上传/排队/执行/下载闭环 + 24h TTL + abuse gate + **最小内嵌单 lane 队列**；**不含** BYOK / 付费 / 高质量核心迁移 / 完整多 lane 调度器 | 待拆（开源轨**第一份**） | 新 repo（暂 stage 本 repo 作 origin） |
+| 1 | Track B Tier 1 MVP 实施方案 | B | 新 repo 目录 + CF Pages/Workers/R2/D1/Queues + Python media worker + free-video-dub 移植范围 + 上传/排队/执行/下载闭环 + 24h TTL + abuse gate + **最小内嵌单 lane 队列**；**不含** BYOK / 付费 / 高质量核心迁移 / 完整多 lane 调度器 | ✅ 已起草草案（待 eng review） | [本 repo 子方案](2026-06-20-track-b-tier1-mvp-implementation-plan.md) |
 | 2 | 队列与资源调度实施方案 | B→ | §5.4 → lane(P/B/F1/F2/F0) + token/resource bucket schema + admission/provider pool + all-or-nothing lease + ETA 估算 + CF Queues+D1 job state + worker 取任务/失败重试 | 待拆（**Tier 2/3 多 lane 出现后**，非 MVP 关键路径） | 新 repo |
 | 3 | BYOK 安全实施方案 | B（Tier 2） | key 存储 + envelope enc / 本地存储选择 + egress allowlist（防 SSRF）+ provider 429/backoff + **fail-to-error 不自动切站方付费 key** + 前端 key 配置 UX | 待拆（Tier 2 阶段近时，防过期） | 新 repo |
 | 4 | Tier 3 付费托管 ledger 方案 | B（Tier 3） | **自有独立账本、不 import SaaS `credits_service`** + reserve/settle 状态机 + 估算预扣/完成结算/失败退款 + 跳队费 + 支付最小闭环 + 与 SaaS ledger 边界测试 | 待拆（Tier 3 阶段近时） | 新 repo |
