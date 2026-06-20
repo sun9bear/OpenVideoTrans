@@ -63,7 +63,7 @@
 
 2. **合规由产品边界定，不由限额机制定** — 见 C4。免费试用某引擎，限的是"任务次数"不是"该引擎调用额度"；绝不对外卖原始 API 额度。
 
-3. **深度合成法定标识保留** — 去掉的只是商业防白嫖水印，AIGC 法定显式/隐式标识不能去。
+3. **深度合成法定标识保留** — 去掉的只是商业防白嫖水印，AIGC 法定显式/隐式标识不能去。**例外（2026-06-20 项目主决策，仅 open Tier 1 admin 层）：标识能力恒在、不可删；开关后台可调、默认开、关闭须 audited acknowledgment、责任运营方自负（管辖相关）——详见母文档 §7.3 + 子方案 #1 §14。**
 
 4. **open/private 边界**（AD-14）— 开源侧 = autodub-core 公开子集 + provider-adapters（BYOK/免费）+ 基础 Web/worker 框架 + 剪映 draft 基础 writer。私有侧 = 控制面/风控/托管调度/站方 key/克隆 reservation/CosyVoice 嵌入式 worker。**autodub-core 硬边界：不 import gateway、不读权益、不处理支付、不接真实 key。**
 
