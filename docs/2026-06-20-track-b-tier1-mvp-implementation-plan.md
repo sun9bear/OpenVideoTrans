@@ -3,10 +3,10 @@
 **状态：** **v3.2 — 已锁定为 Track B Tier 1 MVP 执行基线**（多 agent 对抗复审 + CodeX 两轮收口；进入拆 issue 实施阶段，代码仍押 i18n）。开源轨**第一份**实施方案（母文档 §0.5 子方案表 #1）。
 **日期：** 2026-06-20
 **上游 ADR 真源：** [`2026-06-19-open-core-derivative-products-design.md`](2026-06-19-open-core-derivative-products-design.md)（AD-1..AD-17）。本方案只承载**可执行细节**，不复述、不回写已冻结的母文档；与母文档冲突以其 AD 为准。
-**冷启动背景：** [`2026-06-20-project-context-onboarding.md`](2026-06-20-project-context-onboarding.md)（红线 / 执行顺序）。
+**红线 / 执行顺序：** 见母文档 §7（红线）/ §6（执行顺序）。
 **移植源：** free-video-dub 可移植内核（上游私有 repo，只读移植参考）。
 
-> **执行顺序门：** 本方案是**计划文档**，现在即可写定。**实质代码实施押在上游商业线 i18n 完成之后**（母文档 §6 / onboarding §5）。本文给出"第一周改哪些文件"的落地蓝图，代码动笔以 i18n 完成为准。
+> **执行顺序门：** 本方案是**计划文档**，现在即可写定。**实质代码实施押在上游商业线 i18n 完成之后**（母文档 §6）。本文给出"第一周改哪些文件"的落地蓝图，代码动笔以 i18n 完成为准。
 
 > **修订史：** **v2** 纳入 6 路多 agent 对抗复审 26 项 + 3 决策（① 仅直传去 yt-dlp；② CF Queues 首选 + Oracle A1 常驻主 host；③ 境外/海外用户·不备案·EU 式标识）。**v3** 纳入 CodeX 评审 4 项：R2 presign 改"签发-session + PUT 后 HEAD 校验"（content-length-range 不当硬依赖）；ffmpeg/ffprobe **自身 SSRF**（playlist/外链协议）防线；全局**分钟池**；AIGC 标识定**可测 MVP 默认形态**。并把灰度起步默认值定下来 + **新增 §14 运行时配置（后台可配，含"可调 vs 红线锁"两类分法）**。**v3.1（项目主决策）：AIGC 标识开关由红线锁改为🟢高敏可调——默认开、关闭需 audited acknowledgment、责任项目主自行承担；标识能力代码路径始终保留，§14 只控开关、不删能力。** **v3.2（CodeX 二轮，锁定为执行基线）：① `queue_backend` 改 break-glass（生产锁 `cf_queues`，`d1` 仅 dev/事故 + 审计）；② 上传会话生命周期（`UploadSession` pending/verified/consumed/expired + 1h TTL + 孤儿源清理）；③ 配额扣减幂等（`counted_job/counted_minutes/refunded` 绑 `claim_version`，跨重排不双扣）；④ AIGC 关闭 = 结构化 jurisdiction override（地区/原因/操作者/时间）；⑤ 设置分"创建快照 vs 实时" + `Job.settings_version`；⑥ D1-claim 并发 spike 前置为 T2.0 硬门槛。**
 

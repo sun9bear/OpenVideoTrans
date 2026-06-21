@@ -16,13 +16,13 @@
 
 ## 先读这个
 
-新接手者（尤其 AI Agent）**先读** [`docs/2026-06-20-project-context-onboarding.md`](docs/2026-06-20-project-context-onboarding.md)（来龙去脉 + 决策背景 + 红线），再看 [`docs/2026-06-19-open-core-derivative-products-design.md`](docs/2026-06-19-open-core-derivative-products-design.md)（总设计 + AD-1..AD-17 决策源 + 子方案索引）。
+新接手者**先读** [`docs/2026-06-19-open-core-derivative-products-design.md`](docs/2026-06-19-open-core-derivative-products-design.md)（总设计 + AD-1..AD-17 决策源 + §0.5 子方案索引），再看 [`docs/2026-06-20-track-b-tier1-mvp-implementation-plan.md`](docs/2026-06-20-track-b-tier1-mvp-implementation-plan.md)（Tier 1 MVP 执行基线 + §15 施工次序）。
 
 ## 目录结构（AD-16 语言分层，monorepo）
 
 | 路径 | 语言 / 平台 | 职责 | 状态 |
 |---|---|---|---|
-| `docs/` | — | 设计文档 + onboarding | ✅ 有内容 |
+| `docs/` | — | 设计文档（含 ADR） | ✅ 有内容 |
 | `apps/web/` | TS · Cloudflare Pages | 前端 | 🔲 空骨架 |
 | `apps/control-plane/` | TS · Cloudflare Workers | 权益 / 队列状态 / 上传签名 / 回调 / 账本 | 🔲 空骨架 |
 | `packages/schemas/` | JSON Schema · OpenAPI · Pydantic | **语言无关契约**：job / segment / SemanticBlock / cue / provider result / draft manifest | 🔲 空骨架 |

@@ -37,3 +37,6 @@ node_modules/
 Thumbs.db
 .idea/
 .vscode/
+
+# 内部冷启动 meta 指南（commercial-origin 未脱敏；排除出仓，仅留本地）
+/docs/2026-06-20-project-context-onboarding.md

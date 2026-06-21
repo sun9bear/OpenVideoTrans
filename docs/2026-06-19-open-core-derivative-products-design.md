@@ -13,7 +13,6 @@
 **2026-06-20 项目主三层产品定案合并：** C1 开源项目重构为「三层产品」——去匿名演示 + 水印（去的是预览/演示防白嫖水印，**深度合成法定标识 §7.3 不去除**），改「免费额度内排队直接体验」：Tier 1 基础（最基础免费 API，≈free-video-dub）/ Tier 2 BYOK（核心流程 + 友好交互式 key 输入 + 安全，免费、API 费用用户自担）/ Tier 3 付费托管（项目主 key、不排队 = 优先 + 预留并发、按次预付、成本 × 比例加价）。distinctive logic（S2 审校 / 语段划分 / 语速校准 / TTS 前后重写 / 字幕校准）= 护城河，保留并按开源框架优化。全层交付视频 + 字幕；付费 add-on（仅 Tier 2/3）= 精准字幕精修 + 剪映草稿包。新增 §4.7（三层设计）+ §8 Q14（共享核心 vs 分叉，**后锁为 AD-13**），改写 §3.4/§4.1/§4.3/§5.3。**Tier 3 用开源项目自有独立账本**（实现同名/同语义接口、复刻 live reserve + terminal settle 纪律，**不 import SaaS `credits_service`**，AD-15 物理 + 代码分离，live 非 shadow，守 §4.2/§7.1）；与 AD-1 一致（开源三层是独立付费产品 + 漏斗顶，非 SaaS 低质免费触点）。
 **2026-06-20 Q13/Q14 锁定（CodeX 二轮建议 + 项目主采纳）：** AD-12 开源 core = **Apache-2.0** + 闭源控制面（不上 AGPL）；AD-13 = **共享核心包 `autodub-core`**（先 monorepo 内部，公开分阶段）；AD-14 = open/private 边界 ADR（§9.6，含剪映 draft 部分开源）。同步修正 AD-6/Q8 旧"开源 = free-video-dub + C3"表述 → `autodub-core` 公开子集 + provider-adapters + 基础框架（与 §4.7 移植核心一致）。
 **交叉引用：**
-- 冷启动背景：[`2026-06-20-project-context-onboarding.md`](2026-06-20-project-context-onboarding.md)（项目来龙去脉 / 红线 / 执行顺序 / 易踩事实坑）。
 - 可移植内核：**free-video-dub**（上游私有 repo 内的可移植 skill，2026-06-16 建好并验证；移植时只读它作来源）。
 - 原始取证（商业化 / 免费档 / 大陆 worker / 管线核心 / 成本质量 等代码图谱、各历史先例 plan、成本实测 memory）均在**上游私有 repo origin**，本开源副本不含。
 
