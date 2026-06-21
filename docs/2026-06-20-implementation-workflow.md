@@ -18,7 +18,7 @@
 |---|---|
 | **CodeX CLI** | ✅ codex-cli 0.139.0；headless = `codex exec` / `codex exec review` / `codex review`；auth=ChatGPT 模式已配置可达（走 Codex 订阅、非 API key=项目主说的独立额度） |
 | **git worktree** | ✅ 2.54 可用 |
-| **GitHub CodeX bot** | ❓ 探测不到（前几轮意见为手动贴）——**pilot 时实测 @CodeX 是否真有 bot 回复**；若无，外审退化为纯 CodeX CLI（仍可多轮） |
+| **GitHub CodeX bot** | ✅ **项目主确认有**（其他会话已验证）——PR 上 **`@CodeX review`** 即触发 bot 评审。外审 = CodeX CLI 本地修复环 + GitHub PR @CodeX 终审，两者都用 |
 | **sub-agent 模型** | 可设 `model=sonnet`（Sonnet 4.6）；"独立额度不耗订阅"属计费层，我设模型≠保证账单归属 |
 
 ## 2. 分支 / worktree 策略
@@ -79,11 +79,38 @@ for 批次 in DAG 拓扑序:
 
 ## 9. Pilot（i18n 后第一步，先验证机器再放开）
 
-**STEP0-A 单元全链路跑通**：开分支 →（机械单元→Sonnet 子 agent 实现）→ CI 绿 → 自审 → `codex exec review` 一轮 → PR → **实测 @CodeX bot 是否回复** → 合 → 更新状态机。通过即确认整套机器，再按 DAG 放开其余 28 单元。
+**STEP0-A 单元全链路跑通**：开分支 →（机械单元→Sonnet 子 agent 实现）→ CI 绿 → 自审 → `codex exec review` 一轮 → PR → **`@CodeX review` 触发 bot 终审 + 限频轮询回复** → 合 → 更新状态机。通过即确认整套机器，再按 DAG 放开其余 28 单元。
 
 ## 10. 待解 / 启动前置
 
 - **i18n 完成**（启动总闸，项目主告知）。
-- **确认 GitHub CodeX bot**（pilot 实测；无则纯 CLI 外审）。
+- **GitHub CodeX bot：已确认有**（PR 上 `@CodeX review`）。
 - **项目主提供**（按单元，见 backlog §4）：CF 账号(含 D1 remote) / Turnstile / 免费 provider key(注入 CF secrets) / Oracle A1 arm64 / 独立域名 + 律师审 AD-14。
 - pilot 时创建 `status:*` 标签 + 建 `IMPLEMENTATION_LOG.md`。
+
+---
+
+## 11. 上下文与持久化（长程自主的命脉）
+
+**核心原则：上下文是一次性的、持久产物才是权威。** Claude Code 上下文变长会**自动压缩（有损摘要）**——细粒度状态可能丢失，故**绝不靠上下文记状态**。工作流设计成**任意时刻可从持久产物重建**。
+
+**三层持久（职责分明）：**
+| 层 | 内容 | 写入频率 |
+|---|---|---|
+| **记忆** `.claude/.../memory/`（每会话自动加载） | 稳定慢变：方案 / 文档地图 / 红线 / 本规程 / 防跑偏 | 慢变；里程碑才更状态行，**不每批次 churn** |
+| **`IMPLEMENTATION_LOG.md`**（repo） | 实时进度：日期 / 单元 / 分支 / PR# / 审轮次 / 结论 / **下一步** | **每批次写** |
+| **GitHub issue 标签 + EPIC #30 checklist** | 单元级状态真源（`status:todo/wip/in-review/done/blocked`） | 状态变即写 |
+
+**checkpoint（事件驱动）：** 每单元/批次完成 → **先写 LOG + 更新 issue 标签 + 勾 EPIC，再继续**。任何压缩点上，产物完整描述"我在哪"。
+
+**resumption 协议（每次压缩后 / 唤醒后先跑）：**
+1. 读 `MEMORY.md`（自动）+ repo `CLAUDE.md`（北极星）。
+2. 读 `IMPLEMENTATION_LOG.md` 尾部 + EPIC #30 + issue 标签 → 重建"已完成 / 进行中 / 下一步"。
+3. 校验：进行中单元的分支/PR/CI 真实状态（gh 查）对齐 LOG。
+4. 续跑下一批次。**幂等**：重复执行已完成单元应为 no-op。
+
+**防跑偏（双层锚点）：**
+- **repo `CLAUDE.md` = 北极星**（主会话自动加载）：项目定位 / i18n 闸 / 红线 / 文档地图 / scope 纪律 / 命名约定。
+- **子 agent 不继承主会话记忆/CLAUDE.md** → 每个子 agent prompt **必须自带锚点**：显式让其读 `CLAUDE.md` + 该单元 backlog § + 红线，"留在 scope、只产出本单元、不碰红线、不发明范围"。
+
+**验证可恢复：** "这单元真过了吗"由 **CI/PR 状态 + LOG** 回答，不靠记忆判断。
