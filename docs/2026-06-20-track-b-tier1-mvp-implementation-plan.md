@@ -119,6 +119,13 @@
 
 **MVP 免费阶梯（全 $0）：** ASR（v3.3 **云优先**）`groq`(whisper-large-v3-turbo)→`cloudflare`(Workers AI Whisper)→`faster_whisper`(**仅 cli/self-host 兜底，hosted 不烤**)；MT `cloudflare`→`groq`→`deepl`→`ollama`；TTS **`piper`(默认,本地)**→`cloudflare`(MeloTTS 6 语)→`edge_tts`(实验 lane)。**hosted 云 ASR 配额耗尽 → `free_pool_exhausted`（不在弱箱回退本地，护 throughput；ADR-0004 预期路径）。** groq/cloudflare 免费 ASR 均 **$0、不在 PAID 集**，云优先不碰付费红线。
 
+**起步语言策略（grilling 2026-06-20 定）：**
+- **源语言 = Whisper 自动检测、不限**（`Job.source_lang` 留空即由 ASR 出 `Transcript.source_language`；免费、用户无需选源语）。
+- **目标语言 = commercial-safe 广集**（外贸出海受众 → 尽量多接；但**受商用安全 TTS 边界约束**：piper 逐模型 license-checked + MeloTTS 6 语；**edge-tts 仅非商用实验 lane、不作默认商用输出**）。
+- **registry 驱动 + 懒加载缓存（不 bake 全部）**：每目标语模型 **license / 质量 / sha256 逐语 vet（不可跳）**；核心常用语 bake 进镜像，其余 sha256 校验后**懒加载缓存到 worker 持久卷**（§6）。
+- **首批 = 好模型语**（en/es/fr/de/it/pt/zh/ja/ko/ru… 起步，随 vet 随加）。
+- **无 commercial-safe TTS 的目标语 → fail-closed + 文案**（`no_model_policy`，**不静默落 edge-tts**，§13/§14）。
+
 **付费安全（红线核心）：** 移植**完整** `PAID_PROVIDERS` 内核集（动笔时从真实 `config.py` 全量枚举，**含字符串名无注册 adapter 的条目**）+ `is_paid_provider()` + 每 provider `ProviderInfo.paid`；`select()` 三重 guard（① 字符串级构造前拦 ② `info.paid` ③ auto 路径跳过任何 paid）；**MVP `allow_paid` 恒 false**（§14 **不可改**，红线锁）；`'backend'` 等字符串-only 付费名无 factory 是设计正确（勿删）。
 
 **5 条不变量进 CI：** ① paid 标志==名称集(registry 内) ② `AUTO_LADDER` 全免费 ③ `select(kind,None,False)` 永不返付费 ④ 显式付费名无 `allow_paid` 必抛 `PaidProviderBlocked` ⑤ **字符串-only 付费名（无 factory）`allow_paid=False` 下仍抛 `PaidProviderBlocked`**。
@@ -157,7 +164,7 @@ loop:
 - **租约/心跳/重排（H1，单 job 级）**：claim 置 `lease_expires_at = now + cfg.lease_ttl_sec`（默认 180s）；**独立心跳线程每 `cfg.heartbeat_interval_sec`（默认 30s）续租**（不只靠 stage 边界 progress——单阶段可能 >180s）；`cfg.job_hard_timeout_sec`（默认 2700=45min）封顶；超 lease 由 sweeper 重排（`attempt < cfg.max_attempts` 默认 2，即初跑 + 1 次）否则 `worker_lost`。
 - **并发 ≤ `cfg.worker_concurrency`**（默认 2）；**预留 ≥`cfg.light_slot_reserve`（默认 1）槽位给短/字幕 job**（`free_min_share`：长 job 最多占其余槽，短 job 永远有槽、不被长 job 堵死；**运行中不抢占**——避白算 + 弱箱 OOM，v3.3）；云 ASR 后字幕-only 极轻（无 TTS）可与长 job 并行；**per-job 磁盘预算**派生自 per-mode 时长 cap；启动清孤儿目录。
 - **鉴权 + secrets（决策 B）**：Oracle 箱上**只放 bootstrap worker 共享密钥**（root-600、不进镜像/git、双密钥 current+next 零停机轮换）；**免费 provider 凭据启动时从 `GET /internal/credentials` 拉（TLS + 共享密钥认证）、仅在内存**——箱磁盘无 provider key，被黑 blast radius 最小。worker 不接任何用户/付费 key。
-- **部署（Oracle A1 常驻，ARM）**：镜像 **linux/arm64**（buildx 多架构 arm64+amd64，兼小 VM 备机）；**pin-sha256 模型烤进镜像**（piper 起步语言 .onnx → 即时可用、可复现；**v3.3 hosted 去 faster-whisper bake——ASR 走云**，faster-whisper 仅 cli/self-host 镜像）；`docker-compose restart: unless-stopped` 常驻，**claim 长轮询保持非 idle**（避 Oracle 7 天 idle 回收）；崩溃/重启自起 + 清孤儿 workdir；实例被回收 = ops 事故 → 小 VM 备 / IaC 重建。
+- **部署（Oracle A1 常驻，ARM）**：镜像 **linux/arm64**（buildx 多架构 arm64+amd64，兼小 VM 备机）；**模型供应链（core bake + 懒加载缓存）**：镜像 bake **核心常用语 piper `.onnx`**（即时可用、可复现）；**其余目标语模型 sha256 校验后懒加载缓存到 worker 持久卷**（不 bake 全部——广目标集随 vet 随加、不撑爆镜像；实例被回收→重建后按需重拉、sha256 守）；**v3.3 hosted 去 faster-whisper bake——ASR 走云**，faster-whisper 仅 cli/self-host 镜像；`docker-compose restart: unless-stopped` 常驻，**claim 长轮询保持非 idle**（避 Oracle 7 天 idle 回收）；崩溃/重启自起 + 清孤儿 workdir；实例被回收 = ops 事故 → 小 VM 备 / IaC 重建。
 - **kill-switch**：`cfg.accept_new_jobs=false`（§14，手动 / 成本阈值自动）即让 `POST /api/jobs` 拒绝-带文案。
 
 ---
@@ -288,6 +295,7 @@ loop:
 | `log_retention` | job_meta 30d / abuse 90d / takedown 180d | 与产物 24h 两类 |
 | `asr_default`（v3.3 云优先） | `groq`(whisper-large-v3-turbo)→`cloudflare`→`faster_whisper`(仅 cli/self-host) | hosted 不烤 faster-whisper；配额尽→`free_pool_exhausted`，瓶颈由 CPU 转日配额 |
 | `tts_model_registry` / `no_model_policy` | registry(lang/voice/license/sha256/size/enabled)；无模型 **fail-closed + 文案**（不默认落 edge-tts）；MeloTTS 确认 ToS 后作显式 experimental fallback | — |
+| `target_languages`(起步首批) / `model_cache`（v3.3） | en/es/fr/de/it/pt/zh/ja/ko/ru… 好模型语先上、随 vet 随加；核心 bake + 其余 sha256 懒加载缓存到持久卷 | 源语走 Whisper **自动检测不限**；目标受 commercial-safe TTS 边界约束、逐语 vet |
 | `aigc_marking_enabled` / `aigc_explicit_form` | 默认开；`tail_notice`（片尾 1s）+ metadata + SRT NOTE + 下载页披露 | 开关高敏可调（关闭需 audited ack、责任自负），形态可调，§14 |
 
 **待校准 / 待确认（非数值开关）：** AIGC 显式标确切措辞/位置（律师，M1 前定可测默认即可）；内容审核 proactive/CSAM 何时纳入（M3 gate）；R2 是否支持签精确 `Content-Length`（实施时验）。
@@ -311,7 +319,7 @@ loop:
 | 开关 | `accept_new_jobs`(总闸/maintenance) · `kill_switch`(手动 + 阈值自动) · 每免费 provider `enabled` · `edge_tts_experimental_lane`(off) · `cf_melotts_fallback` · `free_pool_auto_degrade` |
 | 留存 | `artifact_ttl_hours`(AD-17 内) · `log_retention`{job_meta/abuse/takedown} |
 | 成本 | free-pool 预算/阈值（auto-degrade / kill-switch 触发点）· 告警阈值 |
-| 模型 | `tts_model_registry`(每模型 enabled) · `asr_default` · `no_model_policy` |
+| 模型 | `tts_model_registry`(每模型/**每目标语 `enabled`**) · `asr_default` · `no_model_policy` · **`model_cache`（懒加载到持久卷的开关/容量上限，v3.3）** · **`target_languages`（起步首批启用集）** |
 | 合规文案 | `takedown_contact` · `aigc_marking_enabled`(**高敏项：默认开；关闭需 audited acknowledgment、责任项目主自负——项目主决策**) · `aigc_explicit_form`(tail_notice/corner_label/disclosure_only) · AUP/隐私告知版本指针 |
 
 **🔒 不可改（红线锁，代码/CI）：** `allow_paid`=false 恒定 · `PAID_PROVIDERS` + 5 不变量 · SSRF 防线（无 yt-dlp / ffmpeg 协议白名单 / worker egress 限制）· autodub-core 硬边界 · presign 的 HEAD 校验 / key 派生逻辑。
