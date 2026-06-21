@@ -85,7 +85,7 @@ for 批次 in DAG 拓扑序:
 
 - **i18n 完成**（启动总闸，项目主告知）。
 - **GitHub CodeX bot：已确认有**（PR 上 `@CodeX review`）。
-- **项目主提供**（按单元，见 backlog §4）：CF 账号(含 D1 remote) / Turnstile / 免费 provider key(注入 CF secrets) / Oracle A1 arm64 / 独立域名 + 律师审 AD-14。
+- **项目主提供**（按单元，见 backlog §4）：CF 账号(含 D1 remote) / Turnstile / 免费 provider key(注入 CF secrets) / **独立账号 x86 VPS**（dev=闲置 Volcano / prod=独立 Hetzner 账号，Oracle 弃用） / 独立域名 + 律师审 AD-14。
 - pilot 时创建 `status:*` 标签 + 建 `IMPLEMENTATION_LOG.md`。
 
 ---

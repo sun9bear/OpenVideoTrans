@@ -8,7 +8,7 @@
 
 > **执行顺序门：** 本方案是**计划文档**，现在即可写定。**实质代码实施押在上游商业线 i18n 完成之后**（母文档 §6）。本文给出"第一周改哪些文件"的落地蓝图，代码动笔以 i18n 完成为准。
 
-> **修订史：** **v2** 纳入 6 路多 agent 对抗复审 26 项 + 3 决策（① 仅直传去 yt-dlp；② CF Queues 首选 + Oracle A1 常驻主 host；③ 境外/海外用户·不备案·EU 式标识）。**v3** 纳入 CodeX 评审 4 项：R2 presign 改"签发-session + PUT 后 HEAD 校验"（content-length-range 不当硬依赖）；ffmpeg/ffprobe **自身 SSRF**（playlist/外链协议）防线；全局**分钟池**；AIGC 标识定**可测 MVP 默认形态**。并把灰度起步默认值定下来 + **新增 §14 运行时配置（后台可配，含"可调 vs 红线锁"两类分法）**。**v3.1（项目主决策）：AIGC 标识开关由红线锁改为🟢高敏可调——默认开、关闭需 audited acknowledgment、责任项目主自行承担；标识能力代码路径始终保留，§14 只控开关、不删能力。** **v3.2（CodeX 二轮，锁定为执行基线）：① `queue_backend` 改 break-glass（生产锁 `cf_queues`，`d1` 仅 dev/事故 + 审计）；② 上传会话生命周期（`UploadSession` pending/verified/consumed/expired + 1h TTL + 孤儿源清理）；③ 配额扣减幂等（`counted_job/counted_minutes/refunded` 绑 `claim_version`，跨重排不双扣）；④ AIGC 关闭 = 结构化 jurisdiction override（地区/原因/操作者/时间）；⑤ 设置分"创建快照 vs 实时" + `Job.settings_version`；⑥ D1-claim 并发 spike 前置为 T2.0 硬门槛。** **v3.3（项目主功能增量）：① 输出模式可选——`output_mode` 字幕only/配音only/both × `subtitle_delivery` SRT/烧录/both × `subtitle_lang` 仅目标/双语（创建前选，pipeline 条件跑 tts/align）；② 默认 ASR 改云优先 `groq→cloudflare`（hosted 去本地 whisper bake，faster_whisper 退 cli/self-host），瓶颈由弱箱 CPU 转免费日配额；③ per-mode 时长 cap（字幕-only ~30min / 配音 ~5–10min / 字幕+烧录 中等）；④ §8 改单 lane **优先队列**（SPT 偏置 + aging 防饿死 + 预留 light 槽位、运行中不抢占；全 WFQ 仍留 #2）；⑤ 长视频透明度（创建前警示 + `processing_timeout` error_code）；⑥ AIGC 标识按 `output_mode` 条件化（字幕=机翻轻披露 / 配音=合成语音标识）。** **v4（CodeX 三轮 + 语言精化）：① egress allowlist = CP/R2 + enabled provider 域名（修 §11 与 §6 冲突）+ 封 private/IMDS/playlist；② 云 ASR = 免费配额 provider（非绝对 $0）+ 必备 `asr_chunker`（**compress-first：先抽 16k mono + Opus/FLAC 压缩，多数时长一次请求即可；仍超 provider 限额才切块合并**，v4.1 项目主微调）；③ D1=权威 worklist + worker 长轮询（正确性）+ queue reconciler（CF Queues 24h retention 延迟兜底，sweeper 第④职责）；④ `burned`/`both` 烧字幕降 M2.1/feature-flag，M2 必绿=`subtitle_only+srt`+配音；⑤ admin 边界写硬（open 仅 schema/validator/safe-defaults）；⑥ 语言精化——目标语**按 output_mode 分层**（字幕走 MT 广集 / 配音才需 TTS-vet locale）、`language_capabilities` registry 单一真源、BCP-47 locale、源语 `hint` 可覆盖检测、新 error_code `unsupported_language_pair`/`no_tts_model_for_language`；⑦ 优先级锁确定性 comparator；母文档 AD-16/§9.6 泛化。**
+> **修订史：** **v2** 纳入 6 路多 agent 对抗复审 26 项 + 3 决策（① 仅直传去 yt-dlp；② CF Queues 首选 + Oracle A1 常驻主 host（**2026-06 更新：Oracle 注册受阻已弃，改独立账号 x86 VPS，见 §1/§6**）；③ 境外/海外用户·不备案·EU 式标识）。**v3** 纳入 CodeX 评审 4 项：R2 presign 改"签发-session + PUT 后 HEAD 校验"（content-length-range 不当硬依赖）；ffmpeg/ffprobe **自身 SSRF**（playlist/外链协议）防线；全局**分钟池**；AIGC 标识定**可测 MVP 默认形态**。并把灰度起步默认值定下来 + **新增 §14 运行时配置（后台可配，含"可调 vs 红线锁"两类分法）**。**v3.1（项目主决策）：AIGC 标识开关由红线锁改为🟢高敏可调——默认开、关闭需 audited acknowledgment、责任项目主自行承担；标识能力代码路径始终保留，§14 只控开关、不删能力。** **v3.2（CodeX 二轮，锁定为执行基线）：① `queue_backend` 改 break-glass（生产锁 `cf_queues`，`d1` 仅 dev/事故 + 审计）；② 上传会话生命周期（`UploadSession` pending/verified/consumed/expired + 1h TTL + 孤儿源清理）；③ 配额扣减幂等（`counted_job/counted_minutes/refunded` 绑 `claim_version`，跨重排不双扣）；④ AIGC 关闭 = 结构化 jurisdiction override（地区/原因/操作者/时间）；⑤ 设置分"创建快照 vs 实时" + `Job.settings_version`；⑥ D1-claim 并发 spike 前置为 T2.0 硬门槛。** **v3.3（项目主功能增量）：① 输出模式可选——`output_mode` 字幕only/配音only/both × `subtitle_delivery` SRT/烧录/both × `subtitle_lang` 仅目标/双语（创建前选，pipeline 条件跑 tts/align）；② 默认 ASR 改云优先 `groq→cloudflare`（hosted 去本地 whisper bake，faster_whisper 退 cli/self-host），瓶颈由弱箱 CPU 转免费日配额；③ per-mode 时长 cap（字幕-only ~30min / 配音 ~5–10min / 字幕+烧录 中等）；④ §8 改单 lane **优先队列**（SPT 偏置 + aging 防饿死 + 预留 light 槽位、运行中不抢占；全 WFQ 仍留 #2）；⑤ 长视频透明度（创建前警示 + `processing_timeout` error_code）；⑥ AIGC 标识按 `output_mode` 条件化（字幕=机翻轻披露 / 配音=合成语音标识）。** **v4（CodeX 三轮 + 语言精化）：① egress allowlist = CP/R2 + enabled provider 域名（修 §11 与 §6 冲突）+ 封 private/IMDS/playlist；② 云 ASR = 免费配额 provider（非绝对 $0）+ 必备 `asr_chunker`（**compress-first：先抽 16k mono + Opus/FLAC 压缩，多数时长一次请求即可；仍超 provider 限额才切块合并**，v4.1 项目主微调）；③ D1=权威 worklist + worker 长轮询（正确性）+ queue reconciler（CF Queues 24h retention 延迟兜底，sweeper 第④职责）；④ `burned`/`both` 烧字幕降 M2.1/feature-flag，M2 必绿=`subtitle_only+srt`+配音；⑤ admin 边界写硬（open 仅 schema/validator/safe-defaults）；⑥ 语言精化——目标语**按 output_mode 分层**（字幕走 MT 广集 / 配音才需 TTS-vet locale）、`language_capabilities` registry 单一真源、BCP-47 locale、源语 `hint` 可覆盖检测、新 error_code `unsupported_language_pair`/`no_tts_model_for_language`；⑦ 优先级锁确定性 comparator；母文档 AD-16/§9.6 泛化。**
 
 ---
 
@@ -48,7 +48,7 @@
 └──┬───────────────── R2（源/产物） ────────────────────────────────┘
    │ ④ pull-claim / ⑥ 回写+心跳
    ▼
-┌── media-worker（Python Docker, 外置, always-on Oracle A1） ───────┐
+┌── media-worker（Python Docker, 外置, 独立账号 x86 VPS 常驻） ──────┐
 │  长轮询 claim → 取源(R2) → ffprobe 准入(超 cap fail+删源)         │
 │  → autodub-core 阶段(ffmpeg 协议白名单; 字幕模式跳 tts/align;     │
 │     mux 按 output_mode 条件嵌 AIGC 标识/烧字幕)                    │
@@ -59,7 +59,7 @@
 
 **队列（决策 ②，对齐 AD-16 "CF Queues 首选"）：** 入队投递 **CF Queues Free**；瘦 CF Worker consumer 仅标记可认领/重试/DLQ（不跑 ffmpeg）；外置 worker 经 `claim` 拉重活。`queue_adapter` 封装 `enqueue/claim`，D1 原子认领作 labeled fallback / local-dev。
 
-**主机（决策 ②）：** Oracle A1 always-free 常驻为主（避 HF sleep × pull-claim 矛盾）；小 VM 备；HF Free 仅 dev/CI。月成本上限 ≤$20（AD-3，envelope，勿硬编额度）。
+**主机（决策 ②，host 选型 2026-06 更新）：** 媒体 worker = **独立账号 x86 VPS** 常驻（pull-claim 纯出站 + `restart:unless-stopped` + claim 长轮询保活）。**Oracle A1 注册受阻（拒虚拟/预付卡）→ 弃**。**早期 dev = 闲置 Volcano 2GB（$0、独立云、AD-15 干净）**；**生产（M2-CLOSE/M3）= 独立 Hetzner 账号（不与商业 SaaS 同账号——商业站在 Hetzner，同账号会被 OVT 滥用/封号连累）的 CX23/CPX21 4GB（Regular Performance、amd64、需要时才买）**。两台可并行当 worker（多 worker pull-claim 支持）。HF Free 仅 dev/CI（休眠+临时盘）。月成本上限 ≤$20（AD-3，envelope）。
 
 **源（决策 ①）：** 托管 Tier 1 仅直传 R2 对象；worker 镜像无 yt-dlp，URL 摄取分支托管侧关闭（只 cli/local-runner 开）。
 
@@ -72,7 +72,7 @@
 | `packages/schemas/` | job / segment / transcript / cue / `manifest.json`(projection) / error-code / `language_capabilities` 的 JSON Schema + Pydantic + 生成 TS 类型 | **先行**；schema→Pydantic/TS **codegen + CI diff** 防漂移；命名遵 [CONTEXT.md](../CONTEXT.md)（`Job`/`manifest.json`，不用 `JobManifest`） |
 | `packages/autodub-core/` | 移植 free-video-dub 7 阶段 + contracts + ffmpeg utils + JobPaths（命名空间）+ 写 manifest + **AIGC 标识 mux** | 硬边界：不 import gateway / 不读权益 / 不处理支付 / 不接真实 key |
 | `packages/provider-adapters/` | 免费 ladder + registry + `select()` 三重 guard + **完整 `PAID_PROVIDERS`** + 5 不变量 | MVP 只含免费 provider |
-| `workers/media-worker/` | Dockerfile（hosted：ffmpeg/ffprobe/piper(+模型)/edge-tts；**ASR 走云、不 bake faster-whisper**；**无 yt-dlp**。faster-whisper 仅 cli/self-host 镜像）+ claim/30s 心跳 loop + **条件管线（字幕模式跳 tts/align）** + ffmpeg 协议白名单 + R2 client + 清盘 | 主 Oracle A1 常驻 |
+| `workers/media-worker/` | Dockerfile（hosted：ffmpeg/ffprobe/piper(+模型)/edge-tts；**ASR 走云、不 bake faster-whisper**；**无 yt-dlp**。faster-whisper 仅 cli/self-host 镜像）+ claim/30s 心跳 loop + **条件管线（字幕模式跳 tts/align）** + ffmpeg 协议白名单 + R2 client + 清盘 | 独立账号 x86 VPS 常驻（dev=Volcano/prod=独立 Hetzner） |
 | `apps/control-plane/` | CF Workers：公开端点 + `/internal`（claim/progress/complete/fail/config/credentials）+ 瘦 Queue consumer + Cron sweeper（四职责）+ D1 schema(jobs/settings) + KV 配置缓存 + `queue_adapter` + **admin settings API（hosted-private；open 侧仅交付 settings schema / validator / safe-defaults，线上 API/UI/数值不进开源，v4 CodeX P2.6）** | TS；wrangler |
 | `apps/web/` | CF Pages：**Svelte + Vite（CSR 静态，见 [ADR-0003](adr/0003-frontend-svelte.md)）**；上传/进度/下载单页 + **输出模式选择器**（字幕/配音/both × SRT/烧录 × 仅目标/双语，开始前选）+ **长视频警示**（advisory 时长触发：排队不固定 + 处理超时风险，引导字幕-only/短视频）+ 文案（排队/限额/保留期/AIGC 披露/隐私）；**UI 先中文**（多语言下一阶段）、**匿名优先**（MVP 不做登录，anon_id=签名 cookie）；admin 配置页属私有运营面（§14/AD-14，不在 open 前端） | TS |
 | `cli/local-runner/` | 薄封装 CLI（**URL 摄取仅此开**） | 无控制面依赖 |
@@ -142,7 +142,7 @@
 
 ---
 
-## 6. `media-worker`（Python Docker，外置，主 Oracle A1 常驻）
+## 6. `media-worker`（Python Docker，外置，独立账号 x86 VPS 常驻）
 
 **claim / 心跳 loop：**
 ```
@@ -174,8 +174,8 @@ loop:
 - **ffmpeg/ffprobe SSRF 防线（v3，CodeX P1；v4 egress 修正）**：① 格式 allowlist（拒 m3u8/playlist/concat）；② ffmpeg `-protocol_whitelist file,crypto`（禁外链协议）；③ **主机层 nftables egress allowlist = 控制面 + R2 + `enabled provider 域名`（ASR/MT/TTS 云 provider 必需，v4 修正——不可仅 CP/R2）；显式封 IMDS `169.254.169.254` + RFC1918 内网 + 任意 URL/playlist 外链**；④ CI 负测"伪装 playlist 不触网"（§11/§12）。
 - **租约/心跳/重排（H1，单 job 级）**：claim 置 `lease_expires_at = now + cfg.lease_ttl_sec`（默认 180s）；**独立心跳线程每 `cfg.heartbeat_interval_sec`（默认 30s）续租**（不只靠 stage 边界 progress——单阶段可能 >180s）；`cfg.job_hard_timeout_sec`（默认 2700=45min）封顶；超 lease 由 sweeper 重排（`attempt < cfg.max_attempts` 默认 2，即初跑 + 1 次）否则 `worker_lost`。
 - **并发 ≤ `cfg.worker_concurrency`**（默认 2）；**预留 ≥`cfg.light_slot_reserve`（默认 1）槽位给短/字幕 job**（`free_min_share`：长 job 最多占其余槽，短 job 永远有槽、不被长 job 堵死；**运行中不抢占**——避白算 + 弱箱 OOM，v3.3）；云 ASR 后字幕-only 极轻（无 TTS）可与长 job 并行；**per-job 磁盘预算**派生自 per-mode 时长 cap；启动清孤儿目录。
-- **鉴权 + secrets（决策 B）**：Oracle 箱上**只放 bootstrap worker 共享密钥**（root-600、不进镜像/git、双密钥 current+next 零停机轮换）；**免费 provider 凭据启动时从 `GET /internal/credentials` 拉（TLS + 共享密钥认证）、仅在内存**——箱磁盘无 provider key，被黑 blast radius 最小。worker 不接任何用户/付费 key。
-- **部署（Oracle A1 常驻，ARM）**：镜像 **linux/arm64**（buildx 多架构 arm64+amd64，兼小 VM 备机）；**模型供应链（core bake + 懒加载缓存）**：镜像 bake **核心常用语 piper `.onnx`**（即时可用、可复现）；**其余目标语模型 sha256 校验后懒加载缓存到 worker 持久卷**（不 bake 全部——广目标集随 vet 随加、不撑爆镜像；实例被回收→重建后按需重拉、sha256 守）；**v3.3 hosted 去 faster-whisper bake——ASR 走云**，faster-whisper 仅 cli/self-host 镜像；`docker-compose restart: unless-stopped` 常驻，**claim 长轮询保持非 idle**（避 Oracle 7 天 idle 回收）；崩溃/重启自起 + 清孤儿 workdir；实例被回收 = ops 事故 → 小 VM 备 / IaC 重建。
+- **鉴权 + secrets（决策 B）**：worker 箱上**只放 bootstrap worker 共享密钥**（root-600、不进镜像/git、双密钥 current+next 零停机轮换）；**免费 provider 凭据启动时从 `GET /internal/credentials` 拉（TLS + 共享密钥认证）、仅在内存**——箱磁盘无 provider key，被黑 blast radius 最小。worker 不接任何用户/付费 key。
+- **部署（独立账号 x86 VPS 常驻）**：镜像 **linux/amd64**（buildx 仍可多架构、便于换箱）；**模型供应链（core bake + 懒加载缓存）**：镜像 bake **核心常用语 piper `.onnx`**（即时可用、可复现）；**其余目标语模型 sha256 校验后懒加载缓存到 worker 持久卷**（不 bake 全部——广目标集随 vet 随加、不撑爆镜像；换箱/重建后按需重拉、sha256 守）；**v3.3 hosted 去 faster-whisper bake——ASR 走云**，faster-whisper 仅 cli/self-host 镜像；`docker-compose restart:unless-stopped` 常驻 + claim 长轮询保活；**安全组/防火墙入站只开 SSH(22)**（worker 纯出站）；**2GB 档（Volcano dev）加 2–4GB swap + 并发 1；4GB 档（独立 Hetzner prod）并发 1–2**；崩溃/重启自起 + 清孤儿 workdir；箱被回收/换箱 = ops 事故 → IaC 重建。**AD-15：生产 VPS 必在独立账号（非商业 SaaS 的 Hetzner 账号）。**
 - **kill-switch**：`cfg.accept_new_jobs=false`（§14，手动 / 成本阈值自动）即让 `POST /api/jobs` 拒绝-带文案。
 
 ---
@@ -192,7 +192,7 @@ loop:
 
 > **v3（CodeX P1）**：R2 的 S3 presigned **PUT** 不支持 POST-policy 式 `content-length-range`；故**不以 range 作硬上限**，改"签发-session 声明 + PUT 后 HEAD 校验真实值、超限删对象不建 job"。能否签精确 `Content-Length` 留实施时验 R2，不当硬依赖。
 
-**内部端点（worker 鉴权）：** `config`（拉 §14 运行时配置）；`credentials`（决策 B：拉免费 provider 凭据，TLS + 共享密钥认证，worker 仅内存持有、不落 Oracle 盘）；`claim`（原子 `queued→running` + 置 lease，乐观锁 `claim_version`）；`progress`(=心跳续租)；`complete`/`fail`（**幂等**：仅 `WHERE status='running' AND claim_version` 匹配生效；重复/迟到 200 no-op；首个终态胜；产物写 `claim_version` 前缀 key 防僵尸覆盖）。
+**内部端点（worker 鉴权）：** `config`（拉 §14 运行时配置）；`credentials`（决策 B：拉免费 provider 凭据，TLS + 共享密钥认证，worker 仅内存持有、不落 worker 盘）；`claim`（原子 `queued→running` + 置 lease，乐观锁 `claim_version`）；`progress`(=心跳续租)；`complete`/`fail`（**幂等**：仅 `WHERE status='running' AND claim_version` 匹配生效；重复/迟到 200 no-op；首个终态胜；产物写 `claim_version` 前缀 key 防僵尸覆盖）。
 
 **D1 表：** `jobs`（`id, anon_or_user_id, status, current_stage?, tier, source_type, source_key, upload_session_id, declared_bytes, verified_bytes, source_lang_hint?, detected_source_lang?, source_lang_confidence?, target_lang, output_mode, subtitle_delivery, subtitle_lang, plan(json), settings_version, priority, advisory_duration_ms?, enqueue_at, deadline_at, created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, video_key?, srt_key?, error_code?, error_detail?, attempt, claim_version, counted_job, counted_minutes, refunded`）；`upload_sessions`（`upload_session_id, anon_or_user_id, source_key, declared_bytes, declared_type, status, created_at, expires_at`，1h TTL）；`abuse_counters`（per-IP/anon/user + 全局 jobs + 全局 video_minutes，键 `(scope,id,day)`）；`settings`（§14）。**KV** 缓存 settings 热读。
 
@@ -278,7 +278,7 @@ loop:
 
 ## 12. 部署 / 验证 / 里程碑
 
-**部署：** `deploy/cloudflare/wrangler.toml`（Workers+Pages+R2+D1+Queues+KV）+ D1 迁移（jobs/settings）；`deploy/docker-compose/` 跑 worker（Oracle A1 常驻，**arm64 镜像 + `restart: unless-stopped`**，详见 §6）。dev：D1 local + R2 模拟 + queue_adapter 走 D1 fallback。
+**部署：** `deploy/cloudflare/wrangler.toml`（Workers+Pages+R2+D1+Queues+KV）+ D1 迁移（jobs/settings）；`deploy/docker-compose/` 跑 worker（独立账号 x86 VPS 常驻，**amd64 镜像 + `restart:unless-stopped`**，详见 §6）。dev：D1 local + R2 模拟 + queue_adapter 走 D1 fallback。
 
 **可观测性基线：** 结构化 JSON 日志（keyed by `job_id`）；指标 queued/running/done/failed、claim 时延、各阶段耗时、免费池剩余、全局分钟池余额、worker 末次心跳；≥2 告警（`running` 超 lease；池/成本逼近 cap）。
 
@@ -294,7 +294,7 @@ loop:
 
 ## 13. 灰度起步默认值（v3 定，**全部后台可配 §14**）+ 待校准
 
-> v2/v3 已决：① 仅直传去 yt-dlp；② CF Queues 首选 + Oracle A1 主 host；③ 境外/海外·不备案·EU 式标识·务实审核。下表数值采纳 CodeX 灰度起步，**均为默认、可经 §14 后台改、实测后调**。
+> v2/v3 已决：① 仅直传去 yt-dlp；② CF Queues 首选 + 独立账号 x86 VPS 主 host（Oracle 弃用）；③ 境外/海外·不备案·EU 式标识·务实审核。下表数值采纳 CodeX 灰度起步，**均为默认、可经 §14 后台改、实测后调**。
 
 | 项 | 默认 | 备注 |
 |---|---|---|
@@ -302,7 +302,8 @@ loop:
 | `max_upload_bytes` | 500MB | 偏保守，可再降 |
 | `daily_cap_ip/anon` · `daily_cap_user` | 1 · 2 | — |
 | `daily_cap_global_jobs` · `daily_cap_global_video_minutes` | 20-30 · 100-120 | 双池先到先停 |
-| `worker_concurrency` · `light_slot_reserve` | 2 · 1 | AD-10；预留 1 槽给短/字幕 job（v3.3，§6/§8） |
+| `worker_concurrency` · `light_slot_reserve` | **1**（2GB 档）/ 1–2（4GB 档）· 1 | AD-10；x86 VPS 内存定（原 2 是 Oracle 12GB 假设，现按箱调）；预留 1 槽给短/字幕 job（v3.3，§6/§8） |
+| worker host / swap（2026-06 host 选型） | dev=闲置 Volcano 2GB（+2–4GB swap、并发1）/ prod=独立 Hetzner 账号 4GB（并发1–2）；amd64 | Oracle 弃用（拒虚拟卡）；**AD-15 生产独立账号**；安全组入站仅 SSH；可双机并行 |
 | `output_mode` · `subtitle_delivery` · `subtitle_lang`（默认值，v3.3） | `dub_only` · `srt` · `target` | 用户创建前可改；默认配音/SRT/仅目标 |
 | 优先调度（v3.3） | SPT 偏置（字幕>配音、短>长，用 advisory）+ aging + per-job `deadline` | 单 lane 内，§8；advisory 仅排序、硬 cap 仍 ffprobe |
 | `lease_ttl_sec` · `heartbeat_interval_sec` · `job_hard_timeout_sec` · `max_attempts` | 180 · 30 · 2700 · 2 | 心跳独立计时器 |
@@ -315,7 +316,7 @@ loop:
 
 **待校准 / 待确认（非数值开关）：** AIGC 显式标确切措辞/位置（律师，M1 前定可测默认即可）；内容审核 proactive/CSAM 何时纳入（M3 gate）；R2 是否支持签精确 `Content-Length`（实施时验）。
 
-> **平台事实须实施时现查**（母文档反漂移 §0.5）：CF Queues/R2/D1/KV/Workers AI 免费层额度、Oracle A1/HF 规格已漂移多次，代码动笔前以官方文档为准、勿照搬本文数值。
+> **平台事实须实施时现查**（母文档反漂移 §0.5）：CF Queues/R2/D1/KV/Workers AI 免费层额度、VPS（Volcano/Hetzner）规格与价格各异，代码动笔前以官方文档为准、勿照搬本文数值。
 >
 > **免费云 ASR 配额参考（2026-06 查，实施复核——会漂移）**：**Groq** whisper-large-v3-turbo free = **2,000 请求/天 + 7,200 audio-sec/小时（≈120 audio-min/小时、~2,880/天）+ 单文件 25MB（compress-first 后不 binding）+ 10s 最小计费**；**CF Workers AI** = **10,000 neurons/天（00:00 UTC 重置，与 CF MT/TTS 共享）÷ 46.63 neurons/audio-min ≈ ~214 audio-min/天**。**合并 ≈ ~3,000 audio-min/天**（Groq 主力，轮换两池相加，§5）。→ **字幕-only 受此 ASR 池卡、配音受 worker CPU 卡**；上表全局分钟池 100–120/天**远低于此 ASR 上限 = 保守起步留大量 headroom**，实测后可上调（Q3 方法论）。来源：[Groq STT docs](https://console.groq.com/docs/speech-to-text)·[Groq rate limits](https://console.groq.com/docs/rate-limits)·[CF Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/)。
 
@@ -374,7 +375,7 @@ loop:
 ### 轨 2 — 云 walking skeleton（与轨 1 并行，依赖 Step 0 schemas）
 - **T2.0（硬门槛，CodeX#6）** D1-claim 并发 spike：**20 consumer 抢 100 job**，验**无重复 claim / 租约过期可重领 / `attempt` 不超限**——**先于 T2.1 建任何东西**（若 D1 扛不住安全原子 claim，即提前把 CF Queues 拉前的信号；比接真实 worker 更早暴露风险）。
 - **T2.1** control-plane(CF Workers)：`uploads/sign` + **PUT 后 HEAD 校验** + `jobs` CRUD(D1，**含 v3.3 `output_mode`/`subtitle_*`/`priority`/`advisory_duration_ms`/`enqueue_at`/`deadline_at` 字段**) + `claim`(原子 queued→running + 置 lease，**按 §8 优先级排序取队首 + aging**) + `progress`(心跳) + `complete`/`fail`(幂等) + `download`(presigned GET)；`queue_adapter` = **D1-claim**。
-- **T2.2** 桩 worker(Python，连本地/Oracle CP)：`claim` → 输入原样拷成输出（不跑真管线）→ `complete`；**30s 独立心跳续租**；try/finally 清盘。
+- **T2.2** 桩 worker(Python，连本地/云 CP)：`claim` → 输入原样拷成输出（不跑真管线）→ `complete`；**30s 独立心跳续租**；try/finally 清盘。
 - **T2.3** sweeper(CF Cron)：租约过期重排（+ TTL 清理骨架）+ **（v4）queue reconciler**（重唤醒 stale `queued`）。**杀 worker 中途测试** → assert 自动重排（证 H1）；**worker 久宕 + queue message 过期 → assert reconciler/长轮询仍领起**。
 - **T2.4** abuse gate 骨架 + presign 绑定 CI + SSRF CI（无 yt-dlp / 格式 allowlist / 协议白名单 / **（v4）egress 放行 enabled provider 域名 + 封 private/IMDS/playlist**）。
 - **T2.5** fast-follow：`queue_adapter` 换 **CF Queues Free** + 瘦 consumer，证桥接。

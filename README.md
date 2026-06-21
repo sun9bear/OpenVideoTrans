@@ -37,7 +37,7 @@
 ## 架构分层（AD-16）
 
 - **控制面 = TypeScript on Cloudflare**（Pages + Workers + R2 + D1/KV + Queues）。选 CF 非 Vercel 的决定性理由是 **R2 零 egress 费**（视频大文件）。
-- **媒体重活 = Python Docker worker**，复用 `autodub-core`，部署 HF Free / Oracle A1 / 小 VM。
+- **媒体重活 = Python Docker worker**，复用 `autodub-core`，部署独立账号 x86 VPS（dev=闲置 Volcano / prod=独立 Hetzner 账号；Oracle A1 注册受阻已弃）。
 - **浏览器 WASM = Phase 2+ 推迟**（真免费算力，但只做确定性子集，MVP 不含）。
 - **核心契约语言无关，核心实现先 Python**（不为省钱全栈改语言）。
 

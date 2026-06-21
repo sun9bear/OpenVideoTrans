@@ -4,8 +4,8 @@
 **日期：** 2026-06-20
 
 ## 🔴 密钥铁律（先读）
-- **🟢 非密接线信息**（账号已建✓、资源名、account ID、桶名、库名、Turnstile **site** key、Oracle 公网 IP、域名）→ 填进本地 **`.prep-readiness.local.md`**（git 忽略，我读）。
-- **🔴 密钥/令牌**（API key、CF API token、DeepL key、Turnstile **secret** key、R2 secret、SSH 私钥、bootstrap 共享密钥）→ **只放金库**（CF Secrets / GitHub Secrets / Oracle 机器），manifest 里**只打勾 + 写 secret 名，绝不写值**。
+- **🟢 非密接线信息**（账号已建✓、资源名、account ID、桶名、库名、Turnstile **site** key、worker VPS 公网 IP、域名）→ 填进本地 **`.prep-readiness.local.md`**（git 忽略，我读）。
+- **🔴 密钥/令牌**（API key、CF API token、DeepL key、Turnstile **secret** key、R2 secret、SSH 私钥、bootstrap 共享密钥）→ **只放金库**（CF Secrets / GitHub Secrets / worker 机器），manifest 里**只打勾 + 写 secret 名，绝不写值**。
 - 代码只引用 secret **名字**，平台运行时注入——我全程不看明文。
 - 免费额度**漂移快**，用时按官方页复核（方案 §13）。
 
@@ -14,7 +14,7 @@
 |---|---|---|
 | **波1（M1，最少）** | 本地 dev 机：Node/pnpm、Python/uv、ffmpeg；（可选）Groq+DeepL key 供云 ASR/MT 单元测试 | M1 本地管线 |
 | **波2（M2）** | Cloudflare 全家桶 + API token + Turnstile + Groq/DeepL/Workers AI | M2 云闭环 |
-| **波3（M2-CLOSE/DEPLOY）** | Oracle A1 arm64 实例 + bootstrap 密钥 + GitHub 部署 secrets | 真管线上箱 |
+| **波3（M2-CLOSE/DEPLOY）** | 独立账号 x86 VPS（dev=闲置 Volcano / prod=独立 Hetzner 账号）+ bootstrap 密钥 + GitHub 部署 secrets | 真管线上箱 |
 | **波4（M3）** | 独立域名 + 律师审 AD-14 | 放量前 |
 
 ---
@@ -25,7 +25,7 @@
 
 1. **新建一个【独立】Cloudflare 账号**（**AD-15 强制**——商业 SaaS AIVideoTrans 在另一账号上，本项目运行时必须隔离）。同一登录下 "Add account" 即可、免费，**资源/免费配额/账单/封停半径全按账号隔离**；可选独立邮箱 + 独立付款方式更彻底。**绝不复用商业账号的任何 token / R2 桶 / secret / 资源**（只共享 autodub-core 代码、AD-13）。→ manifest：独立账号 ✓ + **Account ID**（Dashboard 右栏，🟢非密）。
 2. **R2**：建 bucket（建议名 `ovt-artifacts`）。→ manifest：桶名 🟢。
-   - **R2 S3 凭据**（供 Oracle worker 直传/取）：R2 → Manage API Tokens → 建 token（读写该桶）→ 得 **Access Key ID + Secret**。→ 🔴 放 CF Secrets（`R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`）+ Oracle，manifest 打勾。
+   - **R2 S3 凭据**（供 worker 直传/取）：R2 → Manage API Tokens → 建 token（读写该桶）→ 得 **Access Key ID + Secret**。→ 🔴 放 CF Secrets（`R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`）+ worker 箱，manifest 打勾。
 3. **D1**：建数据库（建议名 `ovt-db`）。→ manifest：库名 + **database ID** 🟢。
 4. **KV**：建 namespace（建议 `ovt-config`）。→ manifest：namespace ID 🟢。
 5. **Queues**：启用 Queues（Workers Free plan 含）；建队列（建议 `ovt-jobs`）。→ manifest：队列名 🟢。
@@ -36,25 +36,29 @@
 
 ## B. 免费 provider keys（M2；🔴 全进金库）
 
-10. **Groq**（云 ASR 主力 + MT 备）：console.groq.com 注册 → API Keys 建 key。→ 🔴 CF Secret `GROQ_API_KEY`（+ Oracle 经 /internal/credentials 拉，不落盘）。manifest 打勾。免费：~2000 请求/天 + 7200 audio-sec/小时 + 单文件 25MB。
+10. **Groq**（云 ASR 主力 + MT 备）：console.groq.com 注册 → API Keys 建 key。→ 🔴 CF Secret `GROQ_API_KEY`（+ worker 经 /internal/credentials 拉，不落盘）。manifest 打勾。免费：~2000 请求/天 + 7200 audio-sec/小时 + 单文件 25MB。
 11. **DeepL API Free**（MT 备）：deepl.com/pro-api 注册 Free → 得 Auth Key。→ 🔴 CF Secret `DEEPL_API_KEY`。manifest 打勾。免费：500k 字符/月。
 12. **Cloudflare Workers AI**：同 A.7（无单独 key，binding 调用）。
 13. （edge-tts：无 key、非商用实验 lane，默认不用，无需准备。）
 
-## C. Oracle Cloud A1（M2-CLOSE/DEPLOY，媒体 worker 常驻箱）
+## C. 媒体 worker 主机（x86 VPS；Oracle A1 注册受阻→改 VPS）
 
-14. **注册 Oracle Cloud**（Always Free）。
-15. **建 A1 实例**：Ampere **arm64**、Ubuntu LTS、当前免费规格 2 OCPU/12GB、含 boot volume。装 Docker + docker-compose。→ manifest：**公网 IP** 🟢（注：实例可能被 idle 回收，DEPLOY 用 restart:unless-stopped + claim 长轮询防回收）。
-16. **入站**：worker 是 **pull 模型、纯出站** → **无需开入站端口**（攻击面小）。
-17. **部署访问（供 CI 自动上箱）**：在箱上加一把**部署 SSH 公钥**到 `~/.ssh/authorized_keys`；对应**私钥** 🔴 放 **GitHub Actions Secret** `ORACLE_SSH_KEY`；另填 `ORACLE_HOST`(IP)/`ORACLE_USER`（🟢 可填 manifest 或作 GitHub 非密 var）。manifest 打勾。
+> **host 选型（2026-06）：** Oracle A1 弃用（拒虚拟/预付卡）。改 **x86 VPS、pull 模型、纯出站**。
+> **早期 dev = 闲置 Volcano 2GB（$0、独立云）**；**生产 = 独立 Hetzner 账号 CX23/CPX21 4GB**。
+
+14. **dev 箱（早期 M1–M2）**：用已付费**闲置 Volcano 2GB**（Ubuntu、装 Docker+compose）。→ manifest：公网 IP 🟢 + 已加 2–4GB swap。
+15. **生产箱（M2-CLOSE/M3，需要时买）**：**新开一个【独立 Hetzner 账号】**（**不是商业 SaaS `AIVideoTrans.US` 那个账号**，AD-15——同账号会被 OVT 滥用/封号连累商业站）→ 建 **CX23 或 CPX21（Regular Performance、x86/amd64、2C/4GB）**、Ubuntu LTS、装 Docker+compose。→ manifest：公网 IP 🟢。
+16. **入站**：worker **纯出站** → **入站只开 SSH(22)**（安全组/Firewall 限你的 IP/CI），其余全关。
+17. **部署访问（供 CI 自动上箱）**：箱上加**部署 SSH 公钥**到 `~/.ssh/authorized_keys`；对应**私钥** 🔴 放 **GitHub Actions Secret** `WORKER_SSH_KEY`；另填 `WORKER_HOST`(IP)/`WORKER_USER`（🟢 manifest 或 GitHub 非密 var）。**专用新密钥、不复用商业箱的 key**。manifest 打勾。
     - 这样 DEPLOY 由 GitHub Actions 自动上箱，我不接触私钥。
-18. **bootstrap 共享密钥**（worker↔控制面认证，决策 B）：本地生成一段随机长串 → 🔴 放 ① CF Secret `WORKER_BOOTSTRAP_KEY` ② Oracle 箱 `/etc/ovt/bootstrap.key`(root-600)。manifest 打勾。
+18. **bootstrap 共享密钥**（worker↔控制面认证，决策 B）：本地生成随机长串 → 🔴 放 ① CF Secret `WORKER_BOOTSTRAP_KEY` ② worker 箱 `/etc/ovt/bootstrap.key`(root-600)。manifest 打勾。
+19. **可选并行**：dev 与 prod 两台可**同时当 worker**（pull-claim 支持多 worker）；要扩容时叠加即可。
 
 ## D. GitHub（已大半就绪）
 
 19. **仓库**：`sun9bear/OpenVideoTrans` 已建 ✓（私有）。
 20. **CodeX bot**：PR 上 `@CodeX review` 已确认可用 ✓。
-21. **Actions Secrets**（仓库 Settings → Secrets and variables → Actions）：放上面所有 🔴（`CLOUDFLARE_API_TOKEN`、`ORACLE_SSH_KEY`、`ORACLE_HOST`、`ORACLE_USER`、必要时 `CLOUDFLARE_ACCOUNT_ID`）。manifest 打勾（写名不写值）。
+21. **Actions Secrets**（仓库 Settings → Secrets and variables → Actions）：放上面所有 🔴（`CLOUDFLARE_API_TOKEN`、`WORKER_SSH_KEY`、`WORKER_HOST`、`WORKER_USER`、必要时 `CLOUDFLARE_ACCOUNT_ID`）。manifest 打勾（写名不写值）。
 22. **分支保护**（建议但可选）：main 要求 PR + CI 通过；**不要**设"必须人工 review 才能合"（会卡里程碑内自动合并）——CodeX 作评审、CI 作客观门即可。→ manifest 记你的选择。
 
 ## E. 独立域名（M3，放量前）
@@ -74,11 +78,11 @@
 | Secret 名 | 放哪 | 用途 |
 |---|---|---|
 | `CLOUDFLARE_API_TOKEN` | GitHub Actions | wrangler 部署/CI |
-| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | CF Secrets (+Oracle) | R2 S3 直传/取 |
+| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | CF Secrets (+worker 箱) | R2 S3 直传/取 |
 | `TURNSTILE_SECRET_KEY` | CF Secrets | Turnstile 校验 |
-| `GROQ_API_KEY` | CF Secrets (+Oracle 内存) | 云 ASR/MT |
-| `DEEPL_API_KEY` | CF Secrets (+Oracle 内存) | MT |
-| `WORKER_BOOTSTRAP_KEY` | CF Secrets + Oracle root-600 | worker↔控制面认证 |
-| `ORACLE_SSH_KEY` / `ORACLE_HOST` / `ORACLE_USER` | GitHub Actions | CI 自动部署上箱 |
+| `GROQ_API_KEY` | CF Secrets (+worker 内存) | 云 ASR/MT |
+| `DEEPL_API_KEY` | CF Secrets (+worker 内存) | MT |
+| `WORKER_BOOTSTRAP_KEY` | CF Secrets + worker 箱 root-600 | worker↔控制面认证 |
+| `WORKER_SSH_KEY` / `WORKER_HOST` / `WORKER_USER` | GitHub Actions | CI 自动部署上箱（独立账号 VPS） |
 
 > 名字仅为约定，实现时如调整以 wrangler/Actions 配置为准；**值永不进仓、不进任何我读的文档**。
