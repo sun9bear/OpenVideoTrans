@@ -37,6 +37,7 @@
 ## B. 免费 provider keys（M2；🔴 全进金库）
 
 10. **Groq**（云 ASR 主力 + MT 备）：console.groq.com 注册 → API Keys 建 key。→ 🔴 CF Secret `GROQ_API_KEY`（+ worker 经 /internal/credentials 拉，不落盘）。manifest 打勾。免费：~2000 请求/天 + 7200 audio-sec/小时 + 单文件 25MB。
+    - **⚠️ 2026-06 注册受阻（`signup error`，疑地区风控）→ 临时绕过**：ASR 走 **CF Workers AI Whisper 主 + 本地 faster-whisper 兜底**；**MT 改 DeepL 优先**省 CF neurons 给 ASR（方案 §5）。Groq 后补即恢复主力。可拿 trace ID 发 Groq support / 换网络出口重试。
 11. **DeepL API Free**（MT 备）：deepl.com/pro-api 注册 Free → 得 Auth Key。→ 🔴 CF Secret `DEEPL_API_KEY`。manifest 打勾。免费：500k 字符/月。
 12. **Cloudflare Workers AI**：同 A.7（无单独 key，binding 调用）。
 13. （edge-tts：无 key、非商用实验 lane，默认不用，无需准备。）
