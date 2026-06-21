@@ -1,6 +1,6 @@
 # Track B · Tier 1 MVP 实施 Backlog（任务单元拆解）
 
-**状态：** **规划级 backlog v2（pre-i18n 可定；CodeX 审收口）**——由 [Tier 1 MVP 实施方案 v4](2026-06-20-track-b-tier1-mvp-implementation-plan.md) §15 经多 agent 分解 + 覆盖 critic + 依赖 DAG 校验产出，再吸收 CodeX backlog 复审（P1×3 + P2×5 + 小修）。
+**状态：** **规划级 backlog v2.1（pre-i18n 执行版，CodeX 三轮复审收口、可锁定）**——由 [Tier 1 MVP 实施方案 v4](2026-06-20-track-b-tier1-mvp-implementation-plan.md) §15 经多 agent 分解 + 覆盖 critic + 依赖 DAG 校验产出，再吸收 CodeX backlog 两轮复审（v2: P1×3 + P2×5 + 小修；v2.1: 6 处收紧）。
 **日期：** 2026-06-20
 **真源：** 方案 = 规格；本文 = 执行单元拆解。冲突以方案 / 母文档 AD 为准。
 
@@ -73,7 +73,7 @@ STEP0-A ─┬─ STEP0-B(schemas,硬前置) ─┬─ T1.1 ─┐
 
 ### T1.2 — provider-adapters + 5 不变量转绿 〔M1·M〕
 - **scope：** 拷 ladder + `select()` 三重 guard + **完整 `PAID_PROVIDERS`**，使 STEP0-C 红线 CI 翻必绿。**（与 T1.1 并行——仅依赖 STEP0-B/C，CodeX 小修）**
-- **验收：** 5 不变量全绿；`allow_paid` 恒 false；字符串-only 付费名无 factory 仍抛 `PaidProviderBlocked`；ASR 阶梯云优先 groq→CF→(faster_whisper cli)。
+- **验收：** 5 不变量全绿；`allow_paid` 恒 false；字符串-only 付费名无 factory 仍抛 `PaidProviderBlocked`；ASR 阶梯云优先 groq→CF→(faster_whisper cli)；**红线 job 翻必绿后无 skip/xfail 标记（xfail TODO count=0）——护栏不得永久停待办**（CodeX）。
 - **文件：** `packages/provider-adapters/**`。 **测试：** 5 不变量（红线桶，test-first）。 **前置：** STEP0-B·STEP0-C。
 
 ### T1.3 — 必改项（拆为 7 子单元，CodeX P2.5）〔M1〕
@@ -83,7 +83,7 @@ STEP0-A ─┬─ STEP0-B(schemas,硬前置) ─┬─ T1.1 ─┐
 - **T1.3b AIGC 标识 mux**〔M〕：piper 默认 + AIGC 标识 mux（**按 output_mode 条件化**：配音=语音法定标 / 字幕=机翻轻披露）。测：按模式标识断言（test-first）。
 - **T1.3c ffmpeg SSRF**〔S〕：ffmpeg/ffprobe `-protocol_whitelist file,crypto` + 格式 allowlist。测：伪装 playlist 不触网（test-first）。
 - **T1.3d 输出模式条件管线**〔M〕：output_mode 跳 tts/align；双语 SRT；mux 烧字幕分支**占位（feature-flag off，M2.1 才开）**。测：字幕-only 跳阶段出 srt + 双语两行（test-first）。
-- **T1.3e 云 ASR + asr_chunker**〔M〕：ASR 阶梯云优先 + **`asr_chunker`（compress-first：16k mono+Opus/FLAC，超限才切块+offset 合并）**。测：长音频一次请求 / 超限切块合并（test-first）。
+- **T1.3e 云 ASR + asr_chunker**〔M〕：ASR 阶梯云优先 + **`asr_chunker`（compress-first：16k mono+Opus/FLAC，超限才切块+offset 合并）**；**每 enabled ASR provider 带 `accepted_audio_formats / max_bytes / max_duration` 元数据，不收 Opus 自动换 FLAC/MP3（不假设都能收，CodeX）**。测：长音频一次请求 / 超限切块合并 / **provider 格式协商（不接受 Opus→降级编码）**（test-first）。
 - **T1.3f 语言能力**〔M〕：`language_capabilities` registry（**按 output_mode 分层** + BCP-47 + 逐语 vet）+ 源语 hint/检测回填 + 语言 fail-closed（`unsupported_language_pair`/`no_tts_model_for_language`）。测：分层准入 + fail-closed（test-first）。
 - **T1.3g 供应链 pin**〔S〕：piper `.onnx` / ffmpeg sha256 + 许可 gate（XTTS/F5 非商用禁入默认镜像）。测：sha256 校验 + 非商用模型禁入（test-first）。
 
@@ -92,9 +92,9 @@ STEP0-A ─┬─ STEP0-B(schemas,硬前置) ─┬─ T1.1 ─┐
 - **验收：** 一条命令本地跑通带标识 mp4+srt；**＝ M1 达成点**。 **文件：** `cli/local-runner/**`。 **测试：** 端到端 smoke。 **前置：** T1.3a–g。
 
 ### T2.0 — D1-claim 并发 spike（硬门槛，CodeX#6）〔M2·M〕
-- **scope：** 20 consumer 抢 100 job，验**无重复 claim / 租约过期可重领 / `attempt` 不超限**。**先于 T2.1 建任何东西。**
-- **验收：** 0 重复 claim；过期租约可重领；attempt 不超 max；D1 扛不住即提前给"CF Queues 拉前"信号。
-- **文件：** `apps/control-plane/`（spike + D1 迁移雏形）。 **测试：** 并发认领防双取（test-first，硬门）。 **前置：** STEP0-B。
+- **scope：** 20 consumer 抢 100 job，验**无重复 claim / 租约过期可重领 / `attempt` 不超限**。**本地 + 真实 Cloudflare D1 remote 两处 spike 都过才算硬门**（本地 SQLite 证不了 D1 真实并发/事务语义，CodeX）。**先于 T2.1 建任何东西。**
+- **验收：** 本地 + remote D1 均 0 重复 claim；过期租约可重领；attempt 不超 max；D1 扛不住即提前给"CF Queues 拉前"信号。
+- **文件：** `apps/control-plane/`（spike + D1 迁移雏形）。 **测试：** 并发认领防双取（test-first，硬门）。 **前置：** STEP0-B。 **前置(用户)：** **CF 账号（D1，含 remote）——提前到此**（CodeX）。
 
 ### T2.1 — control-plane CF Workers + D1 闭环端点 〔M2·L〕
 - **scope：** `uploads/sign` + **PUT 后 HEAD 校验** + `jobs` CRUD（含 v3.3/v4 全字段）+ `claim`（原子 queued→running+lease、**按 §8 确定性 comparator 优先排序 + aging**）+ `progress` 心跳 + `complete`/`fail` 幂等 + `download` presigned GET + `/internal/config` + **`/internal/credentials`（仅建 inert stub，默认 501/disabled——真凭据由 SECRETS 才开启，CodeX P2.4）**；`queue_adapter`=D1-claim。
@@ -135,15 +135,18 @@ STEP0-A ─┬─ STEP0-B(schemas,硬前置) ─┬─ T1.1 ─┐
 
 ### FREE-POOL — 免费池状态 + provider circuit-breaker（补 v4 缺口，CodeX P1.3）〔M2·M〕
 - **scope：** per-provider 配额状态（D1/KV 共享）+ **circuit-breaker**：provider 返 429/配额尽 → 标"耗尽至 UTC 重置"、新 job 路由下一家；**合并可用量 = 各免费池之和**；与全局分钟池联动。
-- **验收：** **429 后不反复撞已耗尽 provider**；**重置时间到自动恢复**；**全部免费 provider 耗尽 → `free_pool_exhausted`**；轮换跨 groq→CF→(cli) 只在免费间、绝不转 PAID。
-- **文件：** `packages/provider-adapters/`（路由）+ `apps/control-plane/`（共享状态 D1/KV）。 **测试：** 429 不复撞 + 重置恢复 + 全耗尽 free_pool_exhausted（test-first）。 **前置：** T1.2·T2.1。
+- **接口 seam（关键，CodeX）：** **状态归 control-plane（D1/KV）；`provider-adapters` 只收 `ProviderAvailability` 快照、返 `ProviderResult/ProviderFailure`，不 import Workers/D1/KV**（守 AD-13 边界，免日后 BYOK/Tier3 被免费池状态缠住）。
+- **验收：** **429 后不反复撞已耗尽 provider**；**重置时间到自动恢复**；**全部免费 provider 耗尽 → `free_pool_exhausted`**；轮换跨 groq→CF→(cli) 只在免费间、绝不转 PAID；**provider-adapters 不 import control-plane/D1/KV（CI 边界 lint）**。
+- **文件：** `packages/provider-adapters/`（纯路由：吃快照/吐结果）+ `apps/control-plane/`（共享状态 D1/KV + 快照投喂）。 **测试：** 429 不复撞 + 重置恢复 + 全耗尽 free_pool_exhausted + seam 边界 lint（test-first）。 **前置：** T1.2·T2.1。
 
 ### OBS — 可观测性基线（补 §12 缺口；含 worker，CodeX P2.8）〔M2·S〕
 - **scope：** 结构化 JSON 日志（keyed by job_id）+ 指标（queued/running/done/failed · claim 时延 · 各阶段耗时 · 免费池余额 · 全局分钟池余额 · worker 末次心跳）+ **≥2 告警**（running 超 lease；池/成本逼近 cap）。**worker 侧：`/progress` payload 上报 stage timing / provider / chunk count / free-pool result。**
-- **验收：** 指标可查（含 worker 阶段数据）；2 告警可触发；告警是 cap/lease 验证前提。 **文件：** `apps/control-plane/`（日志/指标/告警）+ **`workers/media-worker/`（/progress 上报）**。 **测试：** 告警触发 smoke。 **前置：** T2.1·T2.2。
+- **脱敏（CodeX）：** 日志 + progress payload **不得含** provider key / 原始请求·响应 / 用户 IP 明文 / 原视频文件名（隐私 + secrets 卫生）。
+- **验收：** 指标可查（含 worker 阶段数据）；2 告警可触发；告警是 cap/lease 验证前提；**脱敏断言（日志/payload grep 无敏感字段）**。 **文件：** `apps/control-plane/`（日志/指标/告警）+ **`workers/media-worker/`（/progress 上报）**。 **测试：** 告警触发 smoke + 脱敏断言（test-first）。 **前置：** T2.1·T2.2。
 
-### DEVLOOP — 本地 dev loop（补 §15 缺口，CodeX P2.7）〔M2·S〕
+### DEVLOOP — 本地 dev loop（补 §15 缺口，CodeX P2.7）〔M2·S，**非阻断**〕
 - **scope：** wrangler local 模拟 D1/R2/Queues/KV + Python stub worker 指向 localhost CP + **`just dev`** 跑通 上传/claim/complete（queue_adapter 走 D1-fallback）。
+- **阻断性（CodeX）：** **M2 开发体验门，非 M2-CLOSE 产品闭环前置**——不进 M2-CLOSE 依赖；尽早做以提速轨2 开发。
 - **验收：** `just dev` 一条命令本地端到端 upload→claim→complete，不依赖云部署。 **文件：** `justfile`（dev target）+ 本地配置 + worker 本地指向。 **测试：** dev loop smoke。 **前置：** T2.1·T2.2。
 
 ### M2-CLOSE — M2 收口：真管线 + 双池 cap + DoD 门 〔M2·L〕
@@ -183,5 +186,6 @@ STEP0-A ─┬─ STEP0-B(schemas,硬前置) ─┬─ T1.1 ─┐
 
 - **依赖 DAG：** ✅ 无环 / 无排序问题 / 无门序违规（Step 0→两轨、T2.0 硬门先于 T2.1、红线 CI 先于 T1.2 移植、schema codegen-diff 先于依赖 schema 代码、M2-CLOSE 依赖 T2.5——全成立）。
 - **CodeX backlog 复审已吸收：** P1.1（STEP0-C xfail 不破主线）· P1.2（M2-CLOSE 依赖 T2.5）· P1.3（FREE-POOL circuit-breaker 单元）· P2.4（credentials inert stub）· P2.5（T1.3 拆 a–g）· P2.6（UI 烧录 disabled）· P2.7（DEVLOOP）· P2.8（OBS 含 worker）· 小修（T1.2 ∥ T1.1 / 单元数核对 / egress DNS 刷新）。
+- **CodeX backlog 三轮复审已吸收：** v2.1 收紧 6 处——① T2.0 需真实 D1 remote spike（CF 账号前置到 T2.0）；② FREE-POOL 接口 seam（provider-adapters 不碰 D1/KV、只吃 `ProviderAvailability` 快照吐 `ProviderResult/ProviderFailure`）；③ DEVLOOP 标非阻断；④ T1.2 验收加"红线无 skip/xfail 残留"；⑤ T1.3e 加 provider 格式协商（不收 Opus 降级 FLAC/MP3）；⑥ OBS 加脱敏（日志/payload 禁 key/原始请求响应/IP 明文/原文件名）。
 - **覆盖：** 主管线 §0–§15 全覆盖；护栏缺口由 SECRETS · CFG-GUARD · OBS · FREE-POOL · DEVLOOP · DEPLOY + scope 注闭合。
-- **产出：** 29 领-able 单元，4 里程碑（M1/M2/M2.1/M3）。
+- **产出：** 29 领-able 单元，4 里程碑（M1/M2/M2.1/M3）。**CodeX 判定：修订后可锁为执行版。**
