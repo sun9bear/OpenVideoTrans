@@ -316,3 +316,17 @@ loop:
 
 ### 本地 dev loop（贯穿）
 - wrangler local 模拟 D1/R2/Queues/KV + Python worker 指向 localhost CP + `queue_adapter` 走 D1-fallback——两轨全程可本地端到端，不依赖云部署。
+
+### 测试纪律（grilling 2026-06-20 定）
+**三桶（移植 vs 新代码纪律不同）：**
+1. **纯移植**（拷贝-改造 stages/config/ffmpeg_utils）→ **golden/characterization 守行为**（内核行为即 spec），**不强上 TDD**。
+2. **红线**（5 不变量 + core 边界 lint）→ CI **先于移植落地**（Step 0 红 → T1.2 绿），全程在护栏下移植。
+3. **所有新行为**（命名空间隔离 / AIGC 标识 / ffmpeg 协议白名单 / presign-HEAD / 租约·心跳·重排 / complete·fail 幂等 / 并发认领防双取）→ **严格 test-first**（杀-worker 测试 = H1 的 spec）。
+
+**DoD owner / 顺序**：每条测试**跟 introducing 它的步骤一起落**（新/关键的 test-first），**不攒到最后**；**M2 = 全套必绿门**。
+- **Step 0**：schema codegen-diff。
+- **轨1**：5 不变量 + core 边界 lint（T1.2 绿）、golden `assign_timing`/`stitch_timeline`（T1.1）、AIGC 标识断言（T1.3）、ffmpeg 协议白名单 + 格式 allowlist（T1.3）。
+- **轨2**：presign 绑定 + 超大上传 HEAD 拒（T2.1/2.4）、SSRF "伪装 playlist 不触网"（T2.4）、lost-worker 租约重排杀-worker 测试（T2.3）、complete/fail 幂等 + 并发认领防双取（T2.1）、abuse 双池耗尽（T2.4→M2）。
+- **M2 门**：超时长/格式 reject、TTL + 中间件清理、配置热生效 + 红线不可改、2 并发 soak——全套必绿才算闭环。
+
+（测试清单本体见 §12 DoD；本节只定纪律与落点顺序。）
