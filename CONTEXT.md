@@ -43,6 +43,9 @@ worker 写进 job 目录的本地副本 = `Job` 投影 + `worker_meta`（ffprobe
 **data_purged_at（留存标志）**：
 产物/源/中间件被 24h TTL sweeper 清掉的时间戳。**留存与结果正交**——job 终态仍是 `done`/`failed`，"已过期"由 `now > expires_at || data_purged_at` **派生显示**，**不设 `expired` 状态**。
 
+**UploadSession（上传会话）**：
+一次直传 R2 的会话，状态 `pending → verified → consumed`（或 1h TTL → `expired`）。`pending` 超 TTL 未建 job → sweeper 删 R2 源（防"只传不交"占免费 R2）。
+
 **claim（认领）**：
 worker 原子取走一个 `queued` job（`queued→running` + 置 lease）。控制面侧保证防双取。
 
@@ -62,3 +65,7 @@ _Avoid_: 水印（指它时——会与下条混淆）
 **防白嫖水印（anti-leech watermark）**：
 仅为防白嫖的预览 / 演示水印；Tier 1 **已去除**。**与「AIGC 标识」是两回事，实现时不可混用、不可相互替代。**
 _Avoid_: 水印（笼统说"水印"时务必指明是哪一类）
+
+## 命名约定
+
+代码 **API / schema / 文件名 / 状态机统一用 `Job` / `manifest.json`**（不得再出现 `JobManifest` / `TaskManifest`）；中文"任务"仅作自然语言、不进标识符（CodeX#7）。

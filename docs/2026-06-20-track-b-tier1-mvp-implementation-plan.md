@@ -1,6 +1,6 @@
 # Track B · Tier 1 MVP 实施方案（子方案 #1）
 
-**状态：** 草案 v3（已过多 agent 对抗复审 + CodeX 评审并据此修订；待项目主终审锁定）。开源轨**第一份**实施方案（母文档 §0.5 子方案表 #1）。
+**状态：** **v3.2 — 已锁定为 Track B Tier 1 MVP 执行基线**（多 agent 对抗复审 + CodeX 两轮收口；进入拆 issue 实施阶段，代码仍押 i18n）。开源轨**第一份**实施方案（母文档 §0.5 子方案表 #1）。
 **日期：** 2026-06-20
 **上游 ADR 真源：** [`2026-06-19-open-core-derivative-products-design.md`](2026-06-19-open-core-derivative-products-design.md)（AD-1..AD-17）。本方案只承载**可执行细节**，不复述、不回写已冻结的母文档；与母文档冲突以其 AD 为准。
 **冷启动背景：** [`2026-06-20-project-context-onboarding.md`](2026-06-20-project-context-onboarding.md)（红线 / 执行顺序）。
@@ -8,7 +8,7 @@
 
 > **执行顺序门：** 本方案是**计划文档**，现在即可写定。**实质代码实施押在上游商业线 i18n 完成之后**（母文档 §6 / onboarding §5）。本文给出"第一周改哪些文件"的落地蓝图，代码动笔以 i18n 完成为准。
 
-> **修订史：** **v2** 纳入 6 路多 agent 对抗复审 26 项 + 3 决策（① 仅直传去 yt-dlp；② CF Queues 首选 + Oracle A1 常驻主 host；③ 境外/海外用户·不备案·EU 式标识）。**v3** 纳入 CodeX 评审 4 项：R2 presign 改"签发-session + PUT 后 HEAD 校验"（content-length-range 不当硬依赖）；ffmpeg/ffprobe **自身 SSRF**（playlist/外链协议）防线；全局**分钟池**；AIGC 标识定**可测 MVP 默认形态**。并把灰度起步默认值定下来 + **新增 §14 运行时配置（后台可配，含"可调 vs 红线锁"两类分法）**。**v3.1（项目主决策）：AIGC 标识开关由红线锁改为🟢高敏可调——默认开、关闭需 audited acknowledgment、责任项目主自行承担；标识能力代码路径始终保留，§14 只控开关、不删能力。**
+> **修订史：** **v2** 纳入 6 路多 agent 对抗复审 26 项 + 3 决策（① 仅直传去 yt-dlp；② CF Queues 首选 + Oracle A1 常驻主 host；③ 境外/海外用户·不备案·EU 式标识）。**v3** 纳入 CodeX 评审 4 项：R2 presign 改"签发-session + PUT 后 HEAD 校验"（content-length-range 不当硬依赖）；ffmpeg/ffprobe **自身 SSRF**（playlist/外链协议）防线；全局**分钟池**；AIGC 标识定**可测 MVP 默认形态**。并把灰度起步默认值定下来 + **新增 §14 运行时配置（后台可配，含"可调 vs 红线锁"两类分法）**。**v3.1（项目主决策）：AIGC 标识开关由红线锁改为🟢高敏可调——默认开、关闭需 audited acknowledgment、责任项目主自行承担；标识能力代码路径始终保留，§14 只控开关、不删能力。** **v3.2（CodeX 二轮，锁定为执行基线）：① `queue_backend` 改 break-glass（生产锁 `cf_queues`，`d1` 仅 dev/事故 + 审计）；② 上传会话生命周期（`UploadSession` pending/verified/consumed/expired + 1h TTL + 孤儿源清理）；③ 配额扣减幂等（`counted_job/counted_minutes/refunded` 绑 `claim_version`，跨重排不双扣）；④ AIGC 关闭 = 结构化 jurisdiction override（地区/原因/操作者/时间）；⑤ 设置分"创建快照 vs 实时" + `Job.settings_version`；⑥ D1-claim 并发 spike 前置为 T2.0 硬门槛。**
 
 ---
 
@@ -87,7 +87,8 @@
 **核心结构（移植）：** `Word{text,start_ms,end_ms}`；`TranscriptLine{index,start_ms,end_ms,speaker_id="SPEAKER_00",source_text,words[]}`；`Transcript{source_language,lines[],asr_provider}`；`DubbingSegment`⭐`{segment_id,index,speaker_id,start_ms,end_ms,target_duration_ms,source_text,target_text,voice_id?,tts_provider?,keep_original=false,align_method?,align_ratio?,needs_review=false}`；`TranslationResult`⭐`{source_language,target_language,mt_provider,segments[]}`。
 
 **新增（`Job` 权威记录 + `manifest.json` 投影，grilling 2026-06-20 定）：**
-- **`Job`**（控制面权威 = D1 行 / schemas 真源）= `{job_id, anon_or_user_id, tier:"tier1", status, current_stage?, source_type:"upload", declared_bytes?, verified_bytes?, source_lang?, target_lang, plan:{asr,mt,tts}, aigc_marking:{enabled,implicit,explicit,form,applied?}, created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, artifacts:{video_key?,srt_key?}, error_code?, error_detail?(仅服务端、不出 API), attempt, claim_version}`。
+- **`Job`**（控制面权威 = D1 行 / schemas 真源）= `{job_id, anon_or_user_id, tier:"tier1", status, current_stage?, source_type:"upload", upload_session_id, declared_bytes?, verified_bytes?, source_lang?, target_lang, plan:{asr,mt,tts}, settings_version, aigc_marking:{enabled,implicit,explicit,form,applied?}, created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, artifacts:{video_key?,srt_key?}, error_code?, error_detail?(仅服务端、不出 API), attempt, claim_version, counted_job, counted_minutes, refunded}`。`settings_version` = 创建时快照的"job 决定性配置"版本（§14 快照 vs 实时）；`counted_*/refunded` = 配额幂等标志（§9A）。
+- **`UploadSession`**（D1 `upload_sessions`，v3.2/CodeX#2）= `{upload_session_id, anon_or_user_id, source_key, declared_bytes, declared_type, status: pending|verified|consumed|expired, created_at, expires_at}`；**1h TTL**；`pending` 未在 TTL 内建 job → sweeper 删 R2 源 + 置 `expired`（防只传不交刷爆免费 R2）。
 - **`manifest.json`**（worker 写进 job 目录，用内核预留钩子）= `Job` 投影 + `worker_meta`（ffprobe 结果 / AIGC 标识实际嵌入方式 / 用的模型版本·sha）。
 - **状态机（4 态，终态 done|failed）**：`queued→running`(claim) / `running→queued`(租约过期重排，`attempt<max_attempts`) / `running→done`(complete) / `running→failed`(fail 或重排耗尽=`worker_lost`)。**留存正交**：`expires_at` + `data_purged_at?`（sweeper 删 R2 时置），**不设 `expired` 态**；UI"已过期"由 `now>expires_at || data_purged_at` **派生显示**（status 仍 done）。`intake/probing` **不单列态**（ffprobe 是 running 内首阶段，超时长/坏格式 → `failed`；"probing" 仅作 `current_stage` 标签）。stale-queued（worker 长宕）不建态，靠可观测性兜（ops 事故）。
 - **`error_code`** = `over_duration | unsupported_format | upload_too_large | source_verify_failed | source_fetch_failed | free_pool_exhausted | worker_lost | daily_cap_reached | internal_error`；→ 用户中文文案见 §9D（`error_detail` 原始信息仅服务端、不出 API）。
@@ -159,8 +160,8 @@ loop:
 **公开端点：**
 | 端点 | 职责 |
 |---|---|
-| `POST /api/uploads/sign` | 校验声明 size(≤`cfg.max_upload_bytes`)/type → 短期 presigned PUT；**key 由 `job_id`/`anon_id` 派生、无客户端路径段**；记录上传 session（声明值）+ per-IP upload-session cap |
-| `POST /api/jobs` | **③ `HEAD` 校验 R2 对象真实 size/type/hash**，超 `cfg.max_upload_bytes` 或类型不符 → **删对象 + 拒（不建 job，`upload_too_large`/`source_verify_failed`）** → abuse-gate 准入 → 建 job(D1,`queued`) → enqueue（CF Queues） |
+| `POST /api/uploads/sign` | 校验声明 size(≤`cfg.max_upload_bytes`)/type → 短期 presigned PUT；**key 由 `upload_session_id`/`anon_id` 派生、无客户端路径段**；建 `UploadSession`(status=`pending`，1h TTL) + per-IP upload-session cap |
+| `POST /api/jobs` | **③ `HEAD` 校验 R2 对象真实 size/type/hash**（`UploadSession` `pending→verified`），超 `cfg.max_upload_bytes`/类型不符 → **删对象 + 拒**（`upload_too_large`/`source_verify_failed`） → abuse-gate 准入 → 建 job(D1,`queued`，**快照 `settings_version`**) → `UploadSession→consumed` → enqueue（CF Queues） |
 | `GET /api/jobs/:id` | 状态 + 阶段 + ETA 区间（AD-9）+ 保留期 + `error_code`→本地化文案 |
 | `GET /api/jobs/:id/download/:artifact` | 短期 presigned GET、单产物、校归属、过 `expires_at` 拒绝 |
 
@@ -168,7 +169,7 @@ loop:
 
 **内部端点（worker 鉴权）：** `config`（拉 §14 运行时配置）；`claim`（原子 `queued→running` + 置 lease，乐观锁 `claim_version`）；`progress`(=心跳续租)；`complete`/`fail`（**幂等**：仅 `WHERE status='running' AND claim_version` 匹配生效；重复/迟到 200 no-op；首个终态胜；产物写 `claim_version` 前缀 key 防僵尸覆盖）。
 
-**D1 表：** `jobs`（`id, anon_or_user_id, status, current_stage?, tier, source_type, source_key, declared_bytes, verified_bytes, source_lang?, target_lang, plan(json), created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, video_key?, srt_key?, error_code?, error_detail?, attempt, claim_version`）；`abuse_counters`（per-IP/anon/user + 全局 jobs + 全局 video_minutes）；`settings`（§14）。**KV** 缓存 settings 热读。
+**D1 表：** `jobs`（`id, anon_or_user_id, status, current_stage?, tier, source_type, source_key, upload_session_id, declared_bytes, verified_bytes, source_lang?, target_lang, plan(json), settings_version, created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, video_key?, srt_key?, error_code?, error_detail?, attempt, claim_version, counted_job, counted_minutes, refunded`）；`upload_sessions`（`upload_session_id, anon_or_user_id, source_key, declared_bytes, declared_type, status, created_at, expires_at`，1h TTL）；`abuse_counters`（per-IP/anon/user + 全局 jobs + 全局 video_minutes，键 `(scope,id,day)`）；`settings`（§14）。**KV** 缓存 settings 热读。
 
 **claim 并发正确性：** `UPDATE ... SET status='running',claim_version=claim_version+1 WHERE id=(SELECT id FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1) AND status='queued'`，验 D1 事务/隔离能防双取；以受影响行数 + `claim_version` 回读确认；§12 加并发认领测试。
 
@@ -193,9 +194,10 @@ loop:
 - **原子 check-and-increment**：单条条件 `UPDATE counters SET used=used+1 WHERE scope=? AND id=? AND day=? AND used<cap`（D1 行级原子、写走 primary），`rows_affected=0` 即超限拒；键 `(scope,id,day)`、**UTC 自然日**重置、旧行 sweeper 清。
 - **双池时机错位**：job-count 池（per-IP/anon/user + 全局任务）**准入处**原子扣（硬闸）；**分钟池**准入处**粗闸**（`global_minutes_used<cap`）+ **ffprobe 后精确扣**（过冲 ≤ 并发×max_duration、有界，**不上 over-reserve**——Tier 1 无 ledger）。
 - **失败计数**：用户侧错（over_duration/格式/过大/daily_cap/free_pool）**计数**（防 create-fail 刷名额）；**我方错（worker_lost/internal_error）退还 job-count**（补偿 decrement，公平）。
+- **幂等补偿（CodeX#3）**：配额效果**各自只生效一次**——`Job.counted_job/counted_minutes/refunded` 标志 + 扣减/退还**绑定胜出的 `claim_version`**；重试 / 重复 complete·fail 回调 / 租约重排后再跑都**不多扣多退**（尤其分钟池扣减**跨重排幂等**：同一 job 多次 ffprobe 只扣一次）。
 - **身份纵深**：anon = 签名(HMAC) cookie（per-anon 闸）；**per-IP 闸**（IPv4 整 / **IPv6 /64**，`CF-Connecting-IP`）兜 cookie-clear；**全局 job/分钟双池 = 真正硬上限**（个体绕过也兜总花费）；`POST /api/jobs` 挂 **Cloudflare Turnstile** 抬 bot/farming 门槛。**接受个体绕过**（清 cookie + 轮 IP），设备指纹/重身份**后置**——全局池 + Turnstile + kill-switch 已是成本兜底。
 
-**B. AIGC 标识（生成嵌入，默认开）：** v3 可测默认形态见 §4 第 3 点（隐式 MP4 metadata + manifest + SRT NOTE；显式 片尾 1s 提示 + 下载页披露）。境外/海外用户·**不备案**（PRC 专属）→ EU 式（AI Act 50）。**形态 + 开关 §14 均可配（默认开；`aigc_marking_enabled` 关闭需 audited acknowledgment、责任项目主自负）**；律师后置精修。§12 断言：默认开时成片带隐式标 + 显式披露。
+**B. AIGC 标识（生成嵌入，默认开）：** v3 可测默认形态见 §4 第 3 点（隐式 MP4 metadata + manifest + SRT NOTE；显式 片尾 1s 提示 + 下载页披露）。境外/海外用户·**不备案**（PRC 专属）→ EU 式（AI Act 50）。**形态 + 开关 §14 均可配（默认开；关闭 = hosted 私有运营面的【结构化 jurisdiction override】——记 地区/原因/操作者/时间、责任项目主自负，开源默认不鼓励关，CodeX#4）**；律师后置精修。§12 断言：默认开时成片带隐式标 + 显式披露。
 
 > **项目主决策（记录在案）：** AIGC 标识开关后台可调、默认开、关闭需 audited acknowledgment、**责任项目主自行承担**——属对母文档红线 3「深度合成法定标识保留」在 open Tier 1 admin 层的**有意软化**（管辖相关；标识*能力*始终存在，只是可被有意识地按辖区关闭）。**已同步标注母文档 §7.3 红线 3（2026-06-20）。**
 
@@ -220,7 +222,7 @@ loop:
 ## 10. 产物 + 中间件 TTL / 数据生命周期（AD-17）
 
 - **产物 = 24h**（`cfg.artifact_ttl_hours`，R2 lifecycle + CF Cron sweeper 扫 `expires_at<now` 删 R2、**置 `data_purged_at`**——status 仍 done/failed，**不设 expired 态**，UI"已过期"派生显示）。**中间件**（转录/segment/源）同期清理，成片后**尽早删源**省 R2 + 缩暴露面。
-- **sweeper 双职责**：① TTL 清理；② **租约过期重排**（扫 `status='running' AND lease_expires_at<now` → `attempt<max_attempts` 重排否则 `worker_lost`，`claim_version` 守）。
+- **sweeper 三职责**：① 产物/中间件 TTL 清理（置 `data_purged_at`）；② **租约过期重排**（扫 `status='running' AND lease_expires_at<now` → `attempt<max_attempts` 重排否则 `worker_lost`，`claim_version` 守）；③ **上传孤儿清理**（扫 `upload_sessions.status='pending' AND expires_at<now` → 删 R2 源 + 置 `expired`，防只传不交占 R2，CodeX#2）。
 - 交付告知保留期 + 数据删除告知。日志留存（30/90/180d）独立于产物 24h（§14 可配）。
 
 ---
@@ -243,7 +245,7 @@ loop:
 
 **可观测性基线：** 结构化 JSON 日志（keyed by `job_id`）；指标 queued/running/done/failed、claim 时延、各阶段耗时、免费池剩余、全局分钟池余额、worker 末次心跳；≥2 告警（`running` 超 lease；池/成本逼近 cap）。
 
-**验证 / DoD（门控 M2/M3）：** 红线必绿（5 不变量 / core 边界 lint / SSRF·presign·标识 CI / schema codegen-diff / **§14 红线不可改断言**）；确定性 golden-test（`assign_timing`/`stitch_timeline`）；negative/abuse（超时长、**超大上传被 HEAD 拒**、**伪装 playlist 不触网**、不支持格式、日 cap/分钟池耗尽）；失败/恢复（**lost-worker 租约重排**、complete/fail 幂等、并发认领防双取、2 并发 soak）；生命周期（TTL + 中间件清理）；标识（成片隐式 + 显式断言）；配置（改 cap 热生效、红线项不可改）。pass bar 门控 M2/M3。
+**验证 / DoD（门控 M2/M3）：** 红线必绿（5 不变量 / core 边界 lint / SSRF·presign·标识 CI / schema codegen-diff / **§14 红线不可改断言**）；确定性 golden-test（`assign_timing`/`stitch_timeline`）；negative/abuse（超时长、**超大上传被 HEAD 拒**、**伪装 playlist 不触网**、不支持格式、日 cap/分钟池耗尽）；失败/恢复（**lost-worker 租约重排**、complete/fail 幂等、**配额幂等（重排/重复回调不双扣多退）**、并发认领防双取、2 并发 soak）；生命周期（TTL + 中间件清理 + **上传孤儿清理**）；标识（成片隐式 + 显式断言）；配置（改 cap 热生效、红线项不可改）。pass bar 门控 M2/M3。
 
 **里程碑（i18n 完成后启动；非串行硬绑）：**
 - **M1**（≈阶段 3，1–2 周）：契约 + core 移植（含标识 mux）+ 5 不变量 + codegen-diff CI；`cli/local-runner` 本地端到端跑出**带标识** mp4+srt。
@@ -286,7 +288,7 @@ loop:
 | 组 | 键 |
 |---|---|
 | 限额 | `max_video_duration_sec` · `max_upload_bytes` · `daily_cap_ip/anon` · `daily_cap_user` · `daily_cap_global_jobs` · `daily_cap_global_video_minutes` · `upload_format_allowlist` · per-IP upload-session cap |
-| 调度 | `worker_concurrency` · `lease_ttl_sec` · `heartbeat_interval_sec` · `job_hard_timeout_sec` · `max_attempts` · `queue_backend`(cf_queues/d1) |
+| 调度 | `worker_concurrency` · `lease_ttl_sec` · `heartbeat_interval_sec` · `job_hard_timeout_sec` · `max_attempts` |
 | 开关 | `accept_new_jobs`(总闸/maintenance) · `kill_switch`(手动 + 阈值自动) · 每免费 provider `enabled` · `edge_tts_experimental_lane`(off) · `cf_melotts_fallback` · `free_pool_auto_degrade` |
 | 留存 | `artifact_ttl_hours`(AD-17 内) · `log_retention`{job_meta/abuse/takedown} |
 | 成本 | free-pool 预算/阈值（auto-degrade / kill-switch 触发点）· 告警阈值 |
@@ -295,7 +297,11 @@ loop:
 
 **🔒 不可改（红线锁，代码/CI）：** `allow_paid`=false 恒定 · `PAID_PROVIDERS` + 5 不变量 · SSRF 防线（无 yt-dlp / ffmpeg 协议白名单 / worker egress 限制）· autodub-core 硬边界 · presign 的 HEAD 校验 / key 派生逻辑。
 
-> **AIGC 标识开关**（原列此处）已按项目主决策移至 🟢 **高敏可调项**：默认开、关闭需 audited acknowledgment、责任项目主自负。**注**：可调的只是"开关"，标识**能力代码路径必须始终存在**（§14 不删能力，只控开关）；属对母文档红线 3「法定标识保留」在 admin 层的有意软化（管辖相关）。
+> **AIGC 标识开关**（原列此处）已按项目主决策移至 🟢 **高敏可调项**：默认开、关闭需 audited acknowledgment、责任项目主自负。**注**：可调的只是"开关"，标识**能力代码路径必须始终存在**（§14 不删能力，只控开关）；属对母文档红线 3「法定标识保留」在 admin 层的有意软化（管辖相关）。关闭 = **结构化 jurisdiction override**（地区/原因/操作者/时间，CodeX#4）。
+
+**🟠 break-glass（受限，非随手可调，CodeX#1）：** `queue_backend`——**生产锁 `cf_queues`**；`d1` 仅 local/dev 或事故 fallback、切换**须审计**（防误切回 D1 poll、生产退化）。
+
+**快照 vs 实时（CodeX#5）：** 🟢 可调项再分两类——**① 创建时快照进 Job**（`max_upload_bytes` / `max_video_duration` / `tts_model_registry` / `no_model_policy` / `aigc_*` 等"job 决定性"配置 → 记 `Job.settings_version`，job 行为不随中途改配漂移、排查可复现）；**② 实时**（`accept_new_jobs` / `kill_switch` / 全局 cap / `worker_concurrency` / lease 等运营开关，立即生效）。
 
 **机制：**
 - **存储**：D1 `settings`(`key, value, type, min?, max?, updated_by, updated_at`) 真源 + 变更审计；KV 缓存热读（控制面每请求读、TTL 短）；worker 启动 + claim 时拉 `GET /internal/config`。**复刻上游"运行时热配置"模式但独立**（AD-15，不复用 SaaS 配置）。
@@ -322,6 +328,7 @@ loop:
 - **T1.4** `cli/local-runner`：本地端到端出**带标识** mp4+srt。**＝ M1 达成**。
 
 ### 轨 2 — 云 walking skeleton（与轨 1 并行，依赖 Step 0 schemas）
+- **T2.0（硬门槛，CodeX#6）** D1-claim 并发 spike：**20 consumer 抢 100 job**，验**无重复 claim / 租约过期可重领 / `attempt` 不超限**——**先于 T2.1 建任何东西**（若 D1 扛不住安全原子 claim，即提前把 CF Queues 拉前的信号；比接真实 worker 更早暴露风险）。
 - **T2.1** control-plane(CF Workers)：`uploads/sign` + **PUT 后 HEAD 校验** + `jobs` CRUD(D1) + `claim`(原子 queued→running + 置 lease) + `progress`(心跳) + `complete`/`fail`(幂等) + `download`(presigned GET)；`queue_adapter` = **D1-claim**。
 - **T2.2** 桩 worker(Python，连本地/Oracle CP)：`claim` → 输入原样拷成输出（不跑真管线）→ `complete`；**30s 独立心跳续租**；try/finally 清盘。
 - **T2.3** sweeper(CF Cron)：租约过期重排（+ TTL 清理骨架）。**杀 worker 中途测试** → assert 自动重排（证 H1）。
