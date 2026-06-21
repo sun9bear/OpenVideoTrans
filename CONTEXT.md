@@ -40,6 +40,14 @@ _Avoid_: task（泛指时）、`JobManifest`（旧名，已拆为 Job + manifest
 **manifest.json**：
 worker 写进 job 目录的本地副本 = `Job` 投影 + `worker_meta`（ffprobe 结果 / AIGC 标识实际嵌入方式 / 模型版本·sha）；用内核预留的 manifest 钩子。
 
+**output_mode（输出模式）**：
+用户**创建前选定**的产出形态：`subtitle_only`（仅字幕，跳过 TTS/align）/ `dub_only`（配音）/ `both`。配套 `subtitle_delivery`（`srt` 文件 / `burned` 烧录进视频 / `both`）与 `subtitle_lang`（`target` 仅目标语 / `bilingual` 双语）。决定 pipeline 是否跑 tts/align、mux 是否烧字幕、AIGC 标识形态、per-mode 时长 cap。
+_Avoid_: 模式（笼统时）
+
+**light slot / 预留槽位（free_min_share）**：
+worker 并发中保留给短/字幕 job 的槽位，使长 job 不堵死短 job；配合单 lane **优先队列**（SPT 偏置 + aging 防饿死）。**运行中不抢占**——真抢占留 Tier 2/3。
+_Avoid_: 抢占
+
 **data_purged_at（留存标志）**：
 产物/源/中间件被 24h TTL sweeper 清掉的时间戳。**留存与结果正交**——job 终态仍是 `done`/`failed`，"已过期"由 `now > expires_at || data_purged_at` **派生显示**，**不设 `expired` 状态**。
 

@@ -1,6 +1,6 @@
 # Track B · Tier 1 MVP 实施方案（子方案 #1）
 
-**状态：** **v3.2 — 已锁定为 Track B Tier 1 MVP 执行基线**（多 agent 对抗复审 + CodeX 两轮收口；进入拆 issue 实施阶段，代码仍押 i18n）。开源轨**第一份**实施方案（母文档 §0.5 子方案表 #1）。
+**状态：** **v3.3 — 执行基线**（v3.2 锁定 + 项目主 v3.3 功能增量：字幕模式 / 云 ASR / 模式感知调度 / 透明度）。多 agent 对抗复审 + CodeX 两轮收口；代码仍押 i18n。开源轨**第一份**实施方案（母文档 §0.5 子方案表 #1）。
 **日期：** 2026-06-20
 **上游 ADR 真源：** [`2026-06-19-open-core-derivative-products-design.md`](2026-06-19-open-core-derivative-products-design.md)（AD-1..AD-17）。本方案只承载**可执行细节**，不复述、不回写已冻结的母文档；与母文档冲突以其 AD 为准。
 **红线 / 执行顺序：** 见母文档 §7（红线）/ §6（执行顺序）。
@@ -8,19 +8,19 @@
 
 > **执行顺序门：** 本方案是**计划文档**，现在即可写定。**实质代码实施押在上游商业线 i18n 完成之后**（母文档 §6）。本文给出"第一周改哪些文件"的落地蓝图，代码动笔以 i18n 完成为准。
 
-> **修订史：** **v2** 纳入 6 路多 agent 对抗复审 26 项 + 3 决策（① 仅直传去 yt-dlp；② CF Queues 首选 + Oracle A1 常驻主 host；③ 境外/海外用户·不备案·EU 式标识）。**v3** 纳入 CodeX 评审 4 项：R2 presign 改"签发-session + PUT 后 HEAD 校验"（content-length-range 不当硬依赖）；ffmpeg/ffprobe **自身 SSRF**（playlist/外链协议）防线；全局**分钟池**；AIGC 标识定**可测 MVP 默认形态**。并把灰度起步默认值定下来 + **新增 §14 运行时配置（后台可配，含"可调 vs 红线锁"两类分法）**。**v3.1（项目主决策）：AIGC 标识开关由红线锁改为🟢高敏可调——默认开、关闭需 audited acknowledgment、责任项目主自行承担；标识能力代码路径始终保留，§14 只控开关、不删能力。** **v3.2（CodeX 二轮，锁定为执行基线）：① `queue_backend` 改 break-glass（生产锁 `cf_queues`，`d1` 仅 dev/事故 + 审计）；② 上传会话生命周期（`UploadSession` pending/verified/consumed/expired + 1h TTL + 孤儿源清理）；③ 配额扣减幂等（`counted_job/counted_minutes/refunded` 绑 `claim_version`，跨重排不双扣）；④ AIGC 关闭 = 结构化 jurisdiction override（地区/原因/操作者/时间）；⑤ 设置分"创建快照 vs 实时" + `Job.settings_version`；⑥ D1-claim 并发 spike 前置为 T2.0 硬门槛。**
+> **修订史：** **v2** 纳入 6 路多 agent 对抗复审 26 项 + 3 决策（① 仅直传去 yt-dlp；② CF Queues 首选 + Oracle A1 常驻主 host；③ 境外/海外用户·不备案·EU 式标识）。**v3** 纳入 CodeX 评审 4 项：R2 presign 改"签发-session + PUT 后 HEAD 校验"（content-length-range 不当硬依赖）；ffmpeg/ffprobe **自身 SSRF**（playlist/外链协议）防线；全局**分钟池**；AIGC 标识定**可测 MVP 默认形态**。并把灰度起步默认值定下来 + **新增 §14 运行时配置（后台可配，含"可调 vs 红线锁"两类分法）**。**v3.1（项目主决策）：AIGC 标识开关由红线锁改为🟢高敏可调——默认开、关闭需 audited acknowledgment、责任项目主自行承担；标识能力代码路径始终保留，§14 只控开关、不删能力。** **v3.2（CodeX 二轮，锁定为执行基线）：① `queue_backend` 改 break-glass（生产锁 `cf_queues`，`d1` 仅 dev/事故 + 审计）；② 上传会话生命周期（`UploadSession` pending/verified/consumed/expired + 1h TTL + 孤儿源清理）；③ 配额扣减幂等（`counted_job/counted_minutes/refunded` 绑 `claim_version`，跨重排不双扣）；④ AIGC 关闭 = 结构化 jurisdiction override（地区/原因/操作者/时间）；⑤ 设置分"创建快照 vs 实时" + `Job.settings_version`；⑥ D1-claim 并发 spike 前置为 T2.0 硬门槛。** **v3.3（项目主功能增量）：① 输出模式可选——`output_mode` 字幕only/配音only/both × `subtitle_delivery` SRT/烧录/both × `subtitle_lang` 仅目标/双语（创建前选，pipeline 条件跑 tts/align）；② 默认 ASR 改云优先 `groq→cloudflare`（hosted 去本地 whisper bake，faster_whisper 退 cli/self-host），瓶颈由弱箱 CPU 转免费日配额；③ per-mode 时长 cap（字幕-only ~30min / 配音 ~5–10min / 字幕+烧录 中等）；④ §8 改单 lane **优先队列**（SPT 偏置 + aging 防饿死 + 预留 light 槽位、运行中不抢占；全 WFQ 仍留 #2）；⑤ 长视频透明度（创建前警示 + `processing_timeout` error_code）；⑥ AIGC 标识按 `output_mode` 条件化（字幕=机翻轻披露 / 配音=合成语音标识）。**
 
 ---
 
 ## 0. 范围
 
-**做什么（Tier 1 闭环）：** 用户**上传**视频 → 校验 → 排队 → 我方 worker 跑 free-video-dub 免费阶梯 → 产出译制视频（**带 AIGC 标识**）+ 字幕 → 下载。全免费、零配置、受限额排队、24h 产物保留、境外部署/海外用户。
+**做什么（Tier 1 闭环）：** 用户**上传**视频 → **选输出模式**（字幕-only / 配音 / 二者；字幕 SRT 或烧录、仅目标或双语，v3.3）→ 校验 → 排队 → 我方 worker 跑 free-video-dub 免费阶梯（**ASR 走云、字幕模式跳过 TTS/align**）→ 产出（字幕 .srt / 带字幕视频，和/或**带 AIGC 标识**的配音视频）→ 下载。全免费、零配置、受限额排队、24h 产物保留、境外部署/海外用户。
 
 **一句话架构（AD-16）：** 控制面 = TypeScript on Cloudflare（Pages + Workers + R2 + D1 + Queues）；媒体重活 = Python Docker worker（移植 free-video-dub）；二者经 R2（产物）+ D1（job 状态 + **运行时配置**）+ CF Queues（投递/重试）解耦。
 
-**MVP 范围（本方案落地）：** ① repo 目录落内容（§2）；② 语言无关契约 `packages/schemas`（§3）；③ `autodub-core` 移植 + 多用户隔离 + **AIGC 标识 mux 步骤**（§4）；④ `provider-adapters` 免费阶梯 + 付费安全 5 不变量进 CI（§5）；⑤ `media-worker`：拉任务 / **ffprobe 首阶段准入** / ffmpeg SSRF 防线 / 执行 / 30s 心跳 / 产物入 R2 / 回写（§6）；⑥ `control-plane`：上传签发 + **PUT 后 HEAD 校验** / 建 job / 状态轮询 / 下载 / **运行时配置** + 租约 sweeper（§7/§10/§14）；⑦ 最小单 lane 队列（CF Queues 首选 / D1 fallback，§8）；⑧ abuse gate：时长 + per-IP/anon/user + 全局任务/**分钟**双池 cap，去防白嫖水印、**生成嵌入 AIGC 标识**（§9）；⑨ 24h 产物 + 中间件 TTL、数据生命周期（§10）；⑩ 红线 + open/private + SSRF/presign/标识 CI（§11）；⑪ **运行时配置 / admin settings**（§14）。
+**MVP 范围（本方案落地）：** ① repo 目录落内容（§2）；② 语言无关契约 `packages/schemas`（§3）；③ `autodub-core` 移植 + 多用户隔离 + **AIGC 标识 mux 步骤**（§4）；④ `provider-adapters` 免费阶梯 + 付费安全 5 不变量进 CI（§5）；⑤ `media-worker`：拉任务 / **ffprobe 首阶段准入** / ffmpeg SSRF 防线 / 执行 / 30s 心跳 / 产物入 R2 / 回写（§6）；⑥ `control-plane`：上传签发 + **PUT 后 HEAD 校验** / 建 job / 状态轮询 / 下载 / **运行时配置** + 租约 sweeper（§7/§10/§14）；⑦ 最小单 lane 队列（CF Queues 首选 / D1 fallback，§8）；⑧ abuse gate：**per-mode 时长** + per-IP/anon/user + 全局任务/**分钟**双池 cap，去防白嫖水印、**按模式条件生成 AIGC 标识**（§9）；⑨ 24h 产物 + 中间件 TTL、数据生命周期（§10）；⑩ 红线 + open/private + SSRF/presign/标识 CI（§11）；⑪ **运行时配置 / admin settings**（§14）。
 
-**明确不做（押后）：** ❌ BYOK（#3）；❌ 付费 / Tier 3 ledger / 跳队（#4）；❌ distinctive logic 高质量核心迁移（Tier 2/3，MVP 用内核 DSP atempo 钳制、无 LLM rewrite）；❌ 完整多 lane 调度器（#2，全免费 = 一条 lane）；❌ 浏览器 WASM（Phase 2+）；❌ premium 回调（`premium_backend.py` 不移植）；❌ 声音克隆（预设音色，克隆需 consent + 显式触发）；❌ **URL/yt-dlp 摄取**（决策 ①，托管仅直传；URL 分支只留 cli/local-runner）；❌ 重内容审核（决策 ③，反应式下架兜底，proactive/CSAM 设放量前 gate）。
+**明确不做（押后）：** ❌ BYOK（#3）；❌ 付费 / Tier 3 ledger / 跳队（#4）；❌ distinctive logic 高质量核心迁移（Tier 2/3，MVP 用内核 DSP atempo 钳制、无 LLM rewrite）；❌ 完整多 lane WFQ 调度器（#2；MVP 单 lane 内**已含轻量 SPT+aging 优先 + 预留 light 槽位**，见 §8，但不做多 lane/token 桶/provider pool）；❌ 运行中 job 抢占（真抢占需 R2 中间态，留 #2）；❌ 浏览器 WASM（Phase 2+）；❌ premium 回调（`premium_backend.py` 不移植）；❌ 声音克隆（预设音色，克隆需 consent + 显式触发）；❌ **URL/yt-dlp 摄取**（决策 ①，托管仅直传；URL 分支只留 cli/local-runner）；❌ 重内容审核（决策 ③，反应式下架兜底，proactive/CSAM 设放量前 gate）。
 
 ---
 
@@ -28,7 +28,7 @@
 
 ```
 ┌── 浏览器（CF Pages 前端, TS） ────────────────────────────────────┐
-│  上传视频(直传 R2) · 选目标语言 · 轮询状态 · 下载产物              │
+│  上传视频(直传 R2) · 选目标语言+输出模式 · 轮询状态 · 下载产物    │
 └─────┬──────────────────────────────────────────────┬─────────────┘
       │ ① 申请上传 session(声明 size/type, key 派生)    │ ⑤ 轮询 / ⑦ 下载
       ▼  ② 直传 R2(presigned PUT)                        ▼
@@ -50,9 +50,10 @@
    ▼
 ┌── media-worker（Python Docker, 外置, always-on Oracle A1） ───────┐
 │  长轮询 claim → 取源(R2) → ffprobe 准入(超 cap fail+删源)         │
-│  → autodub-core 7 阶段(ffmpeg 协议白名单; 含 AIGC 标识 mux)       │
-│  → 产物 PUT R2 → complete。30s 心跳续租。并发 ≤2。try/finally 清盘│
-│  镜像: ffmpeg/ffprobe/piper(+模型)/edge-tts/faster-whisper；无 yt-dlp│
+│  → autodub-core 阶段(ffmpeg 协议白名单; 字幕模式跳 tts/align;     │
+│     mux 按 output_mode 条件嵌 AIGC 标识/烧字幕)                    │
+│  → 产物 PUT R2 → complete。30s 心跳续租。并发 ≤2(留 light 槽)。清盘│
+│  镜像(hosted): ffmpeg/ffprobe/piper(+模型)/edge-tts；ASR 走云;无 yt-dlp│
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -71,9 +72,9 @@
 | `packages/schemas/` | job / segment / transcript / cue / job-manifest / error-code 的 JSON Schema + Pydantic + 生成 TS 类型 | **先行**；schema→Pydantic/TS **codegen + CI diff** 防漂移 |
 | `packages/autodub-core/` | 移植 free-video-dub 7 阶段 + contracts + ffmpeg utils + JobPaths（命名空间）+ 写 manifest + **AIGC 标识 mux** | 硬边界：不 import gateway / 不读权益 / 不处理支付 / 不接真实 key |
 | `packages/provider-adapters/` | 免费 ladder + registry + `select()` 三重 guard + **完整 `PAID_PROVIDERS`** + 5 不变量 | MVP 只含免费 provider |
-| `workers/media-worker/` | Dockerfile（ffmpeg/ffprobe/piper(+模型)/edge-tts/faster-whisper；**无 yt-dlp**）+ claim/30s 心跳 loop + ffmpeg 协议白名单 + R2 client + 清盘 | 主 Oracle A1 常驻 |
+| `workers/media-worker/` | Dockerfile（hosted：ffmpeg/ffprobe/piper(+模型)/edge-tts；**ASR 走云、不 bake faster-whisper**；**无 yt-dlp**。faster-whisper 仅 cli/self-host 镜像）+ claim/30s 心跳 loop + **条件管线（字幕模式跳 tts/align）** + ffmpeg 协议白名单 + R2 client + 清盘 | 主 Oracle A1 常驻 |
 | `apps/control-plane/` | CF Workers：公开端点 + `/internal`（claim/progress/complete/fail/config）+ 瘦 Queue consumer + Cron sweeper + D1 schema(jobs/settings) + KV 配置缓存 + `queue_adapter` + **admin settings API** | TS；wrangler |
-| `apps/web/` | CF Pages：**Svelte + Vite（CSR 静态，见 [ADR-0003](adr/0003-frontend-svelte.md)）**；上传/进度/下载单页 + 文案（排队/限额/保留期/AIGC 披露/隐私）；**UI 先中文**（多语言下一阶段）、**匿名优先**（MVP 不做登录，anon_id=签名 cookie）；admin 配置页属私有运营面（§14/AD-14，不在 open 前端） | TS |
+| `apps/web/` | CF Pages：**Svelte + Vite（CSR 静态，见 [ADR-0003](adr/0003-frontend-svelte.md)）**；上传/进度/下载单页 + **输出模式选择器**（字幕/配音/both × SRT/烧录 × 仅目标/双语，开始前选）+ **长视频警示**（advisory 时长触发：排队不固定 + 处理超时风险，引导字幕-only/短视频）+ 文案（排队/限额/保留期/AIGC 披露/隐私）；**UI 先中文**（多语言下一阶段）、**匿名优先**（MVP 不做登录，anon_id=签名 cookie）；admin 配置页属私有运营面（§14/AD-14，不在 open 前端） | TS |
 | `cli/local-runner/` | 薄封装 CLI（**URL 摄取仅此开**） | 无控制面依赖 |
 | `deploy/cloudflare/` · `deploy/docker-compose/` | wrangler.toml + D1 迁移 SQL（jobs/settings）· media-worker 编排 | — |
 | `packages/autodub-wasm/` | **不动**（Phase 2+，AD-16 deferred） | 占位 |
@@ -87,27 +88,28 @@
 **核心结构（移植）：** `Word{text,start_ms,end_ms}`；`TranscriptLine{index,start_ms,end_ms,speaker_id="SPEAKER_00",source_text,words[]}`；`Transcript{source_language,lines[],asr_provider}`；`DubbingSegment`⭐`{segment_id,index,speaker_id,start_ms,end_ms,target_duration_ms,source_text,target_text,voice_id?,tts_provider?,keep_original=false,align_method?,align_ratio?,needs_review=false}`；`TranslationResult`⭐`{source_language,target_language,mt_provider,segments[]}`。
 
 **新增（`Job` 权威记录 + `manifest.json` 投影，grilling 2026-06-20 定）：**
-- **`Job`**（控制面权威 = D1 行 / schemas 真源）= `{job_id, anon_or_user_id, tier:"tier1", status, current_stage?, source_type:"upload", upload_session_id, declared_bytes?, verified_bytes?, source_lang?, target_lang, plan:{asr,mt,tts}, settings_version, aigc_marking:{enabled,implicit,explicit,form,applied?}, created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, artifacts:{video_key?,srt_key?}, error_code?, error_detail?(仅服务端、不出 API), attempt, claim_version, counted_job, counted_minutes, refunded}`。`settings_version` = 创建时快照的"job 决定性配置"版本（§14 快照 vs 实时）；`counted_*/refunded` = 配额幂等标志（§9A）。
+- **`Job`**（控制面权威 = D1 行 / schemas 真源）= `{job_id, anon_or_user_id, tier:"tier1", status, current_stage?, source_type:"upload", upload_session_id, declared_bytes?, verified_bytes?, source_lang?, target_lang, output_mode:"subtitle_only"|"dub_only"|"both", subtitle_delivery:"srt"|"burned"|"both", subtitle_lang:"target"|"bilingual", plan:{asr,mt,tts}, settings_version, aigc_marking:{enabled,implicit,explicit,form,applied?}, priority, advisory_duration_ms?, enqueue_at, deadline_at, created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, artifacts:{video_key?,srt_key?}, error_code?, error_detail?(仅服务端、不出 API), attempt, claim_version, counted_job, counted_minutes, refunded}`。`settings_version` = 创建时快照的"job 决定性配置"版本（§14 快照 vs 实时）；`counted_*/refunded` = 配额幂等标志（§9A）。**v3.3**：`output_mode/subtitle_delivery/subtitle_lang` = 创建前用户选定（决定 pipeline 是否跑 tts/align、mux 是否烧字幕、AIGC 标识形态）；`priority/advisory_duration_ms/enqueue_at/deadline_at` = §8 优先调度用（`advisory_duration_ms` 来自浏览器、**仅排序、非硬 cap**；`deadline_at` = aging 兜底必跑时点）。
 - **`UploadSession`**（D1 `upload_sessions`，v3.2/CodeX#2）= `{upload_session_id, anon_or_user_id, source_key, declared_bytes, declared_type, status: pending|verified|consumed|expired, created_at, expires_at}`；**1h TTL**；`pending` 未在 TTL 内建 job → sweeper 删 R2 源 + 置 `expired`（防只传不交刷爆免费 R2）。
 - **`manifest.json`**（worker 写进 job 目录，用内核预留钩子）= `Job` 投影 + `worker_meta`（ffprobe 结果 / AIGC 标识实际嵌入方式 / 用的模型版本·sha）。
 - **状态机（4 态，终态 done|failed）**：`queued→running`(claim) / `running→queued`(租约过期重排，`attempt<max_attempts`) / `running→done`(complete) / `running→failed`(fail 或重排耗尽=`worker_lost`)。**留存正交**：`expires_at` + `data_purged_at?`（sweeper 删 R2 时置），**不设 `expired` 态**；UI"已过期"由 `now>expires_at || data_purged_at` **派生显示**（status 仍 done）。`intake/probing` **不单列态**（ffprobe 是 running 内首阶段，超时长/坏格式 → `failed`；"probing" 仅作 `current_stage` 标签）。stale-queued（worker 长宕）不建态，靠可观测性兜（ops 事故）。
-- **`error_code`** = `over_duration | unsupported_format | upload_too_large | source_verify_failed | source_fetch_failed | free_pool_exhausted | worker_lost | daily_cap_reached | internal_error`；→ 用户中文文案见 §9D（`error_detail` 原始信息仅服务端、不出 API）。
+- **`error_code`** = `over_duration | unsupported_format | upload_too_large | source_verify_failed | source_fetch_failed | free_pool_exhausted | worker_lost | processing_timeout | daily_cap_reached | internal_error`；→ 用户中文文案见 §9D（`error_detail` 原始信息仅服务端、不出 API）。`processing_timeout`（v3.3）= job 跑了但超 `job_hard_timeout`（区别于 `worker_lost`=worker 死），长视频专属风险。
 
 ---
 
 ## 4. `autodub-core` 移植（从 free-video-dub）
 
-**移植映射：** `contracts.py`→schemas + core dataclass（纯 stdlib）；`stages.py`（ingest→…→mux）→ `autodub-core/pipeline`（阶段逻辑基本零改，**mux 加 AIGC 标识步骤**）；`config.py`（`JobPaths`/`MAX_SPEEDUP=2.0`）→ core/config（JobPaths 加命名空间 + 路径包含校验）；`ffmpeg_utils.py`→ core/media；`fvd.py`→ `cli/local-runner`（**URL/yt-dlp 仅此**）；ladder/`PAID_PROVIDERS`/providers/不变量 → `provider-adapters`（§5）；**防白嫖水印（anti-leech artifact policy/stream-only/download-lock）→ Tier 1 仅删此项、不碰任何标识路径**；`premium_backend.py`**不移植**。
+**移植映射：** `contracts.py`→schemas + core dataclass（纯 stdlib）；`stages.py`（ingest→…→mux）→ `autodub-core/pipeline`（阶段逻辑基本零改，**mux 加 AIGC 标识步骤**；**v3.3：`tts`/`align` 按 `output_mode` 条件执行——字幕-only 跳过；mux 增"烧字幕"分支**）；`config.py`（`JobPaths`/`MAX_SPEEDUP=2.0`）→ core/config（JobPaths 加命名空间 + 路径包含校验）；`ffmpeg_utils.py`→ core/media；`fvd.py`→ `cli/local-runner`（**URL/yt-dlp 仅此**）；ladder/`PAID_PROVIDERS`/providers/不变量 → `provider-adapters`（§5）；**防白嫖水印（anti-leech artifact policy/stream-only/download-lock）→ Tier 1 仅删此项、不碰任何标识路径**；`premium_backend.py`**不移植**。
 
 **移植时必须改/加：**
 1. **`job_id→user` 命名空间 + 路径包含校验**；**ingest 路径 pin** 到内核 `JobPaths`（`video/original.<ext>`）使 `ingest()` cache-hit。
 2. 写 `manifest.json` = job/user/标识元数据。
-3. **AIGC 标识 mux 步骤（新增，默认开；开关为 §14 高敏可调、关闭需 audited acknowledgment，非静默）—— v3 可测 MVP 默认形态：**
+3. **AIGC 标识 mux 步骤（新增，默认开；开关为 §14 高敏可调、关闭需 audited acknowledgment，非静默；v3.3 **按 `output_mode` 条件化**——配音=合成语音法定标识，字幕-only=仅机翻轻披露见 §9B）—— v3 可测 MVP 默认形态：**
    - **隐式**（机读，不可见）：MP4 容器 metadata 标（"AI 生成合成 / 服务方 / 内容编号"）+ `Job.aigc_marking` + SRT 文件头 `NOTE`。满足 EU AI Act 50(2) 机读标注。
    - **显式**（可感知，轻量）：**片尾 1 秒轻提示**（"AI 配音 / AI-dubbed"，优先于常驻角标）+ 下载页披露。满足 deepfake 披露。
    - **形态 + 开关均可配（§14，项目主决策）：默认开（安全默认）；`aigc_explicit_form ∈ {tail_notice, corner_label, disclosure_only}`；`aigc_marking_enabled` 可关，但关闭需 audited acknowledgment（项目主明确接受法律责任、记审计），不是静默开关。** 自托管可关/调。**标识能力代码路径始终存在，§14 只控开关、不删能力。** 律师后置精修措辞/位置——**M1 即测此默认机制，不被律师 gate 阻塞**。
 4. **默认 TTS = piper**（commercial-safe；edge-tts 仅实验/非商用 lane，AD-6 / §7.5）。
-5. **模型/二进制供应链 pin**（build 时）：piper `.onnx` / faster-whisper 权重 / ffmpeg pin 版本 + **sha256** + 许可 gate（XTTS/F5 非商用禁入默认镜像）；与 §14 `tts_model_registry` 一致。
+5. **模型/二进制供应链 pin**（build 时）：piper `.onnx` / ffmpeg pin 版本 + **sha256** + 许可 gate（XTTS/F5 非商用禁入默认镜像）；**v3.3：hosted 镜像不再 bake faster-whisper（ASR 走云）**，faster-whisper 权重仅 cli/self-host 镜像 pin；与 §14 `tts_model_registry` 一致。
+6. **输出模式条件管线（v3.3，新增）**：pipeline 按 `Job.output_mode` 装配——`字幕-only` = `ingest→prepare→transcribe→translate→出字幕`（**跳 tts/align**）；`配音/both` = 全程。`subtitle_delivery=burned` → mux 增 `subtitles` 滤镜**重编码视频**（成本：非 `-c:v copy`，随时长×分辨率涨、计入 wall-time/cap）；`subtitle_lang=bilingual` → SRT 每 cue 含源+目标两行（数据已在，近零成本）。`字幕-only` 产物 = `.srt`（和/或带字幕视频），无配音视频。
 
 **硬边界（AD-13/14，CI 守）：** core 不得 import gateway / 控制面 / 计费 / 真实 key；只放 pipeline / 对齐 / retiming / 契约 / provider protocol / 标识 / 确定性工具。
 
@@ -115,7 +117,7 @@
 
 ## 5. `provider-adapters`（免费阶梯 + 付费安全）
 
-**MVP 免费阶梯（全 $0）：** ASR `faster_whisper`(本地,默认镜像内)→`groq`→`cloudflare`；MT `cloudflare`→`groq`→`deepl`→`ollama`；TTS **`piper`(默认,本地)**→`cloudflare`(MeloTTS 6 语)→`edge_tts`(实验 lane)。
+**MVP 免费阶梯（全 $0）：** ASR（v3.3 **云优先**）`groq`(whisper-large-v3-turbo)→`cloudflare`(Workers AI Whisper)→`faster_whisper`(**仅 cli/self-host 兜底，hosted 不烤**)；MT `cloudflare`→`groq`→`deepl`→`ollama`；TTS **`piper`(默认,本地)**→`cloudflare`(MeloTTS 6 语)→`edge_tts`(实验 lane)。**hosted 云 ASR 配额耗尽 → `free_pool_exhausted`（不在弱箱回退本地，护 throughput；ADR-0004 预期路径）。** groq/cloudflare 免费 ASR 均 **$0、不在 PAID 集**，云优先不碰付费红线。
 
 **付费安全（红线核心）：** 移植**完整** `PAID_PROVIDERS` 内核集（动笔时从真实 `config.py` 全量枚举，**含字符串名无注册 adapter 的条目**）+ `is_paid_provider()` + 每 provider `ProviderInfo.paid`；`select()` 三重 guard（① 字符串级构造前拦 ② `info.paid` ③ auto 路径跳过任何 paid）；**MVP `allow_paid` 恒 false**（§14 **不可改**，红线锁）；`'backend'` 等字符串-only 付费名无 factory 是设计正确（勿删）。
 
@@ -136,12 +138,16 @@ loop:
   try:
     GET 源(R2) → workdir/video/original.<ext>
     meta = ffprobe(源)                        # 【首阶段准入】时长/编码/分辨率/格式
-    if meta.duration > cfg.max_video_duration or 格式∉allowlist or 是 playlist/m3u8:
-        fail(error_code, 删 R2 源); continue
-    for stage in [ingest,prepare,transcribe,translate,tts,align,mux(+AIGC标识)]:
+    if meta.duration > cfg.max_video_duration[job.output_mode] or 格式∉allowlist or 是 playlist/m3u8:
+        fail(error_code, 删 R2 源); continue   # per-mode cap：字幕-only 宽、配音紧
+    stages = [ingest,prepare,transcribe,translate]
+           + ([tts,align] if job.output_mode != "subtitle_only" else [])
+           + [mux(条件: 配音嵌 AIGC标识 / subtitle_delivery=burned 烧字幕)]
+    for stage in stages:
+        if 超 cfg.job_hard_timeout_sec: fail(processing_timeout, 删源); break  # 长视频超时
         run autodub-core stage(workdir, plan=job.plan, allow_paid=False)
         # ffmpeg/ffprobe 一律带 -protocol_whitelist file,crypto（禁 http/hls/concat 外链）
-    PUT 产物(dubbed_video.mp4[带标识], subtitles.srt) → R2(key 含 claim_version)
+    PUT 产物(按 output_mode: dubbed_video.mp4[带标识] 和/或 subtitles.srt[双语?] 和/或 带字幕视频) → R2(key 含 claim_version)
     POST .../complete {artifacts}             # 幂等，WHERE status=running AND claim_version
   except: POST .../fail {error_code}          # fail-closed，不静默重试付费
   finally: stop heartbeat; rm -rf workdir/<job.id>   # try/finally 清盘
@@ -149,9 +155,9 @@ loop:
 
 - **ffmpeg/ffprobe SSRF 防线（v3，CodeX P1）**：① 格式 allowlist（拒 m3u8/playlist/concat）；② ffmpeg `-protocol_whitelist file,crypto`（禁外链协议）；③ **主机层 nftables egress allowlist**（控制面 + R2 + 免费 provider 域名；**显式封 IMDS `169.254.169.254` + RFC1918 内网**）；④ CI 负测"伪装 playlist 不触网"（§11/§12）。
 - **租约/心跳/重排（H1，单 job 级）**：claim 置 `lease_expires_at = now + cfg.lease_ttl_sec`（默认 180s）；**独立心跳线程每 `cfg.heartbeat_interval_sec`（默认 30s）续租**（不只靠 stage 边界 progress——单阶段可能 >180s）；`cfg.job_hard_timeout_sec`（默认 2700=45min）封顶；超 lease 由 sweeper 重排（`attempt < cfg.max_attempts` 默认 2，即初跑 + 1 次）否则 `worker_lost`。
-- **并发 ≤ `cfg.worker_concurrency`**（默认 2）；**per-job 磁盘预算**派生自时长 cap；启动清孤儿目录。
+- **并发 ≤ `cfg.worker_concurrency`**（默认 2）；**预留 ≥`cfg.light_slot_reserve`（默认 1）槽位给短/字幕 job**（`free_min_share`：长 job 最多占其余槽，短 job 永远有槽、不被长 job 堵死；**运行中不抢占**——避白算 + 弱箱 OOM，v3.3）；云 ASR 后字幕-only 极轻（无 TTS）可与长 job 并行；**per-job 磁盘预算**派生自 per-mode 时长 cap；启动清孤儿目录。
 - **鉴权 + secrets（决策 B）**：Oracle 箱上**只放 bootstrap worker 共享密钥**（root-600、不进镜像/git、双密钥 current+next 零停机轮换）；**免费 provider 凭据启动时从 `GET /internal/credentials` 拉（TLS + 共享密钥认证）、仅在内存**——箱磁盘无 provider key，被黑 blast radius 最小。worker 不接任何用户/付费 key。
-- **部署（Oracle A1 常驻，ARM）**：镜像 **linux/arm64**（buildx 多架构 arm64+amd64，兼小 VM 备机）；**pin-sha256 模型烤进镜像**（piper 起步语言 .onnx + faster-whisper tiny/base int8 → 即时可用、可复现）；`docker-compose restart: unless-stopped` 常驻，**claim 长轮询保持非 idle**（避 Oracle 7 天 idle 回收）；崩溃/重启自起 + 清孤儿 workdir；实例被回收 = ops 事故 → 小 VM 备 / IaC 重建。
+- **部署（Oracle A1 常驻，ARM）**：镜像 **linux/arm64**（buildx 多架构 arm64+amd64，兼小 VM 备机）；**pin-sha256 模型烤进镜像**（piper 起步语言 .onnx → 即时可用、可复现；**v3.3 hosted 去 faster-whisper bake——ASR 走云**，faster-whisper 仅 cli/self-host 镜像）；`docker-compose restart: unless-stopped` 常驻，**claim 长轮询保持非 idle**（避 Oracle 7 天 idle 回收）；崩溃/重启自起 + 清孤儿 workdir；实例被回收 = ops 事故 → 小 VM 备 / IaC 重建。
 - **kill-switch**：`cfg.accept_new_jobs=false`（§14，手动 / 成本阈值自动）即让 `POST /api/jobs` 拒绝-带文案。
 
 ---
@@ -170,15 +176,23 @@ loop:
 
 **内部端点（worker 鉴权）：** `config`（拉 §14 运行时配置）；`credentials`（决策 B：拉免费 provider 凭据，TLS + 共享密钥认证，worker 仅内存持有、不落 Oracle 盘）；`claim`（原子 `queued→running` + 置 lease，乐观锁 `claim_version`）；`progress`(=心跳续租)；`complete`/`fail`（**幂等**：仅 `WHERE status='running' AND claim_version` 匹配生效；重复/迟到 200 no-op；首个终态胜；产物写 `claim_version` 前缀 key 防僵尸覆盖）。
 
-**D1 表：** `jobs`（`id, anon_or_user_id, status, current_stage?, tier, source_type, source_key, upload_session_id, declared_bytes, verified_bytes, source_lang?, target_lang, plan(json), settings_version, created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, video_key?, srt_key?, error_code?, error_detail?, attempt, claim_version, counted_job, counted_minutes, refunded`）；`upload_sessions`（`upload_session_id, anon_or_user_id, source_key, declared_bytes, declared_type, status, created_at, expires_at`，1h TTL）；`abuse_counters`（per-IP/anon/user + 全局 jobs + 全局 video_minutes，键 `(scope,id,day)`）；`settings`（§14）。**KV** 缓存 settings 热读。
+**D1 表：** `jobs`（`id, anon_or_user_id, status, current_stage?, tier, source_type, source_key, upload_session_id, declared_bytes, verified_bytes, source_lang?, target_lang, output_mode, subtitle_delivery, subtitle_lang, plan(json), settings_version, priority, advisory_duration_ms?, enqueue_at, deadline_at, created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, video_key?, srt_key?, error_code?, error_detail?, attempt, claim_version, counted_job, counted_minutes, refunded`）；`upload_sessions`（`upload_session_id, anon_or_user_id, source_key, declared_bytes, declared_type, status, created_at, expires_at`，1h TTL）；`abuse_counters`（per-IP/anon/user + 全局 jobs + 全局 video_minutes，键 `(scope,id,day)`）；`settings`（§14）。**KV** 缓存 settings 热读。
 
-**claim 并发正确性：** `UPDATE ... SET status='running',claim_version=claim_version+1 WHERE id=(SELECT id FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1) AND status='queued'`，验 D1 事务/隔离能防双取；以受影响行数 + `claim_version` 回读确认；§12 加并发认领测试。
+**claim 并发正确性：** `UPDATE ... SET status='running',claim_version=claim_version+1 WHERE id=(SELECT id FROM jobs WHERE status='queued' ORDER BY <priority_score> DESC, created_at LIMIT 1) AND status='queued'`（**v3.3：按 §8 优先级排序取队首、不再纯 `created_at` FIFO**；priority_score 由 output_mode/advisory_duration/aging 派生）；验 D1 事务/隔离能防双取；以受影响行数 + `claim_version` 回读确认；§12 加并发认领测试。
 
 ---
 
-## 8. 最小内嵌单 lane 队列
+## 8. 单 lane 优先队列（v3.3，对 v3.2「单 lane FIFO」的有意修订）
 
-**MVP = 一条 FIFO lane**：CF Queues Free 投递 + 瘦 consumer + worker 单认领、进程内并发 ≤2。**无** WFQ/老化/token 桶/provider pool/all-or-nothing lease（下沉 #2）。ETA `≈ (位次/并发)×近期均耗`，展区间标"尽力而为"。feature-flag 默认 inert。D1 持久 job + 租约。
+**为何不再纯 FIFO**：v3.3 允许字幕-only 长视频（~30min），纯 FIFO 下一个长 job 会堵死后面一堆短 job——故按**预期处理时长**排序成为允许长视频的**必然结果**。MVP 落「**SPT 偏置 + aging + 预留 light 槽位、运行中不抢占**」，仍是单 lane（全 WFQ/多 lane 留 #2）。
+
+**MVP = 一条 lane 的优先队列**：CF Queues Free 投递 + 瘦 consumer + worker 认领；claim 时按优先级取队首（非 `created_at` FIFO）。
+- **优先级 key** ≈ `f(output_mode[字幕 > 配音], advisory_duration_ms/size[短 > 长], aging(now−enqueue_at))`——短/轻先跑、同类短先跑。**`advisory_duration_ms` 来自浏览器、仅排序用；硬 cap 仍由 worker ffprobe 强制**（谎报插队 = 小滥用，照样被 ffprobe 卡 + 计数）。
+- **aging 防饿死**：等待越久优先级越升 + per-job `deadline_at` 兜底 → 长 job **有界时间内必跑**（**非"永远等空闲"**——纯 SPT 会饿死长 job、撑到 24h TTL 被清，比 FIFO 还糟）。
+- **预留 light 槽位**（`free_min_share`，§6）：并发中保留 ≥1 槽给短/字幕 job → 长 job 不堵死短 job；**运行中不抢占**（真抢占需阶段 checkpoint + R2 中间态，留 #2）。
+- **仍非多 lane WFQ**（token 桶 / provider pool / all-or-nothing lease 下沉 #2）。ETA 区间标"尽力而为"；**长 job ETA 标"不固定 + 处理超时风险"**（透明度）。feature-flag 默认 inert。D1 持久 job + 租约。
+
+> **claim SQL 调整**：原 `ORDER BY created_at` 改 `ORDER BY <priority_score> DESC`（priority_score 由 output_mode/advisory_duration/aging 派生、随等待重算或物化）；并发正确性（claim_version 乐观锁 / 防双取）不变，§7/§12 测试同样覆盖。
 
 ---
 
@@ -187,7 +201,7 @@ loop:
 **A. 滥用闸（去白嫖水印 ≠ 去防滥用，P8；准入即拦、fail-closed）：**
 1. **仅直传**（决策 ①，无 URL → 无 yt-dlp SSRF 面）+ **格式 allowlist**（拒 m3u8/playlist，§6 ffmpeg 防线）。
 2. **上传大小**：签发声明 ≤ `cfg.max_upload_bytes`（默认 500MB）+ **PUT 后 HEAD 校验真实值**，超限删对象不建 job（§7）。
-3. **时长 cap 由 worker ffprobe 首阶段强制**（控制面准入拿不到时长，浏览器报值仅参考）；超 `cfg.max_video_duration`（默认 300s）即 fail+删源。
+3. **时长 cap 由 worker ffprobe 首阶段强制**（控制面准入拿不到时长，浏览器报值仅排序/警示用）；超 **per-mode `cfg.max_video_duration[output_mode]`**（v3.3：字幕-only ~30min / 字幕+烧录 中等 / 配音 ~5–10min，默认见 §13）即 fail+删源（`over_duration`）。**长视频另有 `processing_timeout` 风险**（超 `job_hard_timeout`，前端创建前已警示）。
 4. **每日 cap（双池，CodeX P2）**：per-IP/anon（默认 1）/ per-user（默认 2）+ **全局任务数**（默认 20-30）**与全局 `accepted_video_minutes/day`（默认 100-120）双池，先到先停**。**P8/§4.7.4** 要求 per-IP/user/**global**（**不是 §5.4.10**，那是 F2 试用专属）。原子计数（机制见下「实现」）；**计数存储不可用即拒**。用户侧仍显示"每日任务数"，后台用分钟池护成本。
 5. cap 单位 = **"配音任务数 / 分钟"**，不是 provider 调用额度（守红线 2 / P5，前向兼容 #4）。cap 满 → 文案引导，**不自动升级付费**。
 
@@ -198,7 +212,7 @@ loop:
 - **幂等补偿（CodeX#3）**：配额效果**各自只生效一次**——`Job.counted_job/counted_minutes/refunded` 标志 + 扣减/退还**绑定胜出的 `claim_version`**；重试 / 重复 complete·fail 回调 / 租约重排后再跑都**不多扣多退**（尤其分钟池扣减**跨重排幂等**：同一 job 多次 ffprobe 只扣一次）。
 - **身份纵深**：anon = 签名(HMAC) cookie（per-anon 闸）；**per-IP 闸**（IPv4 整 / **IPv6 /64**，`CF-Connecting-IP`）兜 cookie-clear；**全局 job/分钟双池 = 真正硬上限**（个体绕过也兜总花费）；`POST /api/jobs` 挂 **Cloudflare Turnstile** 抬 bot/farming 门槛。**接受个体绕过**（清 cookie + 轮 IP），设备指纹/重身份**后置**——全局池 + Turnstile + kill-switch 已是成本兜底。
 
-**B. AIGC 标识（生成嵌入，默认开）：** v3 可测默认形态见 §4 第 3 点（隐式 MP4 metadata + manifest + SRT NOTE；显式 片尾 1s 提示 + 下载页披露）。境外/海外用户·**不备案**（PRC 专属）→ EU 式（AI Act 50）。**形态 + 开关 §14 均可配（默认开；关闭 = hosted 私有运营面的【结构化 jurisdiction override】——记 地区/原因/操作者/时间、责任项目主自负，开源默认不鼓励关，CodeX#4）**；律师后置精修。§12 断言：默认开时成片带隐式标 + 显式披露。
+**B. AIGC 标识（生成嵌入，默认开）：** v3 可测默认形态见 §4 第 3 点（隐式 MP4 metadata + manifest + SRT NOTE；显式 片尾 1s 提示 + 下载页披露）。境外/海外用户·**不备案**（PRC 专属）→ EU 式（AI Act 50）。**按 `output_mode` 条件化（v3.3）：配音 = 合成语音法定标识（deepfake 披露，隐式 metadata + 显式片尾提示）；字幕-only = 无合成语音 → 仅"机器翻译"轻披露（SRT NOTE / 元数据），不套语音 deepfake 标。** **形态 + 开关 §14 均可配（默认开；关闭 = hosted 私有运营面的【结构化 jurisdiction override】——记 地区/原因/操作者/时间、责任项目主自负，开源默认不鼓励关，CodeX#4）**；律师后置精修。§12 断言：默认开时**配音**成片带隐式标 + 显式披露、**字幕-only** 带机翻轻披露。
 
 > **项目主决策（记录在案）：** AIGC 标识开关后台可调、默认开、关闭需 audited acknowledgment、**责任项目主自行承担**——属对母文档红线 3「深度合成法定标识保留」在 open Tier 1 admin 层的**有意软化**（管辖相关；标识*能力*始终存在，只是可被有意识地按辖区关闭）。**已同步标注母文档 §7.3 红线 3（2026-06-20）。**
 
@@ -215,6 +229,7 @@ loop:
 | `source_fetch_failed` | 读取上传文件失败，请重试 |
 | `free_pool_exhausted` | 今日免费资源已用尽——明日再来，或自带 key(Tier 2) / 付费托管(Tier 3) |
 | `worker_lost` | 处理中断、已自动重排；多次失败请稍后重试 |
+| `processing_timeout` | 视频太长、处理超时，建议缩短视频或改用「仅字幕」模式 |
 | `daily_cap_reached` | 今日免费任务数已达上限，请明日再来 |
 | `internal_error` | 服务出错了，请稍后重试；持续出现请反馈 |
 
@@ -234,7 +249,7 @@ loop:
 - **`autodub-core` 硬边界 lint**：禁 core import gateway/控制面/计费/真实 key。
 - **SSRF 防回归（v3 强化）**：CI 断言托管 worker 无 yt-dlp、URL 分支关闭；**ffmpeg/ffprobe 带 `-protocol_whitelist file,crypto`、worker egress 仅 CP/R2**；**负测"上传伪装 playlist/m3u8 不触网、被格式 allowlist 拒"**。
 - **presign 绑定（v3）**：CI/审查断言 PUT 短期 + key 派生 + **`POST /api/jobs` 必 HEAD 校验真实 size/type 后才建 job**；下载 GET 校归属 + 过期拒绝。
-- **AIGC 标识**：CI 断言**默认配置下**成片带隐式标 + 显式披露；**删水印的改动不得触碰任何标识路径、标识代码能力路径必须始终存在（即便 §14 配置关闭）**；§14 关闭走 audited acknowledgment + 审计记录（高敏可调，非静默）；交付 download-unlocked。
+- **AIGC 标识**：CI 断言**默认配置下按 `output_mode`**——**配音**成片带隐式标 + 显式披露、**字幕-only** 带机翻轻披露（v3.3）；**删水印的改动不得触碰任何标识路径、标识代码能力路径必须始终存在（即便 §14 配置关闭）**；§14 关闭走 audited acknowledgment + 审计记录（高敏可调，非静默）；交付 download-unlocked。
 - **§14 配置守卫**：CI/校验层断言**红线类不在可改集**（`allow_paid` / PAID 集 / SSRF 防线 / core 边界 / presign HEAD 逻辑）；**AIGC 标识开关 = 高敏可调项**（默认开 + 关闭需 audited acknowledgment，非红线锁——项目主决策）；可改项有安全上下界。
 - **open/private**（AD-15/AD-14）：站方 key/计费/风控/托管调度策略/**admin 运营 UI 与线上数值**不进开源默认配置；开源只给配置**机制 + schema + 安全默认 + 红线锁**。不卖原始额度（红线 2）。独立用户/财务/物理设备，仅共享 `autodub-core`。
 
@@ -246,7 +261,7 @@ loop:
 
 **可观测性基线：** 结构化 JSON 日志（keyed by `job_id`）；指标 queued/running/done/failed、claim 时延、各阶段耗时、免费池剩余、全局分钟池余额、worker 末次心跳；≥2 告警（`running` 超 lease；池/成本逼近 cap）。
 
-**验证 / DoD（门控 M2/M3）：** 红线必绿（5 不变量 / core 边界 lint / SSRF·presign·标识 CI / schema codegen-diff / **§14 红线不可改断言**）；确定性 golden-test（`assign_timing`/`stitch_timeline`）；negative/abuse（超时长、**超大上传被 HEAD 拒**、**伪装 playlist 不触网**、不支持格式、日 cap/分钟池耗尽）；失败/恢复（**lost-worker 租约重排**、complete/fail 幂等、**配额幂等（重排/重复回调不双扣多退）**、并发认领防双取、2 并发 soak）；生命周期（TTL + 中间件清理 + **上传孤儿清理**）；标识（成片隐式 + 显式断言）；配置（改 cap 热生效、红线项不可改）。pass bar 门控 M2/M3。
+**验证 / DoD（门控 M2/M3）：** 红线必绿（5 不变量 / core 边界 lint / SSRF·presign·标识 CI / schema codegen-diff / **§14 红线不可改断言**）；确定性 golden-test（`assign_timing`/`stitch_timeline`）；negative/abuse（**per-mode 超时长**、**超大上传被 HEAD 拒**、**伪装 playlist 不触网**、不支持格式、日 cap/分钟池耗尽、**云 ASR 配额尽→`free_pool_exhausted`**、**长视频超 hard_timeout→`processing_timeout`**）；失败/恢复（**lost-worker 租约重排**、complete/fail 幂等、**配额幂等（重排/重复回调不双扣多退）**、并发认领防双取、2 并发 soak）；**v3.3 输出模式 + 调度**（字幕-only **跳 tts/align** 出 `.srt`、双语 SRT 两行、`burned` 重编码出带字幕视频、配音全程；**优先调度：短/字幕先跑、aging 使长 job 有界必跑、预留 light 槽位下短 job 不被长 job 堵死、运行中不抢占**）；生命周期（TTL + 中间件清理 + **上传孤儿清理**）；**标识（按 output_mode：配音 成片隐式 + 显式断言、字幕-only 机翻轻披露断言）**；配置（改 cap 热生效、红线项不可改）。pass bar 门控 M2/M3。
 
 **里程碑（i18n 完成后启动；非串行硬绑）：**
 - **M1**（≈阶段 3，1–2 周）：契约 + core 移植（含标识 mux）+ 5 不变量 + codegen-diff CI；`cli/local-runner` 本地端到端跑出**带标识** mp4+srt。
@@ -261,15 +276,17 @@ loop:
 
 | 项 | 默认 | 备注 |
 |---|---|---|
-| `max_video_duration_sec` | 300（5min） | 实测后调 |
+| `max_video_duration_sec`（per-mode，v3.3） | 配音 300（5min）· 字幕+烧录 900（15min）· 字幕-only SRT 1800（30min） | 配音受 TTS wall-time 卡、字幕-only 受云 ASR/MT 配额卡；实测后调 |
 | `max_upload_bytes` | 500MB | 偏保守，可再降 |
 | `daily_cap_ip/anon` · `daily_cap_user` | 1 · 2 | — |
 | `daily_cap_global_jobs` · `daily_cap_global_video_minutes` | 20-30 · 100-120 | 双池先到先停 |
-| `worker_concurrency` | 2 | AD-10 |
+| `worker_concurrency` · `light_slot_reserve` | 2 · 1 | AD-10；预留 1 槽给短/字幕 job（v3.3，§6/§8） |
+| `output_mode` · `subtitle_delivery` · `subtitle_lang`（默认值，v3.3） | `dub_only` · `srt` · `target` | 用户创建前可改；默认配音/SRT/仅目标 |
+| 优先调度（v3.3） | SPT 偏置（字幕>配音、短>长，用 advisory）+ aging + per-job `deadline` | 单 lane 内，§8；advisory 仅排序、硬 cap 仍 ffprobe |
 | `lease_ttl_sec` · `heartbeat_interval_sec` · `job_hard_timeout_sec` · `max_attempts` | 180 · 30 · 2700 · 2 | 心跳独立计时器 |
 | `artifact_ttl_hours` | 24 | AD-17 内可调 |
 | `log_retention` | job_meta 30d / abuse 90d / takedown 180d | 与产物 24h 两类 |
-| `asr_default` / faster-whisper | 默认镜像含 faster-whisper（pin tiny/base int8）或首启预热 | 不全压 Groq/CF 免费 API |
+| `asr_default`（v3.3 云优先） | `groq`(whisper-large-v3-turbo)→`cloudflare`→`faster_whisper`(仅 cli/self-host) | hosted 不烤 faster-whisper；配额尽→`free_pool_exhausted`，瓶颈由 CPU 转日配额 |
 | `tts_model_registry` / `no_model_policy` | registry(lang/voice/license/sha256/size/enabled)；无模型 **fail-closed + 文案**（不默认落 edge-tts）；MeloTTS 确认 ToS 后作显式 experimental fallback | — |
 | `aigc_marking_enabled` / `aigc_explicit_form` | 默认开；`tail_notice`（片尾 1s）+ metadata + SRT NOTE + 下载页披露 | 开关高敏可调（关闭需 audited ack、责任自负），形态可调，§14 |
 
@@ -288,8 +305,9 @@ loop:
 **🟢 可调清单（默认见 §13；分组）：**
 | 组 | 键 |
 |---|---|
-| 限额 | `max_video_duration_sec` · `max_upload_bytes` · `daily_cap_ip/anon` · `daily_cap_user` · `daily_cap_global_jobs` · `daily_cap_global_video_minutes` · `upload_format_allowlist` · per-IP upload-session cap |
-| 调度 | `worker_concurrency` · `lease_ttl_sec` · `heartbeat_interval_sec` · `job_hard_timeout_sec` · `max_attempts` |
+| 限额 | `max_video_duration_sec`**（per-mode：配音/字幕烧录/字幕SRT，v3.3）** · `max_upload_bytes` · `daily_cap_ip/anon` · `daily_cap_user` · `daily_cap_global_jobs` · `daily_cap_global_video_minutes` · `upload_format_allowlist` · per-IP upload-session cap |
+| 调度 | `worker_concurrency` · **`light_slot_reserve`（v3.3）** · **优先调度参数（`aging_*` / per-job `deadline` 上限，v3.3）** · `lease_ttl_sec` · `heartbeat_interval_sec` · `job_hard_timeout_sec` · `max_attempts` |
+| 输出（v3.3） | `output_mode`/`subtitle_delivery`/`subtitle_lang` 默认值（用户创建前可覆盖）· 长视频警示阈值 |
 | 开关 | `accept_new_jobs`(总闸/maintenance) · `kill_switch`(手动 + 阈值自动) · 每免费 provider `enabled` · `edge_tts_experimental_lane`(off) · `cf_melotts_fallback` · `free_pool_auto_degrade` |
 | 留存 | `artifact_ttl_hours`(AD-17 内) · `log_retention`{job_meta/abuse/takedown} |
 | 成本 | free-pool 预算/阈值（auto-degrade / kill-switch 触发点）· 告警阈值 |
@@ -302,7 +320,7 @@ loop:
 
 **🟠 break-glass（受限，非随手可调，CodeX#1）：** `queue_backend`——**生产锁 `cf_queues`**；`d1` 仅 local/dev 或事故 fallback、切换**须审计**（防误切回 D1 poll、生产退化）。
 
-**快照 vs 实时（CodeX#5）：** 🟢 可调项再分两类——**① 创建时快照进 Job**（`max_upload_bytes` / `max_video_duration` / `tts_model_registry` / `no_model_policy` / `aigc_*` 等"job 决定性"配置 → 记 `Job.settings_version`，job 行为不随中途改配漂移、排查可复现）；**② 实时**（`accept_new_jobs` / `kill_switch` / 全局 cap / `worker_concurrency` / lease 等运营开关，立即生效）。
+**快照 vs 实时（CodeX#5）：** 🟢 可调项再分两类——**① 创建时快照进 Job**（`max_upload_bytes` / `max_video_duration` / `tts_model_registry` / `no_model_policy` / `aigc_*` 等"job 决定性"配置 → 记 `Job.settings_version`，job 行为不随中途改配漂移、排查可复现）；**② 实时**（`accept_new_jobs` / `kill_switch` / 全局 cap / `worker_concurrency` / `light_slot_reserve` / 优先调度 `aging_*` / lease 等运营开关，立即生效）。**注**：`output_mode`/`subtitle_delivery`/`subtitle_lang` 是**用户创建前选定的 Job 字段**（非 settings 快照），但 per-mode `max_video_duration` 默认值随 `settings_version` 快照。
 
 **机制：**
 - **存储**：D1 `settings`(`key, value, type, min?, max?, updated_by, updated_at`) 真源 + 变更审计；KV 缓存热读（控制面每请求读、TTL 短）；worker 启动 + claim 时拉 `GET /internal/config`。**复刻上游"运行时热配置"模式但独立**（AD-15，不复用 SaaS 配置）。
@@ -325,12 +343,12 @@ loop:
 ### 轨 1 — 本地管线（依赖 Step 0 schemas）
 - **T1.1** `autodub-core` 拷贝-改造 stages/config/ffmpeg_utils（先不加命名空间，先本地跑通出 mp4+srt）。
 - **T1.2** `provider-adapters` 拷 ladder + `select()` 三重 guard + **完整 `PAID_PROVIDERS`** → 5 不变量转绿。
-- **T1.3** 必改项离散 commit：`allow_paid=false` 钉死 → `job_id`/user 命名空间 + 路径包含校验 + 写 manifest → piper 提默认（edge_tts 降实验）→ AIGC 标识 mux 步骤 → ffmpeg `-protocol_whitelist` + 格式 allowlist。
+- **T1.3** 必改项离散 commit：`allow_paid=false` 钉死 → `job_id`/user 命名空间 + 路径包含校验 + 写 manifest → piper 提默认（edge_tts 降实验）→ AIGC 标识 mux 步骤 → ffmpeg `-protocol_whitelist` + 格式 allowlist → **（v3.3）输出模式条件管线（`output_mode` 跳 tts/align / `subtitle_delivery=burned` 烧字幕 / 双语 SRT）+ ASR 阶梯云优先（hosted 不烤 faster-whisper）+ 按模式条件 AIGC 标识**。
 - **T1.4** `cli/local-runner`：本地端到端出**带标识** mp4+srt。**＝ M1 达成**。
 
 ### 轨 2 — 云 walking skeleton（与轨 1 并行，依赖 Step 0 schemas）
 - **T2.0（硬门槛，CodeX#6）** D1-claim 并发 spike：**20 consumer 抢 100 job**，验**无重复 claim / 租约过期可重领 / `attempt` 不超限**——**先于 T2.1 建任何东西**（若 D1 扛不住安全原子 claim，即提前把 CF Queues 拉前的信号；比接真实 worker 更早暴露风险）。
-- **T2.1** control-plane(CF Workers)：`uploads/sign` + **PUT 后 HEAD 校验** + `jobs` CRUD(D1) + `claim`(原子 queued→running + 置 lease) + `progress`(心跳) + `complete`/`fail`(幂等) + `download`(presigned GET)；`queue_adapter` = **D1-claim**。
+- **T2.1** control-plane(CF Workers)：`uploads/sign` + **PUT 后 HEAD 校验** + `jobs` CRUD(D1，**含 v3.3 `output_mode`/`subtitle_*`/`priority`/`advisory_duration_ms`/`enqueue_at`/`deadline_at` 字段**) + `claim`(原子 queued→running + 置 lease，**按 §8 优先级排序取队首 + aging**) + `progress`(心跳) + `complete`/`fail`(幂等) + `download`(presigned GET)；`queue_adapter` = **D1-claim**。
 - **T2.2** 桩 worker(Python，连本地/Oracle CP)：`claim` → 输入原样拷成输出（不跑真管线）→ `complete`；**30s 独立心跳续租**；try/finally 清盘。
 - **T2.3** sweeper(CF Cron)：租约过期重排（+ TTL 清理骨架）。**杀 worker 中途测试** → assert 自动重排（证 H1）。
 - **T2.4** abuse gate 骨架 + presign 绑定 CI + SSRF CI（无 yt-dlp / 格式 allowlist / 协议白名单）。
@@ -357,8 +375,8 @@ loop:
 
 **DoD owner / 顺序**：每条测试**跟 introducing 它的步骤一起落**（新/关键的 test-first），**不攒到最后**；**M2 = 全套必绿门**。
 - **Step 0**：schema codegen-diff。
-- **轨1**：5 不变量 + core 边界 lint（T1.2 绿）、golden `assign_timing`/`stitch_timeline`（T1.1）、AIGC 标识断言（T1.3）、ffmpeg 协议白名单 + 格式 allowlist（T1.3）。
-- **轨2**：presign 绑定 + 超大上传 HEAD 拒（T2.1/2.4）、SSRF "伪装 playlist 不触网"（T2.4）、lost-worker 租约重排杀-worker 测试（T2.3）、complete/fail 幂等 + 并发认领防双取（T2.1）、abuse 双池耗尽（T2.4→M2）。
+- **轨1**：5 不变量 + core 边界 lint（T1.2 绿）、golden `assign_timing`/`stitch_timeline`（T1.1）、AIGC 标识断言（**按 output_mode**，T1.3）、ffmpeg 协议白名单 + 格式 allowlist（T1.3）、**（v3.3）输出模式条件管线**（字幕-only 跳 tts/align 出 srt、双语 SRT、烧字幕重编码，T1.3）。
+- **轨2**：presign 绑定 + 超大上传 HEAD 拒（T2.1/2.4）、SSRF "伪装 playlist 不触网"（T2.4）、lost-worker 租约重排杀-worker 测试（T2.3）、complete/fail 幂等 + 并发认领防双取（T2.1）、abuse 双池耗尽（T2.4→M2）、**（v3.3）优先调度**（短/字幕先跑、aging 长 job 有界必跑、预留 light 槽位短不被堵、运行中不抢占、`processing_timeout`，T2.1/2.3）。
 - **M2 门**：超时长/格式 reject、TTL + 中间件清理、配置热生效 + 红线不可改、2 并发 soak——全套必绿才算闭环。
 
 （测试清单本体见 §12 DoD；本节只定纪律与落点顺序。）
