@@ -147,10 +147,11 @@ loop:
   finally: stop heartbeat; rm -rf workdir/<job.id>   # try/finally 清盘
 ```
 
-- **ffmpeg/ffprobe SSRF 防线（v3，CodeX P1）**：① 格式 allowlist（拒 m3u8/playlist/concat）；② ffmpeg `-protocol_whitelist file,crypto`（禁外链协议）；③ **worker 容器 egress 只许 control-plane + R2**（网络层）；④ CI 负测"伪装 playlist 不触网"（§11/§12）。
+- **ffmpeg/ffprobe SSRF 防线（v3，CodeX P1）**：① 格式 allowlist（拒 m3u8/playlist/concat）；② ffmpeg `-protocol_whitelist file,crypto`（禁外链协议）；③ **主机层 nftables egress allowlist**（控制面 + R2 + 免费 provider 域名；**显式封 IMDS `169.254.169.254` + RFC1918 内网**）；④ CI 负测"伪装 playlist 不触网"（§11/§12）。
 - **租约/心跳/重排（H1，单 job 级）**：claim 置 `lease_expires_at = now + cfg.lease_ttl_sec`（默认 180s）；**独立心跳线程每 `cfg.heartbeat_interval_sec`（默认 30s）续租**（不只靠 stage 边界 progress——单阶段可能 >180s）；`cfg.job_hard_timeout_sec`（默认 2700=45min）封顶；超 lease 由 sweeper 重排（`attempt < cfg.max_attempts` 默认 2，即初跑 + 1 次）否则 `worker_lost`。
 - **并发 ≤ `cfg.worker_concurrency`**（默认 2）；**per-job 磁盘预算**派生自时长 cap；启动清孤儿目录。
-- **鉴权 + 轮换**：`/internal/*` worker 共享密钥，双密钥（current+next）零停机轮换（runbook 一段）。worker 不接任何用户/付费 key。
+- **鉴权 + secrets（决策 B）**：Oracle 箱上**只放 bootstrap worker 共享密钥**（root-600、不进镜像/git、双密钥 current+next 零停机轮换）；**免费 provider 凭据启动时从 `GET /internal/credentials` 拉（TLS + 共享密钥认证）、仅在内存**——箱磁盘无 provider key，被黑 blast radius 最小。worker 不接任何用户/付费 key。
+- **部署（Oracle A1 常驻，ARM）**：镜像 **linux/arm64**（buildx 多架构 arm64+amd64，兼小 VM 备机）；**pin-sha256 模型烤进镜像**（piper 起步语言 .onnx + faster-whisper tiny/base int8 → 即时可用、可复现）；`docker-compose restart: unless-stopped` 常驻，**claim 长轮询保持非 idle**（避 Oracle 7 天 idle 回收）；崩溃/重启自起 + 清孤儿 workdir；实例被回收 = ops 事故 → 小 VM 备 / IaC 重建。
 - **kill-switch**：`cfg.accept_new_jobs=false`（§14，手动 / 成本阈值自动）即让 `POST /api/jobs` 拒绝-带文案。
 
 ---
@@ -167,7 +168,7 @@ loop:
 
 > **v3（CodeX P1）**：R2 的 S3 presigned **PUT** 不支持 POST-policy 式 `content-length-range`；故**不以 range 作硬上限**，改"签发-session 声明 + PUT 后 HEAD 校验真实值、超限删对象不建 job"。能否签精确 `Content-Length` 留实施时验 R2，不当硬依赖。
 
-**内部端点（worker 鉴权）：** `config`（拉 §14 运行时配置）；`claim`（原子 `queued→running` + 置 lease，乐观锁 `claim_version`）；`progress`(=心跳续租)；`complete`/`fail`（**幂等**：仅 `WHERE status='running' AND claim_version` 匹配生效；重复/迟到 200 no-op；首个终态胜；产物写 `claim_version` 前缀 key 防僵尸覆盖）。
+**内部端点（worker 鉴权）：** `config`（拉 §14 运行时配置）；`credentials`（决策 B：拉免费 provider 凭据，TLS + 共享密钥认证，worker 仅内存持有、不落 Oracle 盘）；`claim`（原子 `queued→running` + 置 lease，乐观锁 `claim_version`）；`progress`(=心跳续租)；`complete`/`fail`（**幂等**：仅 `WHERE status='running' AND claim_version` 匹配生效；重复/迟到 200 no-op；首个终态胜；产物写 `claim_version` 前缀 key 防僵尸覆盖）。
 
 **D1 表：** `jobs`（`id, anon_or_user_id, status, current_stage?, tier, source_type, source_key, upload_session_id, declared_bytes, verified_bytes, source_lang?, target_lang, plan(json), settings_version, created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, video_key?, srt_key?, error_code?, error_detail?, attempt, claim_version, counted_job, counted_minutes, refunded`）；`upload_sessions`（`upload_session_id, anon_or_user_id, source_key, declared_bytes, declared_type, status, created_at, expires_at`，1h TTL）；`abuse_counters`（per-IP/anon/user + 全局 jobs + 全局 video_minutes，键 `(scope,id,day)`）；`settings`（§14）。**KV** 缓存 settings 热读。
 
@@ -241,7 +242,7 @@ loop:
 
 ## 12. 部署 / 验证 / 里程碑
 
-**部署：** `deploy/cloudflare/wrangler.toml`（Workers+Pages+R2+D1+Queues+KV）+ D1 迁移（jobs/settings）；`deploy/docker-compose/` 跑 worker（Oracle A1）。dev：D1 local + R2 模拟 + queue_adapter 走 D1 fallback。
+**部署：** `deploy/cloudflare/wrangler.toml`（Workers+Pages+R2+D1+Queues+KV）+ D1 迁移（jobs/settings）；`deploy/docker-compose/` 跑 worker（Oracle A1 常驻，**arm64 镜像 + `restart: unless-stopped`**，详见 §6）。dev：D1 local + R2 模拟 + queue_adapter 走 D1 fallback。
 
 **可观测性基线：** 结构化 JSON 日志（keyed by `job_id`）；指标 queued/running/done/failed、claim 时延、各阶段耗时、免费池剩余、全局分钟池余额、worker 末次心跳；≥2 告警（`running` 超 lease；池/成本逼近 cap）。
 
