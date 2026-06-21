@@ -120,6 +120,8 @@
 **MVP 免费阶梯（免费配额，非绝对 $0）：** ASR（v3.3 **云优先**）`groq`(whisper-large-v3-turbo)→`cloudflare`(Workers AI Whisper)→`faster_whisper`(**仅 cli/self-host 兜底，hosted 不烤**)；MT `cloudflare`→`groq`→`deepl`→`ollama`；TTS **`piper`(默认,本地)**→`cloudflare`(MeloTTS 6 语)→`edge_tts`(实验 lane)。**hosted 云 ASR 配额耗尽 → `free_pool_exhausted`（不在弱箱回退本地，护 throughput；ADR-0004 预期路径）。** groq/cloudflare ASR = **免费配额 provider**（CodeX：配额内 $0、超额即 fail，**不计费、不在 PAID 集**——红线分类不变），云优先不碰付费红线。
 
 > **云 ASR provider 限制 + 切块（v4，CodeX P1.2）**：Groq STT 非 chunking 上传上限 **25MB**（官方）、且 Whisper Turbo 有按小时定价口径 → 视为**免费配额 provider**、非绝对 $0。**必须 `asr_chunker`（compress-first，v4.1）**：① ffmpeg 抽 **16kHz 单声道 + 压缩编码**（Opus ~16–24kbps 或 FLAC 无损——ASR 对低码率语音鲁棒、WER 影响可忽略）；单这步就把长音频压到几 MB（16k mono **PCM** ≈ 57MB/30min 超 25MB，但 **Opus@16kbps ≈ ~3.6MB/30min、~7MB/60min**）→ **多数 Tier-1 时长一次请求即可、无需切块**。② **仅当仍超** provider `max_bytes`/`max_duration` 才**切块 + offset 合并 transcript**（阈值 = `min(byte 限, duration 限)`；Groq=25MB 字节限、压缩后基本免切；CF Whisper 可能有每请求时长限——压缩救不了、仍需切，内核 `FVD_CF_CHUNK_SEC` 泛化）。**好处**：省 API 调用（拉长免费池）、避块边界丢词/合并误差；切块退为例外路径。每 provider 接受格式 + 限额实施时现查（§13 反漂移）。
+>
+> **云 ASR 轮换 + 配额感知（v4.1，项目主）**：阶梯 `groq→cloudflare→(faster_whisper 仅 cli/self-host)` **本就在失败/配额耗尽时轮到下一个免费 provider**；做对的关键 = **per-provider circuit-breaker**——某家返 429/配额尽 → 标"耗尽至 UTC 重置"、新 job **直接路由下一家**（不反复撞已耗尽者）。**合并可用量 = 各免费池之和**（§13 实测：Groq ~2,880 audio-min/天主力 + CF ~214 audio-min/天）；Groq 是**小时速率限**（撞限可等下一小时或转 CF）、CF 是**日 neuron 限**。**全部免费耗尽** → `free_pool_exhausted`（hosted）/ 本地（self-host）。**只在免费间轮换、绝不转 PAID**（五不变量守）。
 
 **起步语言策略（grilling 2026-06-20；v4 按 CodeX 三轮精化）：**
 - **源语言 = Whisper 自动检测、可选 hint**：`source_lang_hint?`（用户可填、默认自动）→ ASR 出 `detected_source_lang` + `source_lang_confidence?`；UI 默认隐藏、高级展开可改（防 Whisper 误判毁整条链）。
@@ -314,6 +316,8 @@ loop:
 **待校准 / 待确认（非数值开关）：** AIGC 显式标确切措辞/位置（律师，M1 前定可测默认即可）；内容审核 proactive/CSAM 何时纳入（M3 gate）；R2 是否支持签精确 `Content-Length`（实施时验）。
 
 > **平台事实须实施时现查**（母文档反漂移 §0.5）：CF Queues/R2/D1/KV/Workers AI 免费层额度、Oracle A1/HF 规格已漂移多次，代码动笔前以官方文档为准、勿照搬本文数值。
+>
+> **免费云 ASR 配额参考（2026-06 查，实施复核——会漂移）**：**Groq** whisper-large-v3-turbo free = **2,000 请求/天 + 7,200 audio-sec/小时（≈120 audio-min/小时、~2,880/天）+ 单文件 25MB（compress-first 后不 binding）+ 10s 最小计费**；**CF Workers AI** = **10,000 neurons/天（00:00 UTC 重置，与 CF MT/TTS 共享）÷ 46.63 neurons/audio-min ≈ ~214 audio-min/天**。**合并 ≈ ~3,000 audio-min/天**（Groq 主力，轮换两池相加，§5）。→ **字幕-only 受此 ASR 池卡、配音受 worker CPU 卡**；上表全局分钟池 100–120/天**远低于此 ASR 上限 = 保守起步留大量 headroom**，实测后可上调（Q3 方法论）。来源：[Groq STT docs](https://console.groq.com/docs/speech-to-text)·[Groq rate limits](https://console.groq.com/docs/rate-limits)·[CF Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/)。
 
 ---
 
