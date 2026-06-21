@@ -73,7 +73,7 @@
 | `packages/provider-adapters/` | 免费 ladder + registry + `select()` 三重 guard + **完整 `PAID_PROVIDERS`** + 5 不变量 | MVP 只含免费 provider |
 | `workers/media-worker/` | Dockerfile（ffmpeg/ffprobe/piper(+模型)/edge-tts/faster-whisper；**无 yt-dlp**）+ claim/30s 心跳 loop + ffmpeg 协议白名单 + R2 client + 清盘 | 主 Oracle A1 常驻 |
 | `apps/control-plane/` | CF Workers：公开端点 + `/internal`（claim/progress/complete/fail/config）+ 瘦 Queue consumer + Cron sweeper + D1 schema(jobs/settings) + KV 配置缓存 + `queue_adapter` + **admin settings API** | TS；wrangler |
-| `apps/web/` | CF Pages：上传/进度/下载单页 + 文案（排队/限额/保留期/AIGC 披露/隐私）；**admin 配置页（私有运营面，§14/AD-14）** | TS |
+| `apps/web/` | CF Pages：**Svelte + Vite（CSR 静态，见 [ADR-0003](adr/0003-frontend-svelte.md)）**；上传/进度/下载单页 + 文案（排队/限额/保留期/AIGC 披露/隐私）；**UI 先中文**（多语言下一阶段）、**匿名优先**（MVP 不做登录，anon_id=签名 cookie）；admin 配置页属私有运营面（§14/AD-14，不在 open 前端） | TS |
 | `cli/local-runner/` | 薄封装 CLI（**URL 摄取仅此开**） | 无控制面依赖 |
 | `deploy/cloudflare/` · `deploy/docker-compose/` | wrangler.toml + D1 迁移 SQL（jobs/settings）· media-worker 编排 | — |
 | `packages/autodub-wasm/` | **不动**（Phase 2+，AD-16 deferred） | 占位 |
