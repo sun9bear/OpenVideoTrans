@@ -33,9 +33,15 @@ _Avoid_: 高质量逻辑、核心算法
 
 ## 任务与队列
 
-**job（配音任务）**：
-一次配音任务（用户一个视频 → 译制产物），经状态机 `queued → running → done|failed|expired` 流转。
-_Avoid_: task（泛指时）
+**job / `Job`（配音任务 / 任务记录）**：
+一次配音任务（用户一个视频 → 译制产物）。权威记录 = **`Job`**（控制面 D1 行 / schemas 真源），经 **4 态**状态机 `queued → running → done|failed` 流转（终态仅 done|failed）。
+_Avoid_: task（泛指时）、`JobManifest`（旧名，已拆为 Job + manifest.json）
+
+**manifest.json**：
+worker 写进 job 目录的本地副本 = `Job` 投影 + `worker_meta`（ffprobe 结果 / AIGC 标识实际嵌入方式 / 模型版本·sha）；用内核预留的 manifest 钩子。
+
+**data_purged_at（留存标志）**：
+产物/源/中间件被 24h TTL sweeper 清掉的时间戳。**留存与结果正交**——job 终态仍是 `done`/`failed`，"已过期"由 `now > expires_at || data_purged_at` **派生显示**，**不设 `expired` 状态**。
 
 **claim（认领）**：
 worker 原子取走一个 `queued` job（`queued→running` + 置 lease）。控制面侧保证防双取。

@@ -86,7 +86,11 @@
 
 **核心结构（移植）：** `Word{text,start_ms,end_ms}`；`TranscriptLine{index,start_ms,end_ms,speaker_id="SPEAKER_00",source_text,words[]}`；`Transcript{source_language,lines[],asr_provider}`；`DubbingSegment`⭐`{segment_id,index,speaker_id,start_ms,end_ms,target_duration_ms,source_text,target_text,voice_id?,tts_provider?,keep_original=false,align_method?,align_ratio?,needs_review=false}`；`TranslationResult`⭐`{source_language,target_language,mt_provider,segments[]}`。
 
-**新增：** `JobManifest`（写内核预留的 `manifest.json`）= `{job_id, anon_or_user_id, tier:"tier1", status, source_type:"upload", declared_bytes?, verified_bytes?, source_lang?, target_lang, plan:{asr,mt,tts}, aigc_marking:{implicit,explicit,method,form}, created_at, started_at?, lease_expires_at?, finished_at?, expires_at, artifacts:{video_key?,srt_key?}, error_code?, attempt}`。**状态机** `queued ⇄ running → done|failed|expired`（新增 `running→queued` 租约重排）+ 可选 `intake/probing`。**`error_code`** = `over_duration | unsupported_format | upload_too_large | source_verify_failed | source_fetch_failed | free_pool_exhausted | worker_lost | daily_cap_reached | internal_error`。
+**新增（`Job` 权威记录 + `manifest.json` 投影，grilling 2026-06-20 定）：**
+- **`Job`**（控制面权威 = D1 行 / schemas 真源）= `{job_id, anon_or_user_id, tier:"tier1", status, current_stage?, source_type:"upload", declared_bytes?, verified_bytes?, source_lang?, target_lang, plan:{asr,mt,tts}, aigc_marking:{enabled,implicit,explicit,form,applied?}, created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, artifacts:{video_key?,srt_key?}, error_code?, error_detail?(仅服务端、不出 API), attempt, claim_version}`。
+- **`manifest.json`**（worker 写进 job 目录，用内核预留钩子）= `Job` 投影 + `worker_meta`（ffprobe 结果 / AIGC 标识实际嵌入方式 / 用的模型版本·sha）。
+- **状态机（4 态，终态 done|failed）**：`queued→running`(claim) / `running→queued`(租约过期重排，`attempt<max_attempts`) / `running→done`(complete) / `running→failed`(fail 或重排耗尽=`worker_lost`)。**留存正交**：`expires_at` + `data_purged_at?`（sweeper 删 R2 时置），**不设 `expired` 态**；UI"已过期"由 `now>expires_at || data_purged_at` **派生显示**（status 仍 done）。`intake/probing` **不单列态**（ffprobe 是 running 内首阶段，超时长/坏格式 → `failed`；"probing" 仅作 `current_stage` 标签）。stale-queued（worker 长宕）不建态，靠可观测性兜（ops 事故）。
+- **`error_code`** = `over_duration | unsupported_format | upload_too_large | source_verify_failed | source_fetch_failed | free_pool_exhausted | worker_lost | daily_cap_reached | internal_error`；→ 用户中文文案见 §9D（`error_detail` 原始信息仅服务端、不出 API）。
 
 ---
 
@@ -98,7 +102,7 @@
 1. **`job_id→user` 命名空间 + 路径包含校验**；**ingest 路径 pin** 到内核 `JobPaths`（`video/original.<ext>`）使 `ingest()` cache-hit。
 2. 写 `manifest.json` = job/user/标识元数据。
 3. **AIGC 标识 mux 步骤（新增，默认开；开关为 §14 高敏可调、关闭需 audited acknowledgment，非静默）—— v3 可测 MVP 默认形态：**
-   - **隐式**（机读，不可见）：MP4 容器 metadata 标（"AI 生成合成 / 服务方 / 内容编号"）+ `JobManifest.aigc_marking` + SRT 文件头 `NOTE`。满足 EU AI Act 50(2) 机读标注。
+   - **隐式**（机读，不可见）：MP4 容器 metadata 标（"AI 生成合成 / 服务方 / 内容编号"）+ `Job.aigc_marking` + SRT 文件头 `NOTE`。满足 EU AI Act 50(2) 机读标注。
    - **显式**（可感知，轻量）：**片尾 1 秒轻提示**（"AI 配音 / AI-dubbed"，优先于常驻角标）+ 下载页披露。满足 deepfake 披露。
    - **形态 + 开关均可配（§14，项目主决策）：默认开（安全默认）；`aigc_explicit_form ∈ {tail_notice, corner_label, disclosure_only}`；`aigc_marking_enabled` 可关，但关闭需 audited acknowledgment（项目主明确接受法律责任、记审计），不是静默开关。** 自托管可关/调。**标识能力代码路径始终存在，§14 只控开关、不删能力。** 律师后置精修措辞/位置——**M1 即测此默认机制，不被律师 gate 阻塞**。
 4. **默认 TTS = piper**（commercial-safe；edge-tts 仅实验/非商用 lane，AD-6 / §7.5）。
@@ -164,7 +168,7 @@ loop:
 
 **内部端点（worker 鉴权）：** `config`（拉 §14 运行时配置）；`claim`（原子 `queued→running` + 置 lease，乐观锁 `claim_version`）；`progress`(=心跳续租)；`complete`/`fail`（**幂等**：仅 `WHERE status='running' AND claim_version` 匹配生效；重复/迟到 200 no-op；首个终态胜；产物写 `claim_version` 前缀 key 防僵尸覆盖）。
 
-**D1 表：** `jobs`（`id, anon_or_user_id, status, tier, source_type, source_key, declared_bytes, verified_bytes, source_lang?, target_lang, plan(json), created_at, started_at?, lease_expires_at?, finished_at?, expires_at, video_key?, srt_key?, error_code?, attempt, claim_version`）；`abuse_counters`（per-IP/anon/user + 全局 jobs + 全局 video_minutes）；`settings`（§14）。**KV** 缓存 settings 热读。
+**D1 表：** `jobs`（`id, anon_or_user_id, status, current_stage?, tier, source_type, source_key, declared_bytes, verified_bytes, source_lang?, target_lang, plan(json), created_at, started_at?, lease_expires_at?, finished_at?, expires_at, data_purged_at?, video_key?, srt_key?, error_code?, error_detail?, attempt, claim_version`）；`abuse_counters`（per-IP/anon/user + 全局 jobs + 全局 video_minutes）；`settings`（§14）。**KV** 缓存 settings 热读。
 
 **claim 并发正确性：** `UPDATE ... SET status='running',claim_version=claim_version+1 WHERE id=(SELECT id FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1) AND status='queued'`，验 D1 事务/隔离能防双取；以受影响行数 + `claim_version` 回读确认；§12 加并发认领测试。
 
@@ -191,11 +195,25 @@ loop:
 
 **C. 内容/数据合规（决策 ③，MVP 务实档）：** AUP/ToS（禁违法/侵权/假冒/CSAM）+ 反应式 **DMCA/DSA 下架入口**（删对应 R2 对象 + job）+ 24h TTL 兜底 + 隐私告知/数据最小化（含 EU GDPR）+ 分层日志留存（§14：job_meta 30d / abuse 90d / takedown 180d，与产物 24h 是两类数据）。**押后放量前 gate**：proactive 审核 / CSAM 扫描上报 / 完整留存制度（M3）。
 
+**D. 错误码 → 用户文案（中文优先，{…} 处插 §14 配置值；`error_detail` 原始信息仅服务端、不出 API）：**
+
+| `error_code` | 用户文案 |
+|---|---|
+| `over_duration` | 视频时长超过免费上限（{max_duration} 分钟），请裁剪后重试 |
+| `unsupported_format` | 暂不支持该格式，请上传 mp4/mov 等常见视频 |
+| `upload_too_large` | 文件超过大小上限（{max_size}），请压缩或裁剪后重试 |
+| `source_verify_failed` | 上传校验未通过，请重新上传 |
+| `source_fetch_failed` | 读取上传文件失败，请重试 |
+| `free_pool_exhausted` | 今日免费资源已用尽——明日再来，或自带 key(Tier 2) / 付费托管(Tier 3) |
+| `worker_lost` | 处理中断、已自动重排；多次失败请稍后重试 |
+| `daily_cap_reached` | 今日免费任务数已达上限，请明日再来 |
+| `internal_error` | 服务出错了，请稍后重试；持续出现请反馈 |
+
 ---
 
 ## 10. 产物 + 中间件 TTL / 数据生命周期（AD-17）
 
-- **产物 = 24h**（`cfg.artifact_ttl_hours`，R2 lifecycle + CF Cron sweeper 扫 `expires_at<now` 删 R2 置 `expired`）。**中间件**（转录/segment/源）同期清理，成片后**尽早删源**省 R2 + 缩暴露面。
+- **产物 = 24h**（`cfg.artifact_ttl_hours`，R2 lifecycle + CF Cron sweeper 扫 `expires_at<now` 删 R2、**置 `data_purged_at`**——status 仍 done/failed，**不设 expired 态**，UI"已过期"派生显示）。**中间件**（转录/segment/源）同期清理，成片后**尽早删源**省 R2 + 缩暴露面。
 - **sweeper 双职责**：① TTL 清理；② **租约过期重排**（扫 `status='running' AND lease_expires_at<now` → `attempt<max_attempts` 重排否则 `worker_lost`，`claim_version` 守）。
 - 交付告知保留期 + 数据删除告知。日志留存（30/90/180d）独立于产物 24h（§14 可配）。
 
