@@ -23,7 +23,7 @@
 
 > 控制面 = CF Workers/Pages + R2 + D1 + KV + Queues。选 CF 的理由 = R2 零 egress。
 
-1. **注册 Cloudflare 账号**（免费）。→ manifest：账号 ✓ + **Account ID**（Dashboard 右栏，🟢非密）。
+1. **新建一个【独立】Cloudflare 账号**（**AD-15 强制**——商业 SaaS AIVideoTrans 在另一账号上，本项目运行时必须隔离）。同一登录下 "Add account" 即可、免费，**资源/免费配额/账单/封停半径全按账号隔离**；可选独立邮箱 + 独立付款方式更彻底。**绝不复用商业账号的任何 token / R2 桶 / secret / 资源**（只共享 autodub-core 代码、AD-13）。→ manifest：独立账号 ✓ + **Account ID**（Dashboard 右栏，🟢非密）。
 2. **R2**：建 bucket（建议名 `ovt-artifacts`）。→ manifest：桶名 🟢。
    - **R2 S3 凭据**（供 Oracle worker 直传/取）：R2 → Manage API Tokens → 建 token（读写该桶）→ 得 **Access Key ID + Secret**。→ 🔴 放 CF Secrets（`R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`）+ Oracle，manifest 打勾。
 3. **D1**：建数据库（建议名 `ovt-db`）。→ manifest：库名 + **database ID** 🟢。
