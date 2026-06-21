@@ -186,8 +186,14 @@ loop:
 1. **仅直传**（决策 ①，无 URL → 无 yt-dlp SSRF 面）+ **格式 allowlist**（拒 m3u8/playlist，§6 ffmpeg 防线）。
 2. **上传大小**：签发声明 ≤ `cfg.max_upload_bytes`（默认 500MB）+ **PUT 后 HEAD 校验真实值**，超限删对象不建 job（§7）。
 3. **时长 cap 由 worker ffprobe 首阶段强制**（控制面准入拿不到时长，浏览器报值仅参考）；超 `cfg.max_video_duration`（默认 300s）即 fail+删源。
-4. **每日 cap（双池，CodeX P2）**：per-IP/anon（默认 1）/ per-user（默认 2）+ **全局任务数**（默认 20-30）**与全局 `accepted_video_minutes/day`（默认 100-120）双池，先到先停**。**P8/§4.7.4** 要求 per-IP/user/**global**（**不是 §5.4.10**，那是 F2 试用专属）。原子计数、失败也计数；计数存储不可用即拒。用户侧仍显示"每日任务数"，后台用分钟池护成本。
+4. **每日 cap（双池，CodeX P2）**：per-IP/anon（默认 1）/ per-user（默认 2）+ **全局任务数**（默认 20-30）**与全局 `accepted_video_minutes/day`（默认 100-120）双池，先到先停**。**P8/§4.7.4** 要求 per-IP/user/**global**（**不是 §5.4.10**，那是 F2 试用专属）。原子计数（机制见下「实现」）；**计数存储不可用即拒**。用户侧仍显示"每日任务数"，后台用分钟池护成本。
 5. cap 单位 = **"配音任务数 / 分钟"**，不是 provider 调用额度（守红线 2 / P5，前向兼容 #4）。cap 满 → 文案引导，**不自动升级付费**。
+
+**计数与身份实现（grilling 2026-06-20；哲学与取舍见 [ADR-0004](adr/0004-abuse-defense-model.md)）：**
+- **原子 check-and-increment**：单条条件 `UPDATE counters SET used=used+1 WHERE scope=? AND id=? AND day=? AND used<cap`（D1 行级原子、写走 primary），`rows_affected=0` 即超限拒；键 `(scope,id,day)`、**UTC 自然日**重置、旧行 sweeper 清。
+- **双池时机错位**：job-count 池（per-IP/anon/user + 全局任务）**准入处**原子扣（硬闸）；**分钟池**准入处**粗闸**（`global_minutes_used<cap`）+ **ffprobe 后精确扣**（过冲 ≤ 并发×max_duration、有界，**不上 over-reserve**——Tier 1 无 ledger）。
+- **失败计数**：用户侧错（over_duration/格式/过大/daily_cap/free_pool）**计数**（防 create-fail 刷名额）；**我方错（worker_lost/internal_error）退还 job-count**（补偿 decrement，公平）。
+- **身份纵深**：anon = 签名(HMAC) cookie（per-anon 闸）；**per-IP 闸**（IPv4 整 / **IPv6 /64**，`CF-Connecting-IP`）兜 cookie-clear；**全局 job/分钟双池 = 真正硬上限**（个体绕过也兜总花费）；`POST /api/jobs` 挂 **Cloudflare Turnstile** 抬 bot/farming 门槛。**接受个体绕过**（清 cookie + 轮 IP），设备指纹/重身份**后置**——全局池 + Turnstile + kill-switch 已是成本兜底。
 
 **B. AIGC 标识（生成嵌入，默认开）：** v3 可测默认形态见 §4 第 3 点（隐式 MP4 metadata + manifest + SRT NOTE；显式 片尾 1s 提示 + 下载页披露）。境外/海外用户·**不备案**（PRC 专属）→ EU 式（AI Act 50）。**形态 + 开关 §14 均可配（默认开；`aigc_marking_enabled` 关闭需 audited acknowledgment、责任项目主自负）**；律师后置精修。§12 断言：默认开时成片带隐式标 + 显式披露。
 
