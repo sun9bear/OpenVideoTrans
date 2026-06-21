@@ -277,3 +277,42 @@ loop:
 - **存储**：D1 `settings`(`key, value, type, min?, max?, updated_by, updated_at`) 真源 + 变更审计；KV 缓存热读（控制面每请求读、TTL 短）；worker 启动 + claim 时拉 `GET /internal/config`。**复刻上游"运行时热配置"模式但独立**（AD-15，不复用 SaaS 配置）。
 - **守卫**：每项**安全上下界**（如并发 ≤ 硬上限、cap 不可设无限、ttl 不可设过长）由校验层挡；任何改动**不得违红线**（红线键不在可改集，且校验拒"等效关红线"的值）；**变更审计**（谁/何时/旧→新）。
 - **鉴权**：admin **独立强鉴权**（CF Access / admin token，与用户体系分离）；admin API + 配置页属**托管运营面（private，AD-14）**——开源默认配置不含 admin UI 与线上数值，只含**配置机制 + schema + 安全默认 + 红线锁**。
+
+---
+
+## 15. 实施步骤 / 施工次序（2026-06-20 `/grill-with-docs` 定，规划级）
+
+> 经 grilling 会话定。产出 = **规划级施工蓝图**（依赖 + 次序 + 拆解），现在可定、不烧 i18n 闸；**实际代码仍押上游 i18n 完成后**（§执行顺序门）。配套 ADR：[ADR-0001](adr/0001-autodub-core-mvp-port.md)（autodub-core 一次性移植）、[ADR-0002](adr/0002-monorepo-two-toolchains.md)（两套工具链）；术语见 [CONTEXT.md](../CONTEXT.md)。
+
+**总策略：双轨并行、M2 收口。** 轨 1 = 本地管线（de-risk 移植）；轨 2 = 云 walking skeleton（de-risk 新颖云集成 + 失败模型）；两轨各自从 Step 0 的 schemas 分出，到 M2 把桩 worker 换成真管线收口。
+
+### Step 0 — repo/工具链骨架（gate 两轨）
+- monorepo：pnpm(TS) + uv(Py) workspace + `justfile` + GH Actions（ts / py / **schema codegen-diff** 三 job）[ADR-0002]。
+- `packages/schemas`：JSON Schema 真源 → codegen(Pydantic/TS) + codegen-diff CI 门。
+- 5 不变量 + core 边界 lint 的 CI job 先接上（此刻红、待 T1.2 转绿）——**红线护栏先于移植到位**。
+
+### 轨 1 — 本地管线（依赖 Step 0 schemas）
+- **T1.1** `autodub-core` 拷贝-改造 stages/config/ffmpeg_utils（先不加命名空间，先本地跑通出 mp4+srt）。
+- **T1.2** `provider-adapters` 拷 ladder + `select()` 三重 guard + **完整 `PAID_PROVIDERS`** → 5 不变量转绿。
+- **T1.3** 必改项离散 commit：`allow_paid=false` 钉死 → `job_id`/user 命名空间 + 路径包含校验 + 写 manifest → piper 提默认（edge_tts 降实验）→ AIGC 标识 mux 步骤 → ffmpeg `-protocol_whitelist` + 格式 allowlist。
+- **T1.4** `cli/local-runner`：本地端到端出**带标识** mp4+srt。**＝ M1 达成**。
+
+### 轨 2 — 云 walking skeleton（与轨 1 并行，依赖 Step 0 schemas）
+- **T2.1** control-plane(CF Workers)：`uploads/sign` + **PUT 后 HEAD 校验** + `jobs` CRUD(D1) + `claim`(原子 queued→running + 置 lease) + `progress`(心跳) + `complete`/`fail`(幂等) + `download`(presigned GET)；`queue_adapter` = **D1-claim**。
+- **T2.2** 桩 worker(Python，连本地/Oracle CP)：`claim` → 输入原样拷成输出（不跑真管线）→ `complete`；**30s 独立心跳续租**；try/finally 清盘。
+- **T2.3** sweeper(CF Cron)：租约过期重排（+ TTL 清理骨架）。**杀 worker 中途测试** → assert 自动重排（证 H1）。
+- **T2.4** abuse gate 骨架 + presign 绑定 CI + SSRF CI（无 yt-dlp / 格式 allowlist / 协议白名单）。
+- **T2.5** fast-follow：`queue_adapter` 换 **CF Queues Free** + 瘦 consumer，证桥接。
+- **T2.6** 前端最小 UI（上传/轮询/下载，API 稳了再做）。
+
+### M2 收口（两轨汇合）
+- 桩 worker → 真 `autodub-core` 管线（worker 调 core）。
+- 双池 cap（per-IP/anon/user + 全局任务/分钟）+ 24h TTL + 中间件清理 + 错误码体系 + 可观测性基线。
+- 过 DoD 门（§12：negative/abuse/lost-worker/幂等/并发认领/TTL/2 并发 soak/标识断言/codegen-diff）。
+
+### M3 放量前 gate
+- 独立域名/独立部署(AD-15) + kill-switch + DMCA/DSA 下架入口 + 隐私告知 + admin 配置页(私有运营面)。
+- §9C gate：律师确认 AIGC 显式标形态 + 审核/CSAM 评估。
+
+### 本地 dev loop（贯穿）
+- wrangler local 模拟 D1/R2/Queues/KV + Python worker 指向 localhost CP + `queue_adapter` 走 D1-fallback——两轨全程可本地端到端，不依赖云部署。
