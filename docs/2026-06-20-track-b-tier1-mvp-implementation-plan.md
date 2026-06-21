@@ -356,7 +356,7 @@ loop:
 
 ## 15. 实施步骤 / 施工次序（2026-06-20 `/grill-with-docs` 定，规划级）
 
-> 经 grilling 会话定。产出 = **规划级施工蓝图**（依赖 + 次序 + 拆解），现在可定、不烧 i18n 闸；**实际代码仍押上游 i18n 完成后**（§执行顺序门）。配套 ADR：[ADR-0001](adr/0001-autodub-core-mvp-port.md)（autodub-core 一次性移植）、[ADR-0002](adr/0002-monorepo-two-toolchains.md)（两套工具链）；术语见 [CONTEXT.md](../CONTEXT.md)。
+> 经 grilling 会话定。产出 = **规划级施工蓝图**（依赖 + 次序 + 拆解），现在可定、不烧 i18n 闸；**实际代码仍押上游 i18n 完成后**（§执行顺序门）。配套 ADR：[ADR-0001](adr/0001-autodub-core-mvp-port.md)（autodub-core 一次性移植）、[ADR-0002](adr/0002-monorepo-two-toolchains.md)（两套工具链）；术语见 [CONTEXT.md](../CONTEXT.md)。**可领任务单元拆解（20 单元 + 依赖 DAG + 验收 + 前置）见 [Tier 1 实施 Backlog](2026-06-20-tier1-implementation-backlog.md)**（本节为相位骨架，backlog 为执行粒度）。
 
 **总策略：双轨并行、M2 收口。** 轨 1 = 本地管线（de-risk 移植）；轨 2 = 云 walking skeleton（de-risk 新颖云集成 + 失败模型）；两轨各自从 Step 0 的 schemas 分出，到 M2 把桩 worker 换成真管线收口。
 
