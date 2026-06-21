@@ -16,7 +16,7 @@
 
 ## 先读这个
 
-新接手者**先读** [`docs/2026-06-19-open-core-derivative-products-design.md`](docs/2026-06-19-open-core-derivative-products-design.md)（总设计 + AD-1..AD-17 决策源 + §0.5 子方案索引），再看 [`docs/2026-06-20-track-b-tier1-mvp-implementation-plan.md`](docs/2026-06-20-track-b-tier1-mvp-implementation-plan.md)（Tier 1 MVP 执行基线 + §15 施工次序），实施时领 [`docs/2026-06-20-tier1-implementation-backlog.md`](docs/2026-06-20-tier1-implementation-backlog.md)（20 任务单元 + 依赖 DAG + 验收 + 前置；代码仍押 i18n）。
+新接手者**先读** [`docs/2026-06-19-open-core-derivative-products-design.md`](docs/2026-06-19-open-core-derivative-products-design.md)（总设计 + AD-1..AD-17 决策源 + §0.5 子方案索引），再看 [`docs/2026-06-20-track-b-tier1-mvp-implementation-plan.md`](docs/2026-06-20-track-b-tier1-mvp-implementation-plan.md)（Tier 1 MVP 执行基线 + §15 施工次序），实施时领 [`docs/2026-06-20-tier1-implementation-backlog.md`](docs/2026-06-20-tier1-implementation-backlog.md)（29 任务单元 + 依赖 DAG + 验收 + 前置；代码仍押 i18n）。
 
 ## 目录结构（AD-16 语言分层，monorepo）
 
