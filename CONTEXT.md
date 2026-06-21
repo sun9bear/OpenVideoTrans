@@ -48,6 +48,10 @@ _Avoid_: 模式（笼统时）
 worker 并发中保留给短/字幕 job 的槽位，使长 job 不堵死短 job；配合单 lane **优先队列**（SPT 偏置 + aging 防饿死）。**运行中不抢占**——真抢占留 Tier 2/3。
 _Avoid_: 抢占
 
+**language_capabilities（语言能力 registry）**：
+按 `target_locale`（**BCP-47**：`zh-Hans`/`pt-BR`…）的单一真源 = `{mt_supported, subtitle_supported, tts_supported, tts_models, burn_font, default_voice, license_status, quality_tier}`；UI / abuse gate / pipeline / 模型加载都查它。目标语**按 output_mode 分层**——字幕-only 只需 MT（广集）、配音/both 需 commercial-safe TTS-vet locale；不支持 → fail-closed（`unsupported_language_pair` / `no_tts_model_for_language`）。源语言 = Whisper 自动检测 + 可选 `source_lang_hint`。
+_Avoid_: TTS registry（已升级、不再仅 TTS）、裸 ISO 639 语言码（用 BCP-47 locale）
+
 **data_purged_at（留存标志）**：
 产物/源/中间件被 24h TTL sweeper 清掉的时间戳。**留存与结果正交**——job 终态仍是 `done`/`failed`，"已过期"由 `now > expires_at || data_purged_at` **派生显示**，**不设 `expired` 状态**。
 
