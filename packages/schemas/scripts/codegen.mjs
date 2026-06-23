@@ -36,6 +36,10 @@ export interface ${safeName} {
 `;
 
 // ── Python output ──────────────────────────────────────────────────────────
+// STEP0-A placeholder is intentionally stdlib-only (dataclass, not pydantic):
+// the scaffold declares no third-party deps, so a pydantic BaseModel would be
+// un-importable in a fresh `uv sync`. The real JSON Schema → Pydantic generator
+// (and the pydantic dependency) arrives in STEP0-B.
 // Truncate description to fit ruff line-length (100 chars for the docstring line)
 const maxDocLen = 80;
 const rawDesc = schema.description ?? "";
@@ -46,10 +50,11 @@ const pyOut = `\
 # Source: schemas/_placeholder.schema.json
 from __future__ import annotations
 
-from pydantic import BaseModel
+from dataclasses import dataclass
 
 
-class ${safeName}(BaseModel):
+@dataclass
+class ${safeName}:
     """${docDesc}"""
 
     ok: bool

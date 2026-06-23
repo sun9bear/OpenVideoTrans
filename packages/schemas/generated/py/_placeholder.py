@@ -2,10 +2,11 @@
 # Source: schemas/_placeholder.schema.json
 from __future__ import annotations
 
-from pydantic import BaseModel
+from dataclasses import dataclass
 
 
-class _Placeholder(BaseModel):
+@dataclass
+class _Placeholder:
     """Trivial placeholder schema — STEP0-A codegen-diff closure only. Replace with re…"""
 
     ok: bool
