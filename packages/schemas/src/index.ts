@@ -1,3 +1,3 @@
-// packages/schemas — placeholder entry point
-// Real JSON Schema → TS codegen output lands here in STEP0-B.
-export {};
+// AUTO-GENERATED re-export — DO NOT EDIT this line.
+// Generated types from JSON Schema contracts live in ../generated/ts/contracts.ts
+export * from "../generated/ts/contracts.js";

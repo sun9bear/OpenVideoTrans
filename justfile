@@ -51,7 +51,7 @@ typecheck-ts:
     pnpm typecheck
 
 typecheck-py:
-    uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner
+    uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner packages/schemas
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
@@ -76,4 +76,4 @@ schema-codegen:
 # Assert codegen output is committed (no drift)
 schema-check:
     just schema-codegen
-    git diff --exit-code -- packages/schemas/generated/
+    git diff --exit-code -- packages/schemas/generated/ts/contracts.ts packages/schemas/src/ovt_schemas/contracts.py
