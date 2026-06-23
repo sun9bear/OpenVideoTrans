@@ -53,12 +53,17 @@ def test_inv3_select_auto_never_returns_paid() -> None:
 
 
 def test_inv4_explicit_paid_without_allow_raises() -> None:
-    """④ Requesting a paid provider without ``allow_paid`` raises PaidProviderBlocked."""
+    """④ Requesting ANY paid provider without ``allow_paid`` raises PaidProviderBlocked.
+
+    Iterates all paid names (deterministic order) — the §5 invariant is about the paid
+    gate firing string-level *before* kind/factory resolution, so the kind passed is
+    irrelevant to the block.
+    """
     from provider_adapters import PAID_PROVIDERS, PaidProviderBlocked, select
 
-    paid_name = next(iter(PAID_PROVIDERS))
-    with pytest.raises(PaidProviderBlocked):
-        select("tts", paid_name, allow_paid=False)
+    for paid_name in sorted(PAID_PROVIDERS):
+        with pytest.raises(PaidProviderBlocked):
+            select("tts", paid_name, allow_paid=False)
 
 
 def test_inv5_string_only_paid_name_blocked() -> None:
