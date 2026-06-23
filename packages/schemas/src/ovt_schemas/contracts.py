@@ -91,6 +91,7 @@ class Cue(BaseModel):
     target_text: str
     source_text: str | None = None
 
+
 ErrorCode = Literal["over_duration", "unsupported_format", "upload_too_large",
                     "source_verify_failed", "source_fetch_failed", "unsupported_language_pair",
                     "no_tts_model_for_language", "free_pool_exhausted", "worker_lost",
@@ -211,5 +212,6 @@ class LanguageCapability(BaseModel):
     license_status: str
     quality_tier: str
     default_voice: str | None = None
+
 
 LanguageCapabilities = dict[str, LanguageCapability]

@@ -12,7 +12,8 @@
  *  - Deterministic (byte-identical across runs): no timestamps, no random.
  *  - LF line endings.
  *  - Emits $defs in schema order (already topological — leaf types first,
- *    so no forward refs needed).
+ *    so no forward refs needed). Assumes no $def/property name is an
+ *    integer-like string (V8 hoists such keys), which holds for these contracts.
  */
 
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -63,6 +64,11 @@ function tsBareType(prop) {
 
   const types = Array.isArray(prop.type) ? prop.type : [prop.type];
   const nonNullTypes = types.filter((t) => t !== "null");
+  if (nonNullTypes.length > 1) {
+    throw new Error(
+      `Unsupported multi-type union (only [X, "null"] supported): ${JSON.stringify(prop.type)}`
+    );
+  }
   const t = nonNullTypes[0];
 
   // const → literal
@@ -170,6 +176,11 @@ function pyBareType(prop) {
 
   const types = Array.isArray(prop.type) ? prop.type : [prop.type];
   const nonNullTypes = types.filter((t) => t !== "null");
+  if (nonNullTypes.length > 1) {
+    throw new Error(
+      `Unsupported multi-type union (only [X, "null"] supported): ${JSON.stringify(prop.type)}`
+    );
+  }
   const t = nonNullTypes[0];
 
   // const → Literal
@@ -258,7 +269,8 @@ function pyDefaultValue(d) {
   if (typeof d === "string") return JSON.stringify(d);
   if (typeof d === "number") return String(d);
   if (Array.isArray(d) && d.length === 0) return "[]";
-  return "None";
+  // Fail loud rather than silently emit None for an unhandled default shape.
+  throw new Error(`Unsupported schema default (extend pyDefaultValue): ${JSON.stringify(d)}`);
 }
 
 /**
@@ -382,7 +394,7 @@ function generatePy() {
   }
 
   for (const [name, def] of Object.entries(defs)) {
-    lines.push(""); // blank line before each top-level definition
+    lines.push("", ""); // two blank lines before each top-level def (PEP8 E302/E305)
 
     // String enum → top-level type alias
     if (def.type === "string" && def.enum) {
@@ -404,9 +416,6 @@ function generatePy() {
 
     // Object with properties → Pydantic BaseModel
     if (def.type === "object" && def.properties) {
-      // Two blank lines before a class (PEP 8 / ruff E302)
-      // We already pushed one "" above, push one more
-      lines.push("");
       lines.push(`class ${name}(BaseModel):`);
       if (def.description) {
         const doc = truncateDocstring(def.description, "    ");
