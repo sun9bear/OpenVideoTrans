@@ -27,7 +27,7 @@
         "source_text": { "type": "string" },
         "words": { "type": "array", "items": { "$ref": "#/$defs/Word" } }
       },
-      "required": ["index", "start_ms", "end_ms", "speaker_id", "source_text", "words"]
+      "required": ["index", "start_ms", "end_ms", "source_text", "words"]
     },
     "Transcript": {
       "type": "object",
@@ -62,7 +62,7 @@
       },
       "required": [
         "segment_id", "index", "speaker_id", "start_ms", "end_ms",
-        "target_duration_ms", "source_text", "target_text", "keep_original", "needs_review"
+        "target_duration_ms", "source_text", "target_text"
       ]
     },
     "TranslationResult": {

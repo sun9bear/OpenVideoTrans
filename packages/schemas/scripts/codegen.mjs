@@ -364,7 +364,7 @@ function generatePy() {
     "",
     "from typing import Any, Literal",
     "",
-    "from pydantic import BaseModel",
+    "from pydantic import BaseModel, ConfigDict",
     ""
   );
 
@@ -412,6 +412,8 @@ function generatePy() {
         const doc = truncateDocstring(def.description, "    ");
         lines.push(`    """${doc}"""`);
       }
+      // additionalProperties:false in the schema → strict Pydantic (reject unknown keys)
+      lines.push('    model_config = ConfigDict(extra="forbid")');
 
       const required = new Set(def.required ?? []);
       const props = Object.entries(def.properties);

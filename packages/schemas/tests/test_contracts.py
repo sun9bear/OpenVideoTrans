@@ -94,6 +94,12 @@ def test_word_start_ms_is_int() -> None:
     assert word.start_ms == 1234
 
 
+def test_extra_keys_rejected() -> None:
+    """additionalProperties:false in the schema → models reject unknown keys (extra='forbid')."""
+    with pytest.raises(ValidationError):
+        Word.model_validate({"text": "hi", "start_ms": 0, "end_ms": 1, "bogus": 123})
+
+
 def test_transcript_roundtrip() -> None:
     """Transcript validates with lines and asr_provider."""
     t = Transcript(

@@ -13,7 +13,7 @@ export interface TranscriptLine {
   index: number;
   start_ms: number;
   end_ms: number;
-  speaker_id: string;
+  speaker_id?: string;
   source_text: string;
   words: Word[];
 }
@@ -37,10 +37,10 @@ export interface DubbingSegment {
   target_text: string;
   voice_id?: string | null;
   tts_provider?: string | null;
-  keep_original: boolean;
+  keep_original?: boolean;
   align_method?: string | null;
   align_ratio?: number | null;
-  needs_review: boolean;
+  needs_review?: boolean;
 }
 
 /** MT output: translated dubbing segments. */
