@@ -34,3 +34,6 @@ testpaths = [
     "cli/local-runner/tests",
 ]
 addopts = "-v --import-mode=importlib"
+markers = [
+    "redline: red-line guardrails (paid-provider safety invariants + autodub-core boundary)",
+]
