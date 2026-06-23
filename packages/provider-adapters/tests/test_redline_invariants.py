@@ -14,17 +14,30 @@ these pass and removes the xfail markers (xfail TODO count must reach 0).
 """
 from __future__ import annotations
 
+import provider_adapters  # package exists; paid-safety symbols arrive in T1.2
 import pytest
 
-# TODO(T1.2): drop this xfail once provider_adapters implements the paid-safety API.
-# xfail ONLY the not-yet-implemented ImportError, and STRICTLY: once T1.2 adds the API a real
-# invariant violation raises AssertionError (≠ ImportError) → fails CI immediately instead of
-# hiding as XFAIL; a passing invariant xpasses-strict → fails until the marker is removed,
-# enforcing the T1.2 acceptance "xfail TODO count → 0" (CodeX P2).
+_REQUIRED_API = (
+    "PAID_PROVIDERS",
+    "AUTO_LADDER",
+    "REGISTRY",
+    "is_paid_provider",
+    "select",
+    "PaidProviderBlocked",
+)
+# True once T1.2 adds the paid-safety API. Driving the xfail off symbol PRESENCE (not off
+# catching ImportError) means that once the API exists, a real violation — e.g. select()
+# importing a paid SDK and raising ModuleNotFoundError (an ImportError) before
+# PaidProviderBlocked — FAILS the suite instead of being masked as XFAIL (CodeX P1).
+_API_READY = all(hasattr(provider_adapters, _n) for _n in _REQUIRED_API)
+
+# TODO(T1.2): remove this xfail once the API exists (xfail TODO count → 0). It is strict, so a
+# passing invariant after the API lands xpasses → forces removal; while the API is absent the
+# invariant imports raise ImportError → xfail keeps main green.
 pytestmark = [
     pytest.mark.redline,
     pytest.mark.xfail(
-        raises=ImportError,
+        not _API_READY,
         reason="provider-adapters paid-safety API (PAID_PROVIDERS/select) lands in T1.2",
         strict=True,
     ),

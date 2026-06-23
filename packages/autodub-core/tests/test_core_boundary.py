@@ -55,8 +55,10 @@ def _imported_module_roots(src: str) -> set[str]:
         elif isinstance(node, ast.Call):
             # Dynamic string-literal imports: importlib.import_module("x") / __import__("x").
             fn = node.func
+            # importlib.import_module("x") (attribute) OR a bare import_module("x") /
+            # __import__("x") (name, e.g. `from importlib import import_module`).
             is_dynamic_import = (isinstance(fn, ast.Attribute) and fn.attr == "import_module") or (
-                isinstance(fn, ast.Name) and fn.id == "__import__"
+                isinstance(fn, ast.Name) and fn.id in ("__import__", "import_module")
             )
             if is_dynamic_import and node.args:
                 first = node.args[0]
@@ -95,6 +97,7 @@ def test_core_imports_stay_inside_boundary() -> None:
         "from integrations import gateway",  # clean module, forbidden imported submodule (CodeX P2)
         "from .providers import payment",  # clean module, forbidden imported submodule (CodeX P2)
         "importlib.import_module('gateway')",
+        "import_module('gateway')",  # bare import_module via `from importlib import ...` (CodeX P2)
         "__import__('billing')",
     ],
 )
