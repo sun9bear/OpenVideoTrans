@@ -421,8 +421,10 @@ function generatePy() {
         const doc = truncateDocstring(def.description, "    ");
         lines.push(`    """${doc}"""`);
       }
-      // additionalProperties:false in the schema → strict Pydantic (reject unknown keys)
-      lines.push('    model_config = ConfigDict(extra="forbid")');
+      // Enforce the JSON Schema contract: reject unknown keys (additionalProperties:false)
+      // AND reject type coercion (e.g. "123" for an integer field), matching the schema's
+      // declared types / integer-ms contract instead of silently coercing.
+      lines.push('    model_config = ConfigDict(extra="forbid", strict=True)');
 
       const required = new Set(def.required ?? []);
       const props = Object.entries(def.properties);

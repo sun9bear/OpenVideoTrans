@@ -100,6 +100,12 @@ def test_extra_keys_rejected() -> None:
         Word.model_validate({"text": "hi", "start_ms": 0, "end_ms": 1, "bogus": 123})
 
 
+def test_strict_rejects_type_coercion() -> None:
+    """strict=True → integer fields reject coercible strings instead of silently coercing."""
+    with pytest.raises(ValidationError):
+        Word.model_validate({"text": "x", "start_ms": "123", "end_ms": 1})
+
+
 def test_transcript_roundtrip() -> None:
     """Transcript validates with lines and asr_provider."""
     t = Transcript(

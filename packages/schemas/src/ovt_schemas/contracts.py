@@ -29,7 +29,7 @@ __all__ = [
 
 class Word(BaseModel):
     """A single recognized word with millisecond timing."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     text: str
     start_ms: int
     end_ms: int
@@ -37,7 +37,7 @@ class Word(BaseModel):
 
 class TranscriptLine(BaseModel):
     """One line of source transcript with word-level timing."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     index: int
     start_ms: int
     end_ms: int
@@ -48,7 +48,7 @@ class TranscriptLine(BaseModel):
 
 class Transcript(BaseModel):
     """ASR output: ordered transcript lines for the source media."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     source_language: str
     lines: list[TranscriptLine]
     asr_provider: str
@@ -56,7 +56,7 @@ class Transcript(BaseModel):
 
 class DubbingSegment(BaseModel):
     """A translated/timed segment for TTS + alignment."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     segment_id: str
     index: int
     speaker_id: str
@@ -75,7 +75,7 @@ class DubbingSegment(BaseModel):
 
 class TranslationResult(BaseModel):
     """MT output: translated dubbing segments."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     source_language: str
     target_language: str
     mt_provider: str
@@ -84,7 +84,7 @@ class TranslationResult(BaseModel):
 
 class Cue(BaseModel):
     """A subtitle cue. source_text is present only when subtitle_lang=bilingual."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     index: int
     start_ms: int
     end_ms: int
@@ -100,7 +100,7 @@ ErrorCode = Literal["over_duration", "unsupported_format", "upload_too_large",
 
 class UploadSession(BaseModel):
     """A direct-to-R2 upload session (D1 upload_sessions). 1h TTL."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     upload_session_id: str
     anon_or_user_id: str
     source_key: str
@@ -113,7 +113,7 @@ class UploadSession(BaseModel):
 
 class AigcMarking(BaseModel):
     """AIGC legal-marking state for a Job (capability path always present; §14 only toggles)."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     enabled: bool
     implicit: bool
     explicit: bool
@@ -123,7 +123,7 @@ class AigcMarking(BaseModel):
 
 class JobPlan(BaseModel):
     """Chosen provider plan. tts is null for subtitle_only jobs."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     asr: str
     mt: str
     tts: str | None = None
@@ -131,14 +131,14 @@ class JobPlan(BaseModel):
 
 class JobArtifacts(BaseModel):
     """R2 object keys for produced artifacts (set as the Job completes)."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     video_key: str | None = None
     srt_key: str | None = None
 
 
 class Job(BaseModel):
     """Authoritative job record (control-plane D1 row / schemas source of truth). 4-state…"""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     job_id: str
     anon_or_user_id: str
     tier: Literal["tier1"]
@@ -180,7 +180,7 @@ class Job(BaseModel):
 
 class ModelRef(BaseModel):
     """A model/binary reference with version + sha256 (supply-chain pin)."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     name: str
     version: str | None = None
     sha256: str | None = None
@@ -188,7 +188,7 @@ class ModelRef(BaseModel):
 
 class WorkerMeta(BaseModel):
     """Worker-side metadata recorded in manifest.json."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     ffprobe: dict[str, Any] | None = None
     aigc_embed_method: str | None = None
     models: list[ModelRef] = []
@@ -196,14 +196,14 @@ class WorkerMeta(BaseModel):
 
 class Manifest(BaseModel):
     """manifest.json: a Job projection plus worker_meta, written into the job directory by the…"""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     job: Job
     worker_meta: WorkerMeta
 
 
 class LanguageCapability(BaseModel):
     """Capabilities for one target locale (keyed by BCP-47 in the registry)."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     mt_supported: bool
     subtitle_supported: bool
     tts_supported: bool
