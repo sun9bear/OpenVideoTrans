@@ -55,7 +55,7 @@ jobs:
         run: uv run pytest
 
       - name: Pyright typecheck
-        run: uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner
+        run: uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner packages/schemas
 
   # ── Schema codegen-diff job ────────────────────────────────────────────────
   schema:
@@ -74,4 +74,7 @@ jobs:
         run: node packages/schemas/scripts/codegen.mjs
 
       - name: Assert no drift
-        run: git diff --exit-code -- packages/schemas/generated/
+        run: >
+          git diff --exit-code --
+          packages/schemas/generated/ts/contracts.ts
+          packages/schemas/src/ovt_schemas/contracts.py

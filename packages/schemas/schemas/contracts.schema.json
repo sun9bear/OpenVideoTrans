@@ -1,0 +1,293 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvideotrans.dev/schemas/contracts.schema.json",
+  "title": "OpenVideoTrans Tier 1 contracts",
+  "description": "Language-agnostic contracts (source of truth). Time fields are integer milliseconds. Naming: Job / manifest.json; locales are BCP-47. See docs/2026-06-20-track-b-tier1-mvp-implementation-plan.md §3.",
+  "$defs": {
+    "Word": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A single recognized word with millisecond timing.",
+      "properties": {
+        "text": { "type": "string" },
+        "start_ms": { "type": "integer", "description": "Start time in integer milliseconds." },
+        "end_ms": { "type": "integer", "description": "End time in integer milliseconds." }
+      },
+      "required": ["text", "start_ms", "end_ms"]
+    },
+    "TranscriptLine": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One line of source transcript with word-level timing.",
+      "properties": {
+        "index": { "type": "integer" },
+        "start_ms": { "type": "integer" },
+        "end_ms": { "type": "integer" },
+        "speaker_id": { "type": "string", "default": "SPEAKER_00" },
+        "source_text": { "type": "string" },
+        "words": { "type": "array", "items": { "$ref": "#/$defs/Word" } }
+      },
+      "required": ["index", "start_ms", "end_ms", "source_text", "words"]
+    },
+    "Transcript": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "ASR output: ordered transcript lines for the source media.",
+      "properties": {
+        "source_language": { "type": "string" },
+        "lines": { "type": "array", "items": { "$ref": "#/$defs/TranscriptLine" } },
+        "asr_provider": { "type": "string" }
+      },
+      "required": ["source_language", "lines", "asr_provider"]
+    },
+    "DubbingSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A translated/timed segment for TTS + alignment.",
+      "properties": {
+        "segment_id": { "type": "string" },
+        "index": { "type": "integer" },
+        "speaker_id": { "type": "string" },
+        "start_ms": { "type": "integer" },
+        "end_ms": { "type": "integer" },
+        "target_duration_ms": { "type": "integer" },
+        "source_text": { "type": "string" },
+        "target_text": { "type": "string" },
+        "voice_id": { "type": ["string", "null"], "default": null },
+        "tts_provider": { "type": ["string", "null"], "default": null },
+        "keep_original": { "type": "boolean", "default": false },
+        "align_method": { "type": ["string", "null"], "default": null },
+        "align_ratio": { "type": ["number", "null"], "default": null },
+        "needs_review": { "type": "boolean", "default": false }
+      },
+      "required": [
+        "segment_id", "index", "speaker_id", "start_ms", "end_ms",
+        "target_duration_ms", "source_text", "target_text"
+      ]
+    },
+    "TranslationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "MT output: translated dubbing segments.",
+      "properties": {
+        "source_language": { "type": "string" },
+        "target_language": { "type": "string" },
+        "mt_provider": { "type": "string" },
+        "segments": { "type": "array", "items": { "$ref": "#/$defs/DubbingSegment" } }
+      },
+      "required": ["source_language", "target_language", "mt_provider", "segments"]
+    },
+    "Cue": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A subtitle cue. source_text is present only when subtitle_lang=bilingual.",
+      "properties": {
+        "index": { "type": "integer" },
+        "start_ms": { "type": "integer" },
+        "end_ms": { "type": "integer" },
+        "target_text": { "type": "string" },
+        "source_text": { "type": ["string", "null"], "default": null }
+      },
+      "required": ["index", "start_ms", "end_ms", "target_text"]
+    },
+    "ErrorCode": {
+      "type": "string",
+      "description": "Terminal failure reason exposed on a failed Job (user-facing copy in plan §9D).",
+      "enum": [
+        "over_duration",
+        "unsupported_format",
+        "upload_too_large",
+        "source_verify_failed",
+        "source_fetch_failed",
+        "unsupported_language_pair",
+        "no_tts_model_for_language",
+        "free_pool_exhausted",
+        "worker_lost",
+        "processing_timeout",
+        "daily_cap_reached",
+        "internal_error"
+      ]
+    },
+    "UploadSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A direct-to-R2 upload session (D1 upload_sessions). 1h TTL.",
+      "properties": {
+        "upload_session_id": { "type": "string" },
+        "anon_or_user_id": { "type": "string" },
+        "source_key": { "type": "string" },
+        "declared_bytes": { "type": "integer" },
+        "declared_type": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "verified", "consumed", "expired"]
+        },
+        "created_at": { "type": "integer", "description": "Creation time in integer milliseconds." },
+        "expires_at": { "type": "integer", "description": "Expiry time in integer milliseconds." }
+      },
+      "required": [
+        "upload_session_id", "anon_or_user_id", "source_key", "declared_bytes",
+        "declared_type", "status", "created_at", "expires_at"
+      ]
+    },
+    "AigcMarking": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "AIGC legal-marking state for a Job (capability path always present; §14 only toggles).",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "implicit": { "type": "boolean" },
+        "explicit": { "type": "boolean" },
+        "form": {
+          "type": "string",
+          "enum": ["tail_notice", "corner_label", "disclosure_only"]
+        },
+        "applied": { "type": ["boolean", "null"], "default": null }
+      },
+      "required": ["enabled", "implicit", "explicit", "form"]
+    },
+    "JobPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Chosen provider plan. tts is null for subtitle_only jobs.",
+      "properties": {
+        "asr": { "type": "string" },
+        "mt": { "type": "string" },
+        "tts": { "type": ["string", "null"], "default": null }
+      },
+      "required": ["asr", "mt"]
+    },
+    "JobArtifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "R2 object keys for produced artifacts (set as the Job completes).",
+      "properties": {
+        "video_key": { "type": ["string", "null"], "default": null },
+        "srt_key": { "type": ["string", "null"], "default": null }
+      },
+      "required": []
+    },
+    "Job": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Authoritative job record (control-plane D1 row / schemas source of truth). 4-state machine queued->running->done|failed. Time fields integer ms.",
+      "properties": {
+        "job_id": { "type": "string" },
+        "anon_or_user_id": { "type": "string" },
+        "tier": { "type": "string", "const": "tier1" },
+        "status": {
+          "type": "string",
+          "enum": ["queued", "running", "done", "failed"]
+        },
+        "current_stage": { "type": ["string", "null"], "default": null },
+        "source_type": { "type": "string", "const": "upload" },
+        "upload_session_id": { "type": "string" },
+        "declared_bytes": { "type": ["integer", "null"], "default": null },
+        "verified_bytes": { "type": ["integer", "null"], "default": null },
+        "source_lang_hint": { "type": ["string", "null"], "default": null, "description": "Optional user source-language hint (BCP-47); default auto-detect." },
+        "detected_source_lang": { "type": ["string", "null"], "default": null, "description": "ASR-detected source language (backfilled)." },
+        "source_lang_confidence": { "type": ["number", "null"], "default": null },
+        "target_lang": { "type": "string", "description": "Target locale, BCP-47 (e.g. zh-Hans, pt-BR)." },
+        "output_mode": {
+          "type": "string",
+          "enum": ["subtitle_only", "dub_only", "both"]
+        },
+        "subtitle_delivery": {
+          "type": "string",
+          "enum": ["srt", "burned", "both"]
+        },
+        "subtitle_lang": {
+          "type": "string",
+          "enum": ["target", "bilingual"]
+        },
+        "plan": { "$ref": "#/$defs/JobPlan" },
+        "settings_version": { "type": "integer", "description": "Version of the job-deciding settings snapshot taken at creation (§14)." },
+        "aigc_marking": { "$ref": "#/$defs/AigcMarking" },
+        "priority": { "type": "integer", "description": "Derived priority score for the single-lane priority queue (§8)." },
+        "advisory_duration_ms": { "type": ["integer", "null"], "default": null, "description": "Browser-advised duration; ordering only, NOT a hard cap." },
+        "enqueue_at": { "type": "integer" },
+        "deadline_at": { "type": "integer", "description": "Aging backstop must-run time." },
+        "created_at": { "type": "integer" },
+        "started_at": { "type": ["integer", "null"], "default": null },
+        "lease_expires_at": { "type": ["integer", "null"], "default": null },
+        "finished_at": { "type": ["integer", "null"], "default": null },
+        "expires_at": { "type": "integer" },
+        "data_purged_at": { "type": ["integer", "null"], "default": null, "description": "Set by sweeper when R2 data is purged; status stays done/failed." },
+        "artifacts": { "$ref": "#/$defs/JobArtifacts" },
+        "error_code": {
+          "oneOf": [{ "$ref": "#/$defs/ErrorCode" }, { "type": "null" }],
+          "default": null
+        },
+        "error_detail": { "type": ["string", "null"], "default": null, "description": "Raw server-side detail; MUST NOT be exposed via API." },
+        "attempt": { "type": "integer" },
+        "claim_version": { "type": "integer", "description": "Optimistic-lock counter incremented on each claim." },
+        "counted_job": { "type": "boolean", "description": "Idempotency flag: job-count quota already applied." },
+        "counted_minutes": { "type": "boolean", "description": "Idempotency flag: minute quota already applied." },
+        "refunded": { "type": "boolean", "description": "Idempotency flag: quota already refunded." }
+      },
+      "required": [
+        "job_id", "anon_or_user_id", "tier", "status", "source_type", "upload_session_id",
+        "target_lang", "output_mode", "subtitle_delivery", "subtitle_lang", "plan",
+        "settings_version", "aigc_marking", "priority", "enqueue_at", "deadline_at",
+        "created_at", "expires_at", "artifacts", "attempt", "claim_version",
+        "counted_job", "counted_minutes", "refunded"
+      ]
+    },
+    "ModelRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A model/binary reference with version + sha256 (supply-chain pin).",
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": ["string", "null"], "default": null },
+        "sha256": { "type": ["string", "null"], "default": null }
+      },
+      "required": ["name"]
+    },
+    "WorkerMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Worker-side metadata recorded in manifest.json.",
+      "properties": {
+        "ffprobe": { "type": ["object", "null"], "default": null, "description": "Raw ffprobe result (free-form)." },
+        "aigc_embed_method": { "type": ["string", "null"], "default": null, "description": "How the AIGC marking was actually embedded." },
+        "models": { "type": "array", "items": { "$ref": "#/$defs/ModelRef" }, "default": [] }
+      },
+      "required": []
+    },
+    "Manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "manifest.json: a Job projection plus worker_meta, written into the job directory by the worker.",
+      "properties": {
+        "job": { "$ref": "#/$defs/Job" },
+        "worker_meta": { "$ref": "#/$defs/WorkerMeta" }
+      },
+      "required": ["job", "worker_meta"]
+    },
+    "LanguageCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Capabilities for one target locale (keyed by BCP-47 in the registry).",
+      "properties": {
+        "mt_supported": { "type": "boolean" },
+        "subtitle_supported": { "type": "boolean" },
+        "tts_supported": { "type": "boolean" },
+        "tts_models": { "type": "array", "items": { "type": "string" } },
+        "burn_font": { "type": "string" },
+        "default_voice": { "type": ["string", "null"], "default": null },
+        "license_status": { "type": "string" },
+        "quality_tier": { "type": "string" }
+      },
+      "required": [
+        "mt_supported", "subtitle_supported", "tts_supported", "tts_models",
+        "burn_font", "license_status", "quality_tier"
+      ]
+    },
+    "LanguageCapabilities": {
+      "type": "object",
+      "description": "Registry: BCP-47 target locale -> LanguageCapability.",
+      "additionalProperties": { "$ref": "#/$defs/LanguageCapability" }
+    }
+  }
+}
