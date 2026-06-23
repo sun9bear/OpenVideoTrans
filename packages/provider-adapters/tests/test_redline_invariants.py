@@ -16,12 +16,17 @@ from __future__ import annotations
 
 import pytest
 
-# TODO(T1.2): drop xfail once provider_adapters implements the paid-safety API.
+# TODO(T1.2): drop this xfail once provider_adapters implements the paid-safety API.
+# xfail ONLY the not-yet-implemented ImportError, and STRICTLY: once T1.2 adds the API a real
+# invariant violation raises AssertionError (≠ ImportError) → fails CI immediately instead of
+# hiding as XFAIL; a passing invariant xpasses-strict → fails until the marker is removed,
+# enforcing the T1.2 acceptance "xfail TODO count → 0" (CodeX P2).
 pytestmark = [
     pytest.mark.redline,
     pytest.mark.xfail(
+        raises=ImportError,
         reason="provider-adapters paid-safety API (PAID_PROVIDERS/select) lands in T1.2",
-        strict=False,
+        strict=True,
     ),
 ]
 

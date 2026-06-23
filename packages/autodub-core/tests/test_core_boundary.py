@@ -46,11 +46,12 @@ def _imported_module_roots(src: str) -> set[str]:
             mods.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.module:
-                # `from gateway import X` / `from .gateway import X`
+                # `from gateway import X` / `from .gateway import X` — module path (substring)
                 mods.add(node.module)
-            else:
-                # `from . import gateway` / `from .. import billing` — submodule is in names
-                mods.update(alias.name for alias in node.names)
+            # Imported names may themselves be a forbidden submodule: `from pkg import gateway`
+            # (module 'pkg' is clean) or `from . import gateway` (no module). Exact-match the
+            # forbidden tokens so innocent symbols like `gateway_helper` are NOT flagged.
+            mods.update(a.name for a in node.names if a.name.lower() in _FORBIDDEN)
         elif isinstance(node, ast.Call):
             # Dynamic string-literal imports: importlib.import_module("x") / __import__("x").
             fn = node.func
@@ -91,6 +92,8 @@ def test_core_imports_stay_inside_boundary() -> None:
         "from .. import billing",
         "from billing.api import charge",
         "import payment_processor",
+        "from integrations import gateway",  # clean module, forbidden imported submodule (CodeX P2)
+        "from .providers import payment",  # clean module, forbidden imported submodule (CodeX P2)
         "importlib.import_module('gateway')",
         "__import__('billing')",
     ],
