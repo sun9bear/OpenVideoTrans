@@ -24,6 +24,10 @@ node_modules/
 *.key
 *.pem
 *.p12
+# 服务器密码/凭据明文文件（绝不进仓；建议移出 repo、放密码管理器）
+/101.47.159.169.txt
+*credential*.txt
+*password*.txt
 
 # Media scratch & job artifacts (large, regenerable)
 /work/

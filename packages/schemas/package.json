@@ -1,0 +1,17 @@
+{
+  "name": "@open-video-trans/schemas",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "lint": "echo 'no linter configured yet' && exit 0",
+    "test": "echo 'no unit tests yet' && exit 0",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

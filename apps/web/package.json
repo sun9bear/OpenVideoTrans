@@ -1,0 +1,15 @@
+{
+  "name": "@open-video-trans/web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "echo 'no linter configured yet' && exit 0",
+    "test": "echo 'no unit tests yet' && exit 0",
+    "typecheck": "tsc --noEmit",
+    "build": "echo 'no build configured yet' && exit 0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

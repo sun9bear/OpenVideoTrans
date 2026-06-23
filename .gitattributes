@@ -1,0 +1,6 @@
+# Cross-platform line-ending policy (Windows authoring → Linux CI).
+# Normalize all text files to LF in the repository so diffs are deterministic and the
+# schema codegen-diff CI job (`git diff --exit-code -- packages/schemas/generated/`)
+# cannot flap red if a contributor regenerates on Windows with core.autocrlf=true.
+# All tracked files are already LF, so this introduces no renormalization churn.
+* text=auto eol=lf

@@ -1,0 +1,4 @@
+packages:
+  - "apps/web"
+  - "apps/control-plane"
+  - "packages/schemas"
