@@ -421,6 +421,11 @@ def mux(
     primary = paths.dubbed_video if want_video else paths.subtitles
     if expected and all(p.exists() for p in expected) and not force:
         _log("mux: cached")
+        # Cached marked deliverables still carry the mark — record applied so a
+        # resume after the artifacts were written never under-claims in the manifest
+        # (CodeX P2: a crash between writing artifacts and write_manifest).
+        if marking is not None and marking.enabled:
+            marking.applied = True
         return primary
     # Rebuild: clear the expected deliverables first so a mid-build failure leaves
     # an incomplete (repairable) set, never a stale one that looks cached next time.
@@ -536,6 +541,18 @@ def run_pipeline(
     local-runner) a ``manifest.json`` is written alongside the deliverables (T1.3a).
     """
     resolver = pin_resolver(resolver)
+    if job is not None:
+        # The Job is the authoritative record — derive every job-defined setting from
+        # it so what runs can't diverge from the manifest written for it (CodeX P1).
+        # Runtime knobs (source / separate / keep_ambient / force) stay caller-supplied;
+        # the flat kwargs drive only the no-job ad-hoc (CLI) path.
+        target_lang = job.target_lang
+        source_lang = job.source_lang_hint
+        output_mode = job.output_mode
+        subtitle_lang = job.subtitle_lang
+        subtitle_delivery = job.subtitle_delivery
+        aigc_marking = job.aigc_marking
+        asr, mt, tts_provider = job.plan.asr, job.plan.mt, job.plan.tts
     ingest(paths, source, force=force)
     prepare(paths, separate=separate, force=force)
     transcribe(paths, resolver, asr, source_lang, force=force)

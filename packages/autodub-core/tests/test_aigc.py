@@ -210,3 +210,42 @@ def test_run_pipeline_records_embed_method_in_manifest(
     manifest = Manifest.model_validate(read_json(paths.manifest))
     assert manifest.worker_meta.aigc_embed_method == "mt_disclosure"
     assert marking.applied is True
+
+
+def test_run_pipeline_job_settings_override_kwarg_defaults(
+    tmp_path: Path, monkeypatch  # noqa: ANN001
+) -> None:
+    # CodeX P1: the Job is authoritative — a subtitle_only job must run subtitle_only
+    # even though the output_mode kwarg is left at its "both" default; the pipeline
+    # must not diverge from the manifest it writes.
+    paths = JobPaths(tmp_path).ensure()
+    marking = AigcMarking(enabled=True, implicit=True, explicit=False, form="disclosure_only")
+    job = _minimal_job(marking, output_mode="subtitle_only")
+    called = {"tts": False, "align": False}
+    monkeypatch.setattr(stages, "ingest", lambda *a, **k: None)  # noqa: ARG005
+    monkeypatch.setattr(stages, "prepare", lambda *a, **k: None)  # noqa: ARG005
+    monkeypatch.setattr(stages, "tts", lambda *a, **k: called.__setitem__("tts", True))  # noqa: ARG005, E501
+    monkeypatch.setattr(stages, "align", lambda *a, **k: called.__setitem__("align", True))  # noqa: ARG005, E501
+
+    # NOTE: no output_mode/aigc_marking kwargs -> kwarg defaults are "both"/None;
+    # the job must override both.
+    out = stages.run_pipeline(paths, _Resolver(), source="x", target_lang="en", job=job)
+    assert called == {"tts": False, "align": False}  # subtitle_only skipped tts + align
+    assert out == paths.subtitles and paths.subtitles.exists()
+    assert not paths.dubbed_video.exists()
+    manifest = Manifest.model_validate(read_json(paths.manifest))
+    assert manifest.worker_meta.aigc_embed_method == "mt_disclosure"  # derived from job
+    assert marking.applied is True
+
+
+def test_mux_cache_hit_still_records_marking_applied(tmp_path: Path) -> None:
+    # CodeX P2: a resume that hits the mux cache (deliverables already written) must
+    # still record the mark as applied, so the manifest doesn't under-claim.
+    paths = JobPaths(tmp_path).ensure()
+    paths.dubbed_video.write_bytes(b"mp4")
+    paths.subtitles.write_text("1\n", encoding="utf-8")  # both deliverables present -> cache hit
+    _write_segments(paths, [("hello", "你好")])
+    marking = _marking()
+    out = stages.mux(paths, output_mode="both", marking=marking)
+    assert out == paths.dubbed_video
+    assert marking.applied is True  # cache hit still records the mark
