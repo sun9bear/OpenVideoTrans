@@ -391,6 +391,59 @@ def test_align_persists_metadata_before_writing_aligned_wav(
     assert seen == {0: True, 1: True}
 
 
+def test_align_force_failure_removes_stale_aligned(
+    tmp_path: Path, monkeypatch,  # noqa: ANN001
+) -> None:
+    # a failed force re-align must not leave the old aligned wav behind (it would
+    # satisfy the non-force cache check and mux stale audio on resume) (CodeX @PR P2).
+    res = FakeResolver()
+    paths = JobPaths(tmp_path).ensure()
+    stages.transcribe(paths, res, None, "en")
+    stages.translate(paths, res, None, "zh", "en")
+    paths.tts_raw(0, "wav").write_bytes(b"raw0")
+    paths.tts_raw(1, "wav").write_bytes(b"raw1")
+    paths.tts_aligned(0).write_bytes(b"OLD-aligned")  # stale from a prior run
+
+    monkeypatch.setattr(stages.ff, "assert_ffmpeg", lambda: None)
+    monkeypatch.setattr(stages, "_media_duration_ms", lambda p: 500)  # ratio 0.5 -> fit
+
+    def boom_canonical(src, out, chain=None):  # noqa: ANN001,ANN202,ARG001
+        raise stages.ff.FfmpegError("ffmpeg killed")
+
+    monkeypatch.setattr(stages.ff, "to_canonical_wav", boom_canonical)
+    with pytest.raises(stages.ff.FfmpegError):
+        stages.align(paths, force=True)
+    assert not paths.tts_aligned(0).exists()  # stale aligned invalidated
+
+
+def test_mux_force_clears_stale_pair_on_failure(
+    tmp_path: Path, monkeypatch,  # noqa: ANN001
+) -> None:
+    # a failed forced mux must not leave the old mp4+srt pair as a "cached" set
+    # (it would return stale deliverables on a non-force resume) (CodeX @PR P2).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    write_json(paths.segments, TranslationResult(
+        source_language="en", target_language="zh", mt_provider="m", segments=[],
+    ).model_dump())
+    paths.dubbed_video.write_bytes(b"OLD-mp4")
+    paths.subtitles.write_text("OLD srt", encoding="utf-8")
+
+    monkeypatch.setattr(stages.ff, "assert_ffmpeg", lambda: None)
+    monkeypatch.setattr(stages.ff, "probe_duration_ms", lambda p: 1000)  # noqa: ARG005
+    monkeypatch.setattr(stages.ff, "stitch_timeline",
+                        lambda placements, out, total: Path(out).write_bytes(b"a"))  # noqa: ARG005
+
+    def boom_mux(*a, **k):  # noqa: ANN002,ANN003,ANN202
+        raise stages.ff.FfmpegError("ffmpeg killed")
+
+    monkeypatch.setattr(stages.ff, "mux", boom_mux)
+    with pytest.raises(stages.ff.FfmpegError):
+        stages.mux(paths, force=True)
+    assert not paths.dubbed_video.exists()  # stale deliverables cleared
+    assert not paths.subtitles.exists()
+
+
 def test_prepare_full_mix_clears_stale_ambient(tmp_path: Path) -> None:
     # full-mix speech (no separation) must drop a prior separated run's ambient so
     # mux(keep_ambient=True) can't mix stale background (CodeX P2).

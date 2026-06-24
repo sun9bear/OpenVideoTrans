@@ -292,6 +292,10 @@ def align(paths: JobPaths, force: bool = False) -> TranslationResult:
         aligned = paths.tts_aligned(seg.index)
         if aligned.exists() and not force:
             continue
+        # Force rewrite: drop the old aligned wav up front. The atomic writers keep
+        # the previous file on failure, so without this a failed re-write would
+        # leave a stale aligned wav satisfying the non-force cache check on resume.
+        aligned.unlink(missing_ok=True)
         # Persist each segment's metadata to segments.json BEFORE writing its
         # aligned wav (the skip-gate artifact): then aligned.exists() implies the
         # metadata is durable, so a crash mid-align can't lose a needs_review flag
@@ -351,6 +355,11 @@ def mux(paths: JobPaths, keep_ambient: bool = True, force: bool = False) -> Path
     if paths.dubbed_video.exists() and paths.subtitles.exists() and not force:
         _log("mux: cached")
         return paths.dubbed_video
+    # Reaching here means a (re)build is needed (forced, or an incomplete pair).
+    # Clear both deliverables first so a failure mid-rewrite leaves an incomplete
+    # (repairable) set, never a stale mp4+srt pair that looks cached next time.
+    paths.dubbed_video.unlink(missing_ok=True)
+    paths.subtitles.unlink(missing_ok=True)
     result = TranslationResult.model_validate(read_json(paths.segments))
     video = paths.original_video()
     if not video:
