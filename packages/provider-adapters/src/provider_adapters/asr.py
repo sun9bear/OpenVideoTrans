@@ -52,6 +52,15 @@ def _wav_duration_ms(path: str) -> int:
         return 0
 
 
+def _resp_duration_ms(j: dict) -> int:
+    """Whisper verbose_json reports a top-level ``duration`` (seconds) for the whole request.
+    Use it to span a text-only response (no segments/words) instead of a zero-length line."""
+    try:
+        return int(float(j.get("duration", 0)) * 1000)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _iso639(lang: str | None) -> str | None:
     """Reduce a BCP-47 source hint (project standard, e.g. 'pt-BR' / 'zh-Hans') to the
     bare ISO-639 code Whisper-compatible ASR APIs expect ('pt' / 'zh'). Prevents a
@@ -208,7 +217,7 @@ class _OpenAICompatASR(ASRProvider):
         parts: list[tuple[list[TranscriptLine], int]] = []
         detected: str | None = None
         for c in plan:
-            t = self._parse(self._request_json(c.path, source_lang), source_lang)
+            t = self._parse(self._request_json(c.path, source_lang), source_lang, c.duration_ms)
             parts.append((t.lines, c.offset_ms))
             if detected is None and t.source_language not in (None, "auto"):
                 detected = t.source_language  # keep the first chunk-detected language (CodeX)
@@ -251,7 +260,7 @@ class _OpenAICompatASR(ASRProvider):
             for w in (j.get("words") or []) if "start" in w and "end" in w
         ]
 
-    def _parse(self, j: dict, source_lang: str | None) -> Transcript:
+    def _parse(self, j: dict, source_lang: str | None, fallback_ms: int = 0) -> Transcript:
         words = self._words_from_json(j)
         lines: list[TranscriptLine] = []
         for seg in j.get("segments") or []:
@@ -264,7 +273,10 @@ class _OpenAICompatASR(ASRProvider):
                 )
             )
         if not lines:
-            total = words[-1].end_ms if words else 0
+            # Text-only response (no segments/words): span the line over the response's own
+            # reported duration, else the caller's fallback (a chunk's known length) — never 0,
+            # which would make merge_lines emit a zero-length cue per chunk (CodeX).
+            total = words[-1].end_ms if words else (_resp_duration_ms(j) or fallback_ms)
             lines = _group_words_into_lines(words, j.get("text", ""), total)
         # Prefer the caller's hint over Whisper's detected NAME ("english"), normalizing
         # both to ISO-639-1 (CodeX): a raw name would break the default ASR->CloudflareMT

@@ -203,6 +203,25 @@ def test_openai_compat_chunked_preserves_segment_only_text(tmp_path: Path, monke
     assert [ln.index for ln in tr.lines] == [0, 1, 2]  # re-indexed globally
 
 
+def test_openai_compat_chunked_text_only_spans_chunk_duration(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001, E501
+    # CodeX P2: a chunked response with ONLY top-level `text` (no segments/words) must span each
+    # line over the chunk's known duration — not collapse to a zero-length cue (end_ms=0).
+    from provider_adapters.asr import GroqASR
+
+    monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 30_000)
+    _stub_encode(monkeypatch, 1.0)
+    monkeypatch.setattr(GroqASR, "available", lambda self: True)
+    monkeypatch.setattr(GroqASR, "audio", AudioConstraints(("opus",), max_duration_ms=10_000))
+    monkeypatch.setattr(GroqASR, "_request_json",
+                        lambda self, p, lang: {"language": "english", "text": "hello"})  # noqa: ARG005
+    tr = GroqASR().transcribe(str(tmp_path / "long.wav"), None)
+    assert [ln.source_text for ln in tr.lines] == ["hello", "hello", "hello"]
+    # each line spans its 10 s chunk at the right offset — no zero-length cues
+    spans = [(ln.start_ms, ln.end_ms) for ln in tr.lines]
+    assert spans == [(0, 10_000), (10_000, 20_000), (20_000, 30_000)]
+    assert all(ln.end_ms > ln.start_ms for ln in tr.lines)
+
+
 def test_openai_negotiates_supported_codec_not_opus() -> None:
     # @CodeX bot P2: OpenAI's STT API rejects ogg/opus + flac, so OpenAI ASR must negotiate a
     # codec it accepts (mp3), NOT inherit Groq's opus-first list (which uploads a rejected .ogg).
