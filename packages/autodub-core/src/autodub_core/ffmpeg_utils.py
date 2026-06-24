@@ -28,7 +28,12 @@ def have(binary: str) -> bool:
 
 
 def _run(cmd: list[str]) -> str:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # ffmpeg/ffprobe emit UTF-8; decode as UTF-8 (not the Windows locale/cp936) and
+    # never crash the output-reader thread on odd bytes. AIGC metadata carries
+    # non-ASCII (e.g. Chinese), which a locale decode would choke on.
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
     if proc.returncode != 0:
         raise FfmpegError(
             f"command failed ({proc.returncode}): {' '.join(cmd[:6])} ...\n{proc.stderr[-2000:]}"
@@ -77,6 +82,12 @@ _PLAYLIST_EXTENSIONS = frozenset({
     ".concat", ".ffconcat",
 })
 
+# Demuxer whitelist for the untrusted-source format probe: ffprobe refuses to even
+# OPEN an input whose demuxer is not allowed (e.g. a disguised concat/hls under a
+# media extension), so a playlist/concat demuxer can never dereference sub-resources
+# during the probe — constraining the probe itself, not only the post-probe validate.
+_FORMAT_WHITELIST = ("-format_whitelist", ",".join(sorted(ALLOWED_INPUT_FORMATS)))
+
 
 def _input(path: str | Path) -> list[str]:
     """A protocol-restricted input: ``-protocol_whitelist file,crypto -i PATH``."""
@@ -104,9 +115,9 @@ def validate_format_name(format_name: str) -> None:
 
 
 def probe_format_name(path: str | Path) -> str:
-    """ffprobe the input's container ``format_name`` (protocol-restricted)."""
+    """ffprobe the input's container ``format_name`` (protocol- AND demuxer-restricted)."""
     out = _run([
-        *_FFPROBE_BASE, "-show_entries", "format=format_name",
+        *_FFPROBE_BASE, *_FORMAT_WHITELIST, "-show_entries", "format=format_name",
         "-of", "default=nokey=1:noprint_wrappers=1", *_PROTOCOL_WHITELIST, str(path),
     ])
     return out.strip()

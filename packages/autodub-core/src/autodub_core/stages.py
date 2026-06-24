@@ -419,13 +419,18 @@ def mux(
     expected = [p for p, want in
                 ((paths.dubbed_video, want_video), (paths.subtitles, want_srt)) if want]
     primary = paths.dubbed_video if want_video else paths.subtitles
-    if expected and all(p.exists() for p in expected) and not force:
+    # The AIGC mark the deliverables must carry ("" = unmarked). A marker file records
+    # what the cached artifacts were actually built with, so a marking change forces a
+    # re-mux: the cache can neither under-claim (resume of a marked run) nor over-claim
+    # (cached artifacts from an earlier unmarked run presented as marked) — red line §3.
+    want_method = aigc.embed_method(marking, output_mode) or ""
+    marker = paths.output / ".aigc_mark"
+    cached_method = marker.read_text(encoding="utf-8") if marker.exists() else ""
+    if (expected and all(p.exists() for p in expected)
+            and cached_method == want_method and not force):
         _log("mux: cached")
-        # Cached marked deliverables still carry the mark — record applied so a
-        # resume after the artifacts were written never under-claims in the manifest
-        # (CodeX P2: a crash between writing artifacts and write_manifest).
-        if marking is not None and marking.enabled:
-            marking.applied = True
+        if want_method and marking is not None:
+            marking.applied = True  # cached artifacts carry the recorded mark
         return primary
     # Rebuild: clear the expected deliverables first so a mid-build failure leaves
     # an incomplete (repairable) set, never a stale one that looks cached next time.
@@ -460,10 +465,13 @@ def mux(
         _write_srt(result, paths.subtitles, bilingual=(subtitle_lang == "bilingual"),
                    disclosure=aigc.subtitle_disclosure(marking))
         _log(f"mux: wrote {paths.subtitles.name}")
-    # applied reflects that a marked deliverable was actually written (gated on the
-    # non-empty deliverable set), not merely that marking was enabled — so the §3
-    # audit trail never claims a mark that no artifact carried.
-    if expected and marking is not None and marking.enabled:
+    # Record what was actually marked alongside the deliverables, so a later resume
+    # can trust (or invalidate) the cache. applied reflects an actually-written mark
+    # (non-empty method), never merely that marking was enabled — the §3 audit trail
+    # must not claim a mark that no artifact carries.
+    if expected:
+        marker.write_text(want_method, encoding="utf-8")
+    if want_method and marking is not None:
         marking.applied = True
     return primary
 
@@ -553,6 +561,11 @@ def run_pipeline(
         subtitle_delivery = job.subtitle_delivery
         aigc_marking = job.aigc_marking
         asr, mt, tts_provider = job.plan.asr, job.plan.mt, job.plan.tts
+    elif aigc_marking is None:
+        # Red line §3: AIGC marking is default-ON. The ad-hoc / no-job path never
+        # ships an unmarked deliverable by omission — disabling needs an explicit
+        # (audited) AigcMarking(enabled=False) from the caller.
+        aigc_marking = aigc.default_marking(output_mode)
     ingest(paths, source, force=force)
     prepare(paths, separate=separate, force=force)
     transcribe(paths, resolver, asr, source_lang, force=force)

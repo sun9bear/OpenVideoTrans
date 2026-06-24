@@ -30,6 +30,18 @@ def _on(marking: AigcMarking | None) -> bool:
     return bool(marking and marking.enabled)
 
 
+def default_marking(output_mode: str) -> AigcMarking:
+    """The default-ON AIGC marking for the ad-hoc / no-job path (red line §3, 默认开).
+
+    The kernel never produces an unmarked deliverable by omission: when no marking
+    is supplied (and no authoritative Job carries one), it marks by default. Turning
+    the mark OFF requires the caller to pass an explicit ``AigcMarking(enabled=False)``
+    — the audited acknowledgment §3 demands. The ``form`` follows output_mode.
+    """
+    form = "tail_notice" if output_mode in _DUB_MODES else "disclosure_only"
+    return AigcMarking(enabled=True, implicit=True, explicit=True, form=form)
+
+
 def embed_method(marking: AigcMarking | None, output_mode: str) -> str | None:
     """The marking method recorded for this output, or None when marking is off.
 

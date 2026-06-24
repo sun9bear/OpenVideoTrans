@@ -151,6 +151,19 @@ def test_probe_format_name_restricts_protocols(monkeypatch: pytest.MonkeyPatch) 
     _assert_no_network_protocol(captured[0])
 
 
+def test_probe_format_name_demuxer_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # the probe constrains the demuxer (-format_whitelist) so ffprobe refuses to even
+    # open a disguised concat/hls input before it can dereference sub-resources.
+    captured: list[list[str]] = []
+    monkeypatch.setattr(ff, "_run", lambda cmd: captured.append(list(cmd)) or "mov,mp4\n")
+    ff.probe_format_name("in.mp4")
+    cmd = captured[0]
+    assert "-format_whitelist" in cmd
+    whitelist = cmd[cmd.index("-format_whitelist") + 1].split(",")
+    assert "mp4" in whitelist and "wav" in whitelist
+    assert "concat" not in whitelist and "hls" not in whitelist
+
+
 # --------------------------------------------------------------------------- #
 # ingest wiring (the untrusted-source boundary)
 # --------------------------------------------------------------------------- #
