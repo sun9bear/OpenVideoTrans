@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from autodub_core import ffmpeg_utils as ff
 from autodub_core.config import CANON_CHANNELS, CANON_SR
+from autodub_core.jsonio import atomic_output
 
 
 def _make_wav(path: Path, ms: int) -> Path:
@@ -93,6 +94,69 @@ def _frame_at_ms(path: Path, ms: int) -> bytes:
     with wave.open(str(path), "rb") as w:
         w.setpos(int(round(ms * w.getframerate() / 1000)))
         return w.readframes(1)
+
+
+def test_to_canonical_wav_atomic_on_failure(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # a failed/killed ffmpeg must leave NO partial file at the cache path, so
+    # align() can't treat a truncated _aligned.wav as done on resume (CodeX P2).
+    out = tmp_path / "segment_0000_aligned.wav"
+
+    def boom(cmd):  # noqa: ANN001,ANN202,ARG001
+        raise ff.FfmpegError("ffmpeg killed")
+
+    monkeypatch.setattr(ff, "_run", boom)
+    with pytest.raises(ff.FfmpegError):
+        ff.to_canonical_wav(tmp_path / "in.wav", out)
+    assert not out.exists()                                    # no partial at cache path
+    assert not out.with_name(out.name + ".part").exists()      # temp cleaned up
+
+
+def test_extract_audio_atomic_on_failure(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # a failed/killed ffmpeg must leave NO partial wav at the cache path, so
+    # ingest/prepare resume can't skip with corrupt cached audio (CodeX P2).
+    out = tmp_path / "original.wav"
+
+    def boom(cmd):  # noqa: ANN001,ANN202,ARG001
+        raise ff.FfmpegError("ffmpeg killed")
+
+    monkeypatch.setattr(ff, "_run", boom)
+    with pytest.raises(ff.FfmpegError):
+        ff.extract_audio(tmp_path / "in.mp4", out)
+    assert not out.exists()
+    assert not out.with_name(out.name + ".part").exists()
+
+
+def test_atomic_output_replaces_on_success(tmp_path: Path) -> None:
+    final = tmp_path / "out.bin"
+    with atomic_output(final) as tmp:
+        tmp.write_bytes(b"data")
+        assert tmp != final and tmp.exists()  # writes go to the temp first
+    assert final.read_bytes() == b"data"       # replaced atomically on clean exit
+    assert not tmp.exists()                     # temp cleaned up
+
+
+def test_atomic_output_leaves_no_partial_on_failure(tmp_path: Path) -> None:
+    final = tmp_path / "out.bin"
+    with pytest.raises(RuntimeError), atomic_output(final) as tmp:
+        tmp.write_bytes(b"partial")
+        raise RuntimeError("boom")
+    assert not final.exists()  # no partial at the cache path
+    assert not tmp.exists()    # temp cleaned up
+
+
+def test_mux_atomic_on_failure(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # a failed mux must leave NO partial mp4 at the cache path, so it can't pair
+    # with an existing subtitles.srt and look cached on the next run (CodeX P2).
+    out = tmp_path / "dubbed_video.mp4"
+
+    def boom(cmd):  # noqa: ANN001,ANN202,ARG001
+        raise ff.FfmpegError("ffmpeg killed")
+
+    monkeypatch.setattr(ff, "_run", boom)
+    with pytest.raises(ff.FfmpegError):
+        ff.mux(tmp_path / "v.mp4", tmp_path / "a.wav", out)
+    assert not out.exists()
+    assert not out.with_name(out.stem + ".part" + out.suffix).exists()
 
 
 def test_stitch_frame_level_placement(tmp_path: Path) -> None:

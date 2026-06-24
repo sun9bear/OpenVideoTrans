@@ -21,7 +21,7 @@ from ovt_schemas.contracts import DubbingSegment, Transcript, TranslationResult
 from . import config
 from . import ffmpeg_utils as ff
 from .config import JobPaths
-from .jsonio import read_json, write_json
+from .jsonio import atomic_output, read_json, write_json
 from .providers import ProviderUnavailable, Resolver, TtsProvider
 
 
@@ -61,13 +61,31 @@ def ingest(paths: JobPaths, source: str, force: bool = False) -> None:
     if not src.exists():
         raise FileNotFoundError(f"source not found: {source}")
     dst = paths.video / f"original{src.suffix.lower() or '.mp4'}"
-    shutil.copy2(src, dst)
-    _log(f"ingest: copied local {src.name}")
+    src_resolved, dst_resolved = src.resolve(), dst.resolve()
+    # Drop any stale original.* (e.g. a prior run's different extension) so
+    # original_video() can only resolve to the source we are ingesting now —
+    # otherwise a forced re-ingest with a new suffix would keep extracting/muxing
+    # the old file (original.avi sorts before original.mp4).
+    for old in paths.video.glob("original.*"):
+        if old.resolve() not in (src_resolved, dst_resolved):
+            old.unlink()
+    if src_resolved != dst_resolved:
+        with atomic_output(dst) as tmp:
+            shutil.copy2(src, tmp)
+        _log(f"ingest: copied local {src.name}")
+    else:
+        # already staged at the canonical location (worker pre-stage / re-extract):
+        # don't copy a file onto itself; extract audio from it in place.
+        _log(f"ingest: source already staged ({src.name})")
 
     video = paths.original_video()
     if not video:
         raise RuntimeError("ingest produced no video/original.* file")
     ff.assert_ffmpeg()
+    # Drop any prior audio BEFORE extracting: extract_audio only replaces on
+    # success, so a failed re-extract would otherwise leave the old audio paired
+    # with the freshly-staged video on a later non-force retry.
+    paths.original_audio.unlink(missing_ok=True)
     ff.extract_audio(video, paths.original_audio, sr=16000, mono=True)
     _log(f"ingest: extracted audio -> {paths.original_audio.name}")
 
@@ -86,29 +104,42 @@ def prepare(paths: JobPaths, separate: bool = False, force: bool = False) -> Non
             return
         except Exception as exc:  # noqa: BLE001 - free fallback, no paid path involved
             _log(f"prepare: demucs failed ({exc}); falling back to full-mix speech")
-    shutil.copy2(paths.original_audio, paths.speech)
+    # atomic copy: a truncated speech.wav would be cached and fed to ASR.
+    with atomic_output(paths.speech) as tmp:
+        shutil.copy2(paths.original_audio, tmp)
+    # no separation -> no ambient stem; drop any stale ambient.wav from a prior
+    # separated run so mux(keep_ambient=True) can't mix old background.
+    paths.ambient.unlink(missing_ok=True)
     _log("prepare: speech = original audio (no separation)")
 
 
 def _demucs_split(paths: JobPaths) -> None:
-    out_dir = Path(tempfile.mkdtemp(prefix="ovt_demucs_"))
-    subprocess.run(
-        ["demucs", "--two-stems=vocals", "-o", str(out_dir), str(paths.original_audio)],
-        capture_output=True, text=True, check=True,
-    )
-    vocals = next(out_dir.rglob("vocals.wav"))
-    no_vocals = next(out_dir.rglob("no_vocals.wav"))
-    ff.extract_audio(vocals, paths.speech, sr=16000, mono=True)
-    ff.to_canonical_wav(no_vocals, paths.ambient)
+    # TemporaryDirectory auto-removes the (potentially large) demucs stems; the
+    # two stems we keep are copied out to paths.speech/ambient before cleanup.
+    with tempfile.TemporaryDirectory(prefix="ovt_demucs_") as tmp:
+        out_dir = Path(tmp)
+        subprocess.run(
+            ["demucs", "--two-stems=vocals", "-o", str(out_dir), str(paths.original_audio)],
+            capture_output=True, text=True, check=True,
+        )
+        vocals = next(out_dir.rglob("vocals.wav"))
+        no_vocals = next(out_dir.rglob("no_vocals.wav"))
+        # Write ambient FIRST, then speech: speech.wav is prepare()'s cache gate, so
+        # writing it last means speech.exists() implies separation fully completed
+        # (an interruption can't leave a "cached" speech without its ambient stem).
+        ff.to_canonical_wav(no_vocals, paths.ambient)
+        ff.extract_audio(vocals, paths.speech, sr=16000, mono=True)
 
 
 # --------------------------------------------------------------------------- #
 def transcribe(paths: JobPaths, resolver: Resolver, provider: str | None,
-               source_lang: str | None, allow_paid: bool, force: bool = False) -> Transcript:
+               source_lang: str | None, force: bool = False) -> Transcript:
     if paths.transcript.exists() and not force:
         _log("transcribe: cached")
         return Transcript.model_validate(read_json(paths.transcript))
-    asr = resolver.select("asr", provider, allow_paid)
+    # Tier 1 kernel NEVER enables paid providers (CLAUDE.md red line §1/§14):
+    # allow_paid is hard-False here; provider-adapters' select enforces the gate.
+    asr = resolver.select("asr", provider, allow_paid=False)
     _log(f"transcribe: provider={asr.info.name}")
     result = asr.transcribe(str(paths.speech), source_lang)
     write_json(paths.transcript, result.model_dump())
@@ -118,18 +149,26 @@ def transcribe(paths: JobPaths, resolver: Resolver, provider: str | None,
 
 # --------------------------------------------------------------------------- #
 def translate(paths: JobPaths, resolver: Resolver, provider: str | None, target_lang: str,
-              source_lang: str | None, allow_paid: bool, force: bool = False) -> TranslationResult:
+              source_lang: str | None, force: bool = False) -> TranslationResult:
     if paths.segments.exists() and not force:
         _log("translate: cached")
         return TranslationResult.model_validate(read_json(paths.segments))
     transcript = Transcript.model_validate(read_json(paths.transcript))
     src = source_lang or transcript.source_language or "auto"
-    mt = resolver.select("mt", provider, allow_paid)
+    mt = resolver.select("mt", provider, allow_paid=False)  # red line: never paid (§1/§14)
     _log(f"translate: provider={mt.info.name} {src}->{target_lang}")
 
     texts = [ln.source_text for ln in transcript.lines]
     budgets = [_line_duration_ms(ln) for ln in transcript.lines]
     translations = mt.translate(texts, src, target_lang, budgets) if texts else []
+    if texts and len(translations) != len(texts):
+        # The provider contract is one output per input line. A short/truncated
+        # batch would silently leave segments untranslated (target_text="" ->
+        # keep_original); surface the provider failure instead of shipping it.
+        raise RuntimeError(
+            f"MT provider {mt.info.name} returned {len(translations)} translations "
+            f"for {len(texts)} input lines (expected 1:1)."
+        )
 
     segments: list[DubbingSegment] = []
     for i, ln in enumerate(transcript.lines):
@@ -156,25 +195,57 @@ def _assign_voices(provider: TtsProvider, lang: str, speaker_ids: list[str]) -> 
 
 
 def tts(paths: JobPaths, resolver: Resolver, provider: str | None,
-        allow_paid: bool, force: bool = False) -> TranslationResult:
+        force: bool = False) -> TranslationResult:
     paths.ensure()  # standalone/resume runs must still have tts/ before writing
     result = TranslationResult.model_validate(read_json(paths.segments))
-    engine = resolver.select("tts", provider, allow_paid)
+
+    # A segment with empty target_text carries no dub -> keep_original.
+    for seg in result.segments:
+        if not seg.target_text.strip():
+            seg.keep_original = True
+
+    pending = [s for s in result.segments if not s.keep_original]
+    # Segments needing a synthesis call NOW (cache miss or force). A fully cached
+    # resume must not resolve a provider: availability/quota may have changed and
+    # no provider call is needed (file-based no-op contract).
+    to_synth = [s for s in pending if force or paths.find_tts_raw(s.index) is None]
+    if not to_synth:
+        # Nothing to synthesize: subtitle-only / all keep_original, or every raw
+        # artifact already cached. Don't resolve a TTS provider or require a voice
+        # for the target locale — such a job is still valid and must complete.
+        write_json(paths.segments, result.model_dump())
+        _log("tts: nothing to synthesize (all keep_original or cached)")
+        return result
+
+    engine = resolver.select("tts", provider, allow_paid=False)  # red line: never paid (§1/§14)
     _log(f"tts: provider={engine.info.name}")
     voice_map = _assign_voices(engine, result.target_language,
                                [s.speaker_id for s in result.segments])
 
-    for seg in result.segments:
-        if seg.keep_original or not seg.target_text.strip():
-            seg.keep_original = True
-            continue
-        if not force and paths.find_tts_raw(seg.index) is not None:
-            continue
+    for seg in to_synth:
+        # Drop any stale raw variant for this index (e.g. a different extension
+        # from a previous provider on a force re-run) so align()'s find_tts_raw()
+        # cannot later pick up the old file.
+        for stale in paths.tts.glob(f"segment_{seg.index:04d}.*"):
+            if not stale.name.endswith("_aligned.wav"):
+                stale.unlink()
         voice = voice_map[seg.speaker_id]
-        out_stub = paths.tts_raw(seg.index, getattr(engine, "ext", "mp3"))
-        actual = engine.synthesize(seg.target_text, voice, result.target_language, str(out_stub))
+        # Persist provider metadata BEFORE exposing the raw file: find_tts_raw() is
+        # the resume skip-gate, so a crash after the raw appears but before the
+        # final write must not leave the segment cached without voice_id/provider.
         seg.voice_id, seg.tts_provider = voice, engine.info.name
-        _log(f"tts: seg {seg.index} -> {Path(actual).name} [{voice}]")
+        write_json(paths.segments, result.model_dump())
+        # Synthesize into a temp dir (outside find_tts_raw()'s glob), then move
+        # into place atomically — a crash mid-synthesis must not leave a partial
+        # raw that a resume treats as cached and align() then consumes corrupt.
+        with tempfile.TemporaryDirectory(dir=paths.tts) as td:
+            stub = Path(td) / f"raw.{getattr(engine, 'ext', 'mp3').lstrip('.')}"
+            actual = Path(
+                engine.synthesize(seg.target_text, voice, result.target_language, str(stub))
+            )
+            final = paths.tts_raw(seg.index, actual.suffix)
+            actual.replace(final)
+        _log(f"tts: seg {seg.index} -> {final.name} [{voice}]")
 
     write_json(paths.segments, result.model_dump())
     return result
@@ -208,29 +279,38 @@ def assign_timing(actual_ms: int, target_duration_ms: int,
 def align(paths: JobPaths, force: bool = False) -> TranslationResult:
     paths.ensure()
     result = TranslationResult.model_validate(read_json(paths.segments))
-    ff.assert_ffmpeg()
-    for seg in result.segments:
+    ffmpeg_checked = False  # only a real clip to transcode needs ffmpeg/ffprobe;
+    for seg in result.segments:  # a fully-cached align() must be a no-op without it
         aligned = paths.tts_aligned(seg.index)
         if aligned.exists() and not force:
             continue
+        # Persist each segment's metadata to segments.json BEFORE writing its
+        # aligned wav (the skip-gate artifact): then aligned.exists() implies the
+        # metadata is durable, so a crash mid-align can't lose a needs_review flag
+        # while mux still consumes the cached audio.
         if seg.keep_original:
-            _write_silence(aligned, seg.target_duration_ms)
             seg.align_method = "silence"
+            write_json(paths.segments, result.model_dump())
+            _write_silence(aligned, seg.target_duration_ms)
             continue
         raw = paths.find_tts_raw(seg.index)
         if raw is None:
-            _write_silence(aligned, seg.target_duration_ms)
             seg.align_method, seg.needs_review = "missing", True
+            write_json(paths.segments, result.model_dump())
+            _write_silence(aligned, seg.target_duration_ms)
             continue
+        if not ffmpeg_checked:
+            ff.assert_ffmpeg()
+            ffmpeg_checked = True
         actual_ms = _media_duration_ms(raw)
         plan = assign_timing(actual_ms, seg.target_duration_ms)
-        ff.to_canonical_wav(raw, aligned, plan.atempo_chain)
+        # unconditional write-back: the "fit" plan reports needs_review=False, so a
+        # force re-align resets a previously-stale flag rather than leaving it.
         seg.align_method = plan.method
         seg.align_ratio = plan.align_ratio
-        # Write-back is unconditional (the "fit" plan reports needs_review=False),
-        # which on a force re-align resets a previously-stale flag rather than
-        # leaving it — the more defensible behavior for a recomputed plan.
         seg.needs_review = plan.needs_review
+        write_json(paths.segments, result.model_dump())
+        ff.to_canonical_wav(raw, aligned, plan.atempo_chain)
     write_json(paths.segments, result.model_dump())
     n_review = sum(1 for s in result.segments if s.needs_review)
     _log(f"align: done; {n_review} segment(s) flagged needs_review")
@@ -247,9 +327,8 @@ def _media_duration_ms(path: Path) -> int:
 
 
 def _write_silence(out_wav: Path, ms: int) -> None:
-    out_wav.parent.mkdir(parents=True, exist_ok=True)
     n = int(round(max(0, ms) * config.CANON_SR / 1000))
-    with wave.open(str(out_wav), "wb") as w:
+    with atomic_output(out_wav) as tmp, wave.open(str(tmp), "wb") as w:
         w.setnchannels(config.CANON_CHANNELS)
         w.setsampwidth(2)
         w.setframerate(config.CANON_SR)
@@ -259,7 +338,9 @@ def _write_silence(out_wav: Path, ms: int) -> None:
 # --------------------------------------------------------------------------- #
 def mux(paths: JobPaths, keep_ambient: bool = True, force: bool = False) -> Path:
     paths.ensure()
-    if paths.dubbed_video.exists() and not force:
+    # mux promises BOTH mp4 + srt; require both before skipping, so a crash
+    # between ff.mux() and _write_srt() is repaired on a non-force re-run.
+    if paths.dubbed_video.exists() and paths.subtitles.exists() and not force:
         _log("mux: cached")
         return paths.dubbed_video
     result = TranslationResult.model_validate(read_json(paths.segments))
@@ -300,8 +381,8 @@ def _write_srt(result: TranslationResult, path: Path) -> None:
         lines.append(f"{ts(seg.start_ms)} --> {ts(seg.end_ms)}")
         lines.append(text)
         lines.append("")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
+    with atomic_output(path) as tmp:
+        tmp.write_text("\n".join(lines), encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
@@ -315,7 +396,6 @@ def run_pipeline(
     asr: str | None = None,
     mt: str | None = None,
     tts_provider: str | None = None,
-    allow_paid: bool = False,
     separate: bool = False,
     keep_ambient: bool = True,
     force: bool = False,
@@ -323,13 +403,14 @@ def run_pipeline(
     """End-to-end local dub: ingest -> prepare -> transcribe -> translate -> tts
     -> align -> mux. Returns the dubbed video path (subtitles alongside it).
 
-    ``allow_paid`` defaults to False (red line): a paid provider is never invoked
-    unless the caller both names it and opts in, and the resolver enforces that.
+    The Tier 1 kernel never enables paid providers (CLAUDE.md red line §1/§14):
+    there is deliberately no allow_paid opt-in here — the stages always pass
+    allow_paid=False to the resolver, which enforces the paid gate.
     """
     ingest(paths, source, force=force)
     prepare(paths, separate=separate, force=force)
-    transcribe(paths, resolver, asr, source_lang, allow_paid, force=force)
-    translate(paths, resolver, mt, target_lang, source_lang, allow_paid, force=force)
-    tts(paths, resolver, tts_provider, allow_paid, force=force)
+    transcribe(paths, resolver, asr, source_lang, force=force)
+    translate(paths, resolver, mt, target_lang, source_lang, force=force)
+    tts(paths, resolver, tts_provider, force=force)
     align(paths, force=force)
     return mux(paths, keep_ambient=keep_ambient, force=force)

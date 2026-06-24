@@ -16,6 +16,7 @@ import wave
 from pathlib import Path
 
 from .config import CANON_CHANNELS, CANON_SR
+from .jsonio import atomic_output
 
 
 class FfmpegError(RuntimeError):
@@ -54,25 +55,37 @@ def probe_duration_ms(path: str | Path) -> int:
 
 
 def extract_audio(src: str | Path, out_wav: str | Path, sr: int = 16000, mono: bool = True) -> None:
-    """Extract a PCM wav suitable for ASR (16 kHz mono by default)."""
-    cmd = ["ffmpeg", "-y", "-i", str(src), "-vn", "-ar", str(sr)]
-    if mono:
-        cmd += ["-ac", "1"]
-    cmd += ["-c:a", "pcm_s16le", str(out_wav)]
-    _run(cmd)
+    """Extract a PCM wav suitable for ASR (16 kHz mono by default).
+
+    Atomic (temp + replace) so a killed ffmpeg never leaves a partial wav at
+    ``audio/original.wav`` / ``audio/speech.wav`` that resume logic (an .exists()
+    check) would treat as a valid cached audio artifact.
+    """
+    with atomic_output(out_wav) as tmp:
+        cmd = ["ffmpeg", "-y", "-i", str(src), "-vn", "-ar", str(sr)]
+        if mono:
+            cmd += ["-ac", "1"]
+        cmd += ["-c:a", "pcm_s16le", str(tmp)]
+        _run(cmd)
 
 
 def to_canonical_wav(
     src: str | Path, out_wav: str | Path, atempo_chain: list[float] | None = None
 ) -> None:
     """Transcode any audio into the canonical composed-track format, optionally
-    applying an atempo chain to time-stretch it."""
-    cmd = ["ffmpeg", "-y", "-i", str(src)]
-    if atempo_chain:
-        flt = ",".join(f"atempo={t:.6f}" for t in atempo_chain)
-        cmd += ["-filter:a", flt]
-    cmd += ["-ar", str(CANON_SR), "-ac", str(CANON_CHANNELS), "-c:a", "pcm_s16le", str(out_wav)]
-    _run(cmd)
+    applying an atempo chain to time-stretch it.
+
+    Writes a temp file and atomically replaces ``out_wav`` only on success, so a
+    killed/failed ffmpeg never leaves a partial file at the cache path — align()
+    would otherwise treat a truncated ``_aligned.wav`` as done on resume.
+    """
+    with atomic_output(out_wav) as tmp:
+        cmd = ["ffmpeg", "-y", "-i", str(src)]
+        if atempo_chain:
+            flt = ",".join(f"atempo={t:.6f}" for t in atempo_chain)
+            cmd += ["-filter:a", flt]
+        cmd += ["-ar", str(CANON_SR), "-ac", str(CANON_CHANNELS), "-c:a", "pcm_s16le", str(tmp)]
+        _run(cmd)
 
 
 def atempo_chain_for(ratio: float, max_total: float) -> list[float]:
@@ -122,7 +135,7 @@ def stitch_timeline(
     channels = CANON_CHANNELS
     rate = CANON_SR
 
-    with wave.open(str(out_wav), "wb") as out:
+    with atomic_output(out_wav) as tmp, wave.open(str(tmp), "wb") as out:
         out.setnchannels(channels)
         out.setsampwidth(sampwidth)
         out.setframerate(rate)
@@ -143,19 +156,24 @@ def mux(
     video: str | Path, audio: str | Path, out: str | Path, ambient: str | Path | None = None
 ) -> None:
     """Mux a composed dubbed audio track onto the original video (copy video
-    stream). Optionally mixes a low background ambient track underneath."""
-    if ambient and Path(ambient).exists():
-        cmd = [
-            "ffmpeg", "-y", "-i", str(video), "-i", str(audio), "-i", str(ambient),
-            "-filter_complex",
-            "[2:a]volume=0.35[amb];[1:a][amb]amix=inputs=2:normalize=0[aout]",
-            "-map", "0:v:0", "-map", "[aout]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(out),
-        ]
-    else:
-        cmd = [
-            "ffmpeg", "-y", "-i", str(video), "-i", str(audio),
-            "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(out),
-        ]
-    _run(cmd)
+    stream). Optionally mixes a low background ambient track underneath.
+
+    Atomic (temp + replace): a failed ffmpeg must not leave a partial mp4 that,
+    alongside an already-written subtitles.srt, the mux cache would treat as done.
+    """
+    with atomic_output(out) as tmp:
+        if ambient and Path(ambient).exists():
+            cmd = [
+                "ffmpeg", "-y", "-i", str(video), "-i", str(audio), "-i", str(ambient),
+                "-filter_complex",
+                "[2:a]volume=0.35[amb];[1:a][amb]amix=inputs=2:normalize=0[aout]",
+                "-map", "0:v:0", "-map", "[aout]",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(tmp),
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-i", str(video), "-i", str(audio),
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(tmp),
+            ]
+        _run(cmd)

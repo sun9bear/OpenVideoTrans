@@ -76,6 +76,8 @@ class JobPaths:
         if not self.video.exists():
             return None
         for p in sorted(self.video.glob("original.*")):
+            if ".part" in p.suffixes:  # skip an atomic_output temp (original.part.<ext>)
+                continue
             return p
         return None
 
