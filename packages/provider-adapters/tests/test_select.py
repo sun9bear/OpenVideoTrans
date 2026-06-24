@@ -131,11 +131,12 @@ def test_select_blocks_paid_provider_message_mentions_safety() -> None:
 
 
 # ── CodeX review fixes (regression guards) ───────────────────────────────────
-def test_tts_ladder_prefers_piper() -> None:
-    # CodeX P2 / backlog T1.3b "piper 默认": piper is the default TTS; edge_tts is the
-    # experimental non-commercial lane and must not be the hosted default.
-    assert AUTO_LADDER["tts"][0] == "piper"
-    assert AUTO_LADDER["tts"].index("piper") < AUTO_LADDER["tts"].index("edge_tts")
+def test_tts_ladder_prefers_piper_then_broad_fallback() -> None:
+    # CodeX: piper is the default TTS (T1.3b "piper 默认"); the broad-coverage edge_tts
+    # precedes the narrow 6-lang Cloudflare MeloTTS so it isn't blocked for other langs.
+    tts = AUTO_LADDER["tts"]
+    assert tts[0] == "piper"
+    assert tts.index("edge_tts") < tts.index("cloudflare")
 
 
 def test_deepl_only_free_key_is_auto_available(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,3 +192,13 @@ def test_piper_unavailable_when_model_file_missing(
     real.write_bytes(b"\x00")
     monkeypatch.setenv("FVD_PIPER_MODEL", str(real))
     assert PiperTTS().available() is True
+
+
+def test_asr_normalizes_detected_language_name_to_iso() -> None:
+    # CodeX round-4 P2: Whisper (OpenAI/groq) returns a language NAME ("english"); the
+    # transcript must store an ISO code so the default ASR->CloudflareMT handoff doesn't
+    # 400. The caller's hint wins when present; an unmapped language falls back to "auto".
+    asr = GroqASR()
+    assert asr._parse({"language": "english"}, None).source_language == "en"
+    assert asr._parse({"language": "portuguese"}, "pt-BR").source_language == "pt"  # hint wins
+    assert asr._parse({"language": "klingon"}, None).source_language == "auto"  # unmapped

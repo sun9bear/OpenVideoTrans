@@ -44,6 +44,29 @@ def _iso639(lang: str | None) -> str | None:
     return lang.split("-")[0].lower() if lang else None
 
 
+# Whisper via OpenAI/groq verbose_json reports a detected language NAME ("english"), not a
+# code; map the common Tier-1 targets to ISO-639-1 so the transcript stores a code the MT
+# stage can use. Unknown names fall back to "auto" (clean-fail downstream — CloudflareMT
+# rejects "auto"); the full language registry + detection backfill is T1.3f.
+_WHISPER_NAME_TO_ISO = {
+    "english": "en", "chinese": "zh", "spanish": "es", "french": "fr", "german": "de",
+    "japanese": "ja", "korean": "ko", "portuguese": "pt", "italian": "it", "russian": "ru",
+    "dutch": "nl", "arabic": "ar", "hindi": "hi", "turkish": "tr", "polish": "pl",
+    "vietnamese": "vi", "thai": "th", "indonesian": "id", "ukrainian": "uk",
+}
+
+
+def _detected_to_iso(detected: str | None) -> str | None:
+    """Normalize an ASR-reported source language to ISO-639-1. faster_whisper already
+    returns a code; OpenAI/groq return a NAME — map the common ones. None when unknown."""
+    if not detected:
+        return None
+    d = detected.strip().lower()
+    if len(d) == 2 and d.isalpha():
+        return d  # already an ISO-639-1 code (e.g. faster_whisper)
+    return _WHISPER_NAME_TO_ISO.get(d)  # name -> code, or None for an unmapped language
+
+
 def _group_words_into_lines(
     words: list[Word], full_text: str, total_ms: int
 ) -> list[TranscriptLine]:
@@ -111,8 +134,10 @@ class FasterWhisperASR(ASRProvider):
                     speaker_id="SPEAKER_00", source_text=seg.text.strip(), words=words,
                 )
             )
+        # Prefer the caller's hint (already a code) over the detected language, then
+        # normalize the detected value; "auto" only when neither yields a usable code.
         return Transcript(
-            source_language=info.language or (source_lang or "auto"),
+            source_language=_iso639(source_lang) or _detected_to_iso(info.language) or "auto",
             lines=lines, asr_provider="faster_whisper",
         )
 
@@ -179,8 +204,11 @@ class _OpenAICompatASR(ASRProvider):
         if not lines:
             total = words[-1].end_ms if words else 0
             lines = _group_words_into_lines(words, j.get("text", ""), total)
+        # Prefer the caller's hint over Whisper's detected NAME ("english"), normalizing
+        # both to ISO-639-1 (CodeX): a raw name would break the default ASR->CloudflareMT
+        # handoff. "auto" only when neither yields a usable code.
         return Transcript(
-            source_language=j.get("language") or (source_lang or "auto"),
+            source_language=_iso639(source_lang) or _detected_to_iso(j.get("language")) or "auto",
             lines=lines, asr_provider=self.info.name,
         )
 

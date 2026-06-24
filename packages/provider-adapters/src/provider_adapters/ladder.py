@@ -15,13 +15,15 @@ from __future__ import annotations
 #     groq→CF→(faster_whisper cli)") — the hosted worker prefers fast free cloud ASR
 #     over slow local CPU whisper, which sits at the tail as the keyless fallback.
 #   - TTS prefers PIPER (local, permissively licensed) as the default per backlog
-#     T1.3b ("piper 默认") / AD-6: edge_tts is an experimental, arguably non-commercial
-#     lane, so it sits at the tail and is never the hosted default (CodeX). The full
-#     license gate + AIGC marking land in T1.3b/T1.3g.
+#     T1.3b ("piper 默认") / AD-6; it is never the hosted default's fallback unless
+#     unconfigured. The broad-coverage free edge_tts (40+ langs) precedes the narrow
+#     Cloudflare MeloTTS (only 6 langs), so a non-MeloTTS target (e.g. pt-BR/de) isn't
+#     blocked by CF being merely "available" (CodeX). Proper per-target-language provider
+#     gating (and the edge_tts license lane) is T1.3f / T1.3b·g.
 AUTO_LADDER: dict[str, list[str]] = {
     "asr": ["groq", "cloudflare", "faster_whisper"],
     "mt": ["cloudflare", "groq", "deepl", "ollama"],
-    "tts": ["piper", "cloudflare", "edge_tts"],
+    "tts": ["piper", "edge_tts", "cloudflare"],
 }
 
 # Providers that cost money (metered / pay-as-you-go / one-time credit) or hand the
