@@ -407,6 +407,13 @@ def mux(
         if config.BURN_SUBTITLES_ENABLED:
             # M2.1 owns the libass re-encode burn-in; intentionally unreachable in M1.
             raise NotImplementedError("burned subtitles are an M2.1 feature")
+        if not want_srt:
+            # burned-only with no srt fallback: there is no channel to carry the
+            # subtitle (nor its §3 AIGC disclosure), so fail explicitly rather than
+            # complete with zero deliverables and a dead primary path.
+            raise NotImplementedError(
+                "subtitle_delivery='burned' has no srt fallback; burned-in subtitles "
+                "are an M2.1 feature (BURN_SUBTITLES_ENABLED off)")
         _log("mux: burned subtitles requested but deferred to M2.1 (feature-flag off)")
 
     expected = [p for p, want in
@@ -430,7 +437,14 @@ def mux(
         placements = [(s.start_ms, paths.tts_aligned(s.index))
                       for s in result.segments if paths.tts_aligned(s.index).exists()]
         ff.stitch_timeline(placements, paths.dubbed_audio, total_ms)
-        _log(f"mux: composed {len(placements)} segments into dubbed audio")
+        if placements:
+            _log(f"mux: composed {len(placements)} segments into dubbed audio")
+        else:
+            # A dub-mode job with no aligned audio (all keep_original, or every
+            # tts/align produced nothing) yields a silent track — surface it rather
+            # than ship a silently-silent video as if it were a normal dub.
+            _log(f"mux: WARNING dubbed 0 of {len(result.segments)} segments "
+                 "(all keep_original or missing aligned audio); dub track is silent")
         ambient = paths.ambient if (keep_ambient and paths.ambient.exists()) else None
         ff.mux(video, paths.dubbed_audio, paths.dubbed_video, ambient=ambient,
                metadata=aigc.metadata_args(marking, output_mode))
@@ -441,8 +455,11 @@ def mux(
         _write_srt(result, paths.subtitles, bilingual=(subtitle_lang == "bilingual"),
                    disclosure=aigc.subtitle_disclosure(marking))
         _log(f"mux: wrote {paths.subtitles.name}")
-    if marking is not None and marking.enabled:
-        marking.applied = True  # record on the marking for the manifest/audit trail
+    # applied reflects that a marked deliverable was actually written (gated on the
+    # non-empty deliverable set), not merely that marking was enabled — so the §3
+    # audit trail never claims a mark that no artifact carried.
+    if expected and marking is not None and marking.enabled:
+        marking.applied = True
     return primary
 
 
@@ -531,6 +548,11 @@ def run_pipeline(
               subtitle_lang=subtitle_lang, subtitle_delivery=subtitle_delivery,
               marking=aigc_marking)
     if job is not None:
-        worker_meta = WorkerMeta(aigc_embed_method=aigc.embed_method(aigc_marking, output_mode))
-        write_manifest(paths, job, worker_meta)
+        # Record the embed method only when a mark was actually applied (mux sets
+        # marking.applied on the non-empty deliverable set), so the manifest never
+        # over-claims. worker_meta.ffprobe blob is deferred to T1.4 worker
+        # integration; models[] sha256 pins land in T1.3g.
+        method = (aigc.embed_method(aigc_marking, output_mode)
+                  if aigc_marking is not None and aigc_marking.applied else None)
+        write_manifest(paths, job, WorkerMeta(aigc_embed_method=method))
     return out

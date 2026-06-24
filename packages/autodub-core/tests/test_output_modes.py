@@ -116,6 +116,17 @@ def test_mux_burned_delivery_deferred_no_crash(tmp_path: Path, monkeypatch) -> N
     assert paths.subtitles.exists()
 
 
+def test_mux_burned_only_no_srt_fallback_raises(tmp_path: Path) -> None:
+    # subtitle_only + burned (no srt) with the flag off: there is no channel to
+    # carry the subtitle, so mux must fail explicitly rather than return a dead
+    # (non-existent) primary path and re-run forever on resume.
+    paths = JobPaths(tmp_path).ensure()
+    _write_segments(paths, [("hello", "你好")])
+    with pytest.raises(NotImplementedError, match="no srt fallback"):
+        stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="burned")
+    assert not paths.subtitles.exists()
+
+
 def test_mux_burn_flag_on_is_not_implemented(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     # locks the placeholder: flipping the flag without the M2.1 burn impl raises,
     # rather than silently shipping a plain (un-burned) video.
