@@ -1,9 +1,12 @@
 [project]
 name = "provider-adapters"
 version = "0.0.1"
-description = "Provider adapter stubs for OpenVideoTrans (Tier 1 MVP skeleton)"
+description = "Concrete ASR/MT/TTS adapters + paid-API safety gate for OpenVideoTrans (Tier 1)"
 requires-python = ">=3.11"
-dependencies = []
+# Cloud adapters lazy-import `requests` under has_module() guards (not a hard dep —
+# a bare install stays light and the red-line safety surface needs no network deps;
+# `pip install requests` enables the cloud providers, as their `requires` strings note).
+dependencies = ["ovt-schemas"]
 
 [build-system]
 requires = ["hatchling"]
@@ -11,3 +14,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/provider_adapters"]
+
+[tool.uv.sources]
+ovt-schemas = { workspace = true }

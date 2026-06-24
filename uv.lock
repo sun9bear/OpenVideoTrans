@@ -123,6 +123,12 @@ wheels = [
 name = "provider-adapters"
 version = "0.0.1"
 source = { editable = "packages/provider-adapters" }
+dependencies = [
+    { name = "ovt-schemas" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "ovt-schemas", editable = "packages/schemas" }]
 
 [[package]]
 name = "pydantic"

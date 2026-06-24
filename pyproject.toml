@@ -25,6 +25,12 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = []
 
+[tool.pyright]
+# provider-adapters' cloud adapters lazy-import `requests` only when present (it is an
+# optional, not a hard, dependency — see its pyproject note). Resolving its types from
+# bundled stubs without the installed source is expected here, not a problem.
+reportMissingModuleSource = "none"
+
 [tool.pytest.ini_options]
 testpaths = [
     "packages/schemas/tests",
