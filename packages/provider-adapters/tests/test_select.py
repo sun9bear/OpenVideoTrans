@@ -236,3 +236,42 @@ def test_cf_asr_no_speech_yields_no_words(
     audio = tmp_path / "silence.wav"
     audio.write_bytes(b"\x00\x10")
     assert CloudflareASR()._run_one(str(audio)) == []
+
+
+def test_paid_mt_malformed_batch_fails_to_error_no_per_line_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # RED LINE (§1, @CodeX bot P1): a PAID MT must fail-to-error on a malformed batch, never
+    # silently fan out one billed _chat call per line.
+    from provider_adapters.mt import OpenAIMT
+
+    calls = {"n": 0}
+
+    def fake_chat(self: object, system: str, user: str) -> str:  # noqa: ARG001
+        calls["n"] += 1
+        return "not json at all"
+
+    monkeypatch.setattr("provider_adapters.mt.OpenAIMT.available", lambda self: True)
+    monkeypatch.setattr("provider_adapters.mt._OpenAICompatMT._chat", fake_chat)
+    with pytest.raises(ProviderUnavailable, match="never auto-retry"):
+        OpenAIMT().translate(["a", "b", "c"], "en", "es")
+    assert calls["n"] == 1  # exactly one batch call — no per-line paid retries
+
+
+def test_free_mt_malformed_batch_does_per_line_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Free providers may still do the per-line fallback (no billing red line).
+    from provider_adapters.mt import GroqMT
+
+    calls = {"n": 0}
+
+    def fake_chat(self: object, system: str, user: str) -> str:  # noqa: ARG001
+        calls["n"] += 1
+        return "not json at all"
+
+    monkeypatch.setattr("provider_adapters.mt.GroqMT.available", lambda self: True)
+    monkeypatch.setattr("provider_adapters.mt._OpenAICompatMT._chat", fake_chat)
+    out = GroqMT().translate(["a", "b"], "en", "es")
+    assert calls["n"] == 1 + 2  # 1 batch + 1 per-line per input (free fallback allowed)
+    assert out == ["a", "b"]  # unparseable -> keeps source text

@@ -177,7 +177,16 @@ class _LLMTranslator(MTProvider):
             content = self._chat(sysmsg, self._payload(batch, budg))
             arr = _extract_json_array(content)
             if arr is None or len(arr) != len(batch):
-                # robust fallback: translate this batch one line at a time
+                if self.info.paid:
+                    # RED LINE (§1, 不可改): a PAID provider must fail-to-error, never silently
+                    # fan a malformed/short batch into one extra BILLED _chat call per line.
+                    # The per-line retry below is for FREE providers only (a paid opt-in
+                    # authorises the single translate request, not an unbounded retry).
+                    raise ProviderUnavailable(
+                        f"{self.info.name} (paid) returned a malformed/short batch; refusing the "
+                        f"per-line retry fallback — paid APIs never auto-retry (§1). Re-run."
+                    )
+                # robust fallback (FREE providers only): translate this batch one line at a time
                 for t, b in zip(batch, budg, strict=False):
                     one = self._chat(sysmsg, self._payload([t], [b]))
                     a = _extract_json_array(one)
