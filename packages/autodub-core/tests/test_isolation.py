@@ -37,6 +37,8 @@ from ovt_schemas.contracts import (
         "..", "../x", "x/../y", "a/b", "a\\b", "..\\..", "",
         "   ", ".", "C:evil", "foo\x00bar", "/abs", "\\unc",
         "u.", "u..", " u", "u ", "u\t",  # surrounding whitespace / Windows trailing dot
+        "a|b", "a<b", "a>b", 'a"b', "a?b", "a*b",  # Windows-invalid characters
+        "CON", "nul", "Com1", "lpt9", "CON.txt", "aux", "a\x01b",  # reserved names / control char
     ],
 )
 def test_safe_component_rejects_traversal_separators_and_windows_collisions(bad: str) -> None:

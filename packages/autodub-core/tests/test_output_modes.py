@@ -70,6 +70,18 @@ def test_mux_subtitle_only_bilingual_has_target_and_source_lines(tmp_path: Path)
     assert block[3] == "hello"  # source below
 
 
+def test_mux_subtitle_lang_change_invalidates_cache(tmp_path: Path) -> None:
+    # CodeX R5: a target-only run then a bilingual run on the SAME job dir must rewrite
+    # the srt with the source line, not serve the stale target-only cached srt.
+    paths = JobPaths(tmp_path).ensure()
+    _write_segments(paths, [("hello", "你好")])
+    stages.mux(paths, output_mode="subtitle_only", subtitle_lang="target")
+    assert "hello" not in paths.subtitles.read_text(encoding="utf-8")  # target only
+    stages.mux(paths, output_mode="subtitle_only", subtitle_lang="bilingual")
+    srt = paths.subtitles.read_text(encoding="utf-8")
+    assert "hello" in srt and "你好" in srt  # cache invalidated -> re-written bilingual
+
+
 def test_mux_bilingual_falls_back_to_one_line_when_no_target(tmp_path: Path) -> None:
     # keep_original (empty target): even bilingual emits a single source line.
     paths = JobPaths(tmp_path).ensure()

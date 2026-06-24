@@ -35,7 +35,15 @@ class PaidPinViolation(RuntimeError):
 # --------------------------------------------------------------------------- #
 # Namespace isolation / path containment
 # --------------------------------------------------------------------------- #
-_ILLEGAL_IN_COMPONENT = ("/", "\\", "\x00", ":")
+# Characters illegal in a Windows path component (superset of POSIX needs): the
+# separators/drive marker plus the reserved set < > : " | ? *. Control chars and the
+# reserved device names are handled separately below.
+_ILLEGAL_IN_COMPONENT = ("/", "\\", ":", "<", ">", '"', "|", "?", "*")
+_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
 
 
 def safe_component(value: str, *, label: str) -> str:
@@ -58,6 +66,10 @@ def safe_component(value: str, *, label: str) -> str:
         raise PathEscapeError(f"{label} must not end with a dot (Windows normalizes it): {value!r}")
     if ".." in value or any(ch in value for ch in _ILLEGAL_IN_COMPONENT):
         raise PathEscapeError(f"{label} contains an illegal path character: {value!r}")
+    if any(ord(ch) < 32 for ch in value):
+        raise PathEscapeError(f"{label} contains a control character: {value!r}")
+    if value.upper().split(".")[0] in _RESERVED_NAMES:
+        raise PathEscapeError(f"{label} is a Windows reserved device name: {value!r}")
     return value
 
 

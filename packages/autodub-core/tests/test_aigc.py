@@ -239,37 +239,40 @@ def test_run_pipeline_job_settings_override_kwarg_defaults(
     assert marking.applied is True
 
 
-def test_mux_cache_hit_with_matching_marker_records_applied(tmp_path: Path) -> None:
-    # CodeX R2: a resume of a MARKED run (deliverables + a matching .aigc_mark marker
-    # present) hits the cache and still records applied, without re-muxing.
-    paths = JobPaths(tmp_path).ensure()
-    paths.dubbed_video.write_bytes(b"mp4")
-    paths.subtitles.write_text("1\n", encoding="utf-8")
-    (paths.output / ".aigc_mark").write_text("av_voice_mark", encoding="utf-8")  # prior marked run
-    _write_segments(paths, [("hello", "你好")])
-    marking = _marking()
-    out = stages.mux(paths, output_mode="both", marking=marking)
-    assert out == paths.dubbed_video
-    assert marking.applied is True  # cache hit records the (verified) mark
-
-
-def test_mux_marking_change_invalidates_cache(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    # CodeX R3: cached artifacts from an earlier UNMARKED run (marker="") must NOT be
-    # presented as marked — a later marked call re-muxes WITH the mark instead of
-    # over-claiming on the stale cache.
+def test_mux_cache_hit_with_matching_settings_records_applied(
+    tmp_path: Path, monkeypatch  # noqa: ANN001
+) -> None:
+    # CodeX R2: a resume of a MARKED run with the SAME settings hits the cache and
+    # still records applied, without re-muxing.
     paths = JobPaths(tmp_path).ensure()
     (paths.video / "original.mp4").write_bytes(b"vid")
-    paths.dubbed_video.write_bytes(b"OLD")
-    paths.subtitles.write_text("OLD", encoding="utf-8")
-    (paths.output / ".aigc_mark").write_text("", encoding="utf-8")  # prior unmarked run
     _write_segments(paths, [("hello", "你好")])
     captured: dict = {}
     _mock_video_ffmpeg(monkeypatch, captured)
+    stages.mux(paths, output_mode="both", marking=_marking())  # first run writes the marker
+    captured.clear()
     marking = _marking()
-    stages.mux(paths, output_mode="both", marking=marking)
+    out = stages.mux(paths, output_mode="both", marking=marking)  # same settings -> cache hit
+    assert out == paths.dubbed_video
+    assert "metadata" not in captured  # ff.mux NOT called again
+    assert marking.applied is True     # cache hit still records the (verified) mark
+
+
+def test_mux_marking_change_invalidates_cache(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # CodeX R3: artifacts from an earlier UNMARKED run must NOT be presented as marked
+    # — a later marked call re-muxes WITH the mark instead of over-claiming the cache.
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    captured: dict = {}
+    _mock_video_ffmpeg(monkeypatch, captured)
+    stages.mux(paths, output_mode="both", marking=_marking(enabled=False))  # unmarked first run
+    assert captured["metadata"] == []
+    captured.clear()
+    marking = _marking()
+    stages.mux(paths, output_mode="both", marking=marking)  # marked -> key differs -> re-mux
     assert any("aigc_mark=av_voice_mark" in a for a in captured["metadata"])  # re-muxed marked
     assert marking.applied is True
-    assert (paths.output / ".aigc_mark").read_text(encoding="utf-8") == "av_voice_mark"
 
 
 def test_run_pipeline_defaults_to_marked_when_none_given(

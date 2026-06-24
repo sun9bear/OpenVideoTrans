@@ -430,10 +430,16 @@ def mux(
     # re-mux: the cache can neither under-claim (resume of a marked run) nor over-claim
     # (cached artifacts from an earlier unmarked run presented as marked) — red line §3.
     want_method = aigc.embed_method(marking, output_mode) or ""
-    marker = paths.output / ".aigc_mark"
-    cached_method = marker.read_text(encoding="utf-8") if marker.exists() else ""
+    # The marker records EVERY setting that shapes the deliverables (AIGC method +
+    # output_mode + subtitle settings), so changing any of them (e.g. target ->
+    # bilingual subtitles, or a marking change) invalidates the cache and forces a
+    # rewrite (CodeX R3/R5) — the cache never serves a deliverable built for other
+    # settings, and never over-/under-claims the §3 mark.
+    cache_key = "|".join([want_method, output_mode, subtitle_lang, subtitle_delivery])
+    marker = paths.output / ".mux_cache"
+    cached_key = marker.read_text(encoding="utf-8") if marker.exists() else ""
     if (expected and all(p.exists() for p in expected)
-            and cached_method == want_method and not force):
+            and cached_key == cache_key and not force):
         _log("mux: cached")
         if want_method and marking is not None:
             marking.applied = True  # cached artifacts carry the recorded mark
@@ -480,7 +486,7 @@ def mux(
     # (non-empty method), never merely that marking was enabled — the §3 audit trail
     # must not claim a mark that no artifact carries.
     if expected:
-        marker.write_text(want_method, encoding="utf-8")
+        marker.write_text(cache_key, encoding="utf-8")
     if want_method and marking is not None:
         marking.applied = True
     return primary
