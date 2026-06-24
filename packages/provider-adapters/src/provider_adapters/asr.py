@@ -22,7 +22,14 @@ from ovt_schemas.contracts import Transcript, TranscriptLine, Word
 from . import asr_chunker as chunker
 from ._env import env
 from .asr_chunker import AudioConstraints
-from .base import ASRProvider, ProviderInfo, ProviderUnavailable, has_module, register
+from .base import (
+    ASRProvider,
+    ProviderInfo,
+    ProviderUnavailable,
+    has_binary,
+    has_module,
+    register,
+)
 
 _LINE_GAP_MS = 700  # silence gap that starts a new transcript line when grouping words
 _MAX_LINE_MS = 12000
@@ -191,7 +198,11 @@ class _OpenAICompatASR(ASRProvider):
         return env(self.key_env)
 
     def available(self) -> bool:
-        return has_module("requests") and self._key() is not None
+        # ffmpeg is now an unconditional dependency (compress-first encodes every request, T1.3e),
+        # so a host without it must report this cloud ASR unavailable — the auto ladder then falls
+        # through to a backend that needs no transcode (faster_whisper on the prepared wav) instead
+        # of selecting Groq and failing locally before any request (@CodeX bot / CLI).
+        return has_module("requests") and self._key() is not None and has_binary("ffmpeg")
 
     def transcribe(self, audio_path: str, source_lang: str | None) -> Transcript:
         self._ensure_available()
@@ -339,10 +350,13 @@ class CloudflareASR(ASRProvider):
         return AudioConstraints(("mp3", "wav"), max_duration_ms=int(float(secs) * 1000))
 
     def available(self) -> bool:
+        # ffmpeg required (compress-first encodes every request, T1.3e); without it the ladder
+        # falls through to faster_whisper rather than selecting CF and failing locally (@CodeX bot).
         return bool(
             has_module("requests")
             and env("CLOUDFLARE_ACCOUNT_ID")
             and env("CLOUDFLARE_API_TOKEN")
+            and has_binary("ffmpeg")
         )
 
     def transcribe(self, audio_path: str, source_lang: str | None) -> Transcript:

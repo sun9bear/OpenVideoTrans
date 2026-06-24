@@ -248,6 +248,24 @@ def test_openai_negotiates_supported_codec_not_opus() -> None:
     assert "flac" not in OpenAIASR().audio.accepted_formats
 
 
+def test_cloud_asr_unavailable_without_ffmpeg(monkeypatch) -> None:  # noqa: ANN001
+    # @CodeX bot/CLI P2: compress-first makes ffmpeg an unconditional dep, so a keyed-but-no-ffmpeg
+    # host must report cloud ASR UNAVAILABLE (the ladder then falls through to faster_whisper),
+    # rather than selecting Groq/CF and failing locally before any request.
+    from provider_adapters.asr import CloudflareASR, GroqASR
+
+    monkeypatch.setattr("provider_adapters.asr.has_module", lambda _n: True)  # requests present
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "a")
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "t")
+    monkeypatch.setattr("provider_adapters.asr.has_binary", lambda _n: False)  # no ffmpeg
+    assert GroqASR().available() is False
+    assert CloudflareASR().available() is False
+    monkeypatch.setattr("provider_adapters.asr.has_binary", lambda _n: True)  # ffmpeg back
+    assert GroqASR().available() is True
+    assert CloudflareASR().available() is True
+
+
 def test_cloudflare_over_duration_chunks_and_merges(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     # 超限切块合并: 15 min audio with a 5 min CF cap -> 3 chunks, offset-merged into one timeline.
     from provider_adapters.asr import CloudflareASR
@@ -258,6 +276,7 @@ def test_cloudflare_over_duration_chunks_and_merges(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 900_000)  # 15 min
     _stub_encode(monkeypatch, 1.0)
     monkeypatch.setattr("provider_adapters.asr.has_module", lambda _n: True)
+    monkeypatch.setattr("provider_adapters.asr.has_binary", lambda _n: True)  # ffmpeg present
     seen: list[int] = []
 
     def fake_run_one(self, path, duration_hint_ms=0):  # noqa: ANN001, ARG001
