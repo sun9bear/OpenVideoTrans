@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
 
-from ovt_schemas.contracts import Word
+from ovt_schemas.contracts import TranscriptLine, Word
 
 from .base import ProviderUnavailable, has_binary
 
@@ -231,6 +231,31 @@ def merge_words(parts: list[tuple[list[Word], int]]) -> list[Word]:
     for words, offset in parts:
         for w in words:
             merged.append(Word(text=w.text, start_ms=w.start_ms + offset, end_ms=w.end_ms + offset))
+    return merged
+
+
+def merge_lines(parts: list[tuple[list[TranscriptLine], int]]) -> list[TranscriptLine]:
+    """Offset each chunk's transcript lines (and their words) by the chunk start offset,
+    concatenate, and re-index globally. Used for backends whose per-chunk parse already
+    produces lines (segment-aware), so a ``segments``/``text``-only response — one with no
+    word array — keeps its recognised text instead of collapsing to an empty transcript
+    (CodeX: the word-only merge path silently dropped segment-only chunks)."""
+    merged: list[TranscriptLine] = []
+    for lines, offset in parts:
+        for ln in lines:
+            merged.append(
+                TranscriptLine(
+                    index=len(merged),
+                    start_ms=ln.start_ms + offset,
+                    end_ms=ln.end_ms + offset,
+                    source_text=ln.source_text,
+                    speaker_id=ln.speaker_id,
+                    words=[
+                        Word(text=w.text, start_ms=w.start_ms + offset, end_ms=w.end_ms + offset)
+                        for w in ln.words
+                    ],
+                )
+            )
     return merged
 
 

@@ -191,16 +191,18 @@ class _OpenAICompatASR(ASRProvider):
         plan = chunker.plan_requests(audio_path, self.audio, work)
         if len(plan) == 1:
             return self._parse(self._request_json(plan[0].path, source_lang), source_lang)
-        words = chunker.merge_words(
-            [(self._words_from_json(self._request_json(c.path, source_lang)), c.offset_ms)
-             for c in plan]
-        )
-        total = words[-1].end_ms if words else 0
+        # Parse each chunk through the SAME _parse as the single path (so a segments/text-only
+        # response keeps its text — CodeX: a word-only merge dropped segment-only chunks), then
+        # offset-merge the per-chunk lines into one global timeline.
+        parts = [
+            (self._parse(self._request_json(c.path, source_lang), source_lang).lines, c.offset_ms)
+            for c in plan
+        ]
         # Detected-language backfill needs the whole-file response; the chunked path keeps the
         # caller's normalized hint (or "auto"). Full source-lang detection backfill is T1.3f.
         return Transcript(
             source_language=_iso639(source_lang) or "auto",
-            lines=_group_words_into_lines(words, "", total), asr_provider=self.info.name,
+            lines=chunker.merge_lines(parts), asr_provider=self.info.name,
         )
 
     def _request_json(self, audio_path: str, source_lang: str | None) -> dict:

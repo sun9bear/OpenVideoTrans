@@ -181,6 +181,28 @@ def test_groq_within_limits_does_single_native_request(tmp_path: Path, monkeypat
     assert tr.source_language == "en"  # detected name -> ISO
 
 
+def test_openai_compat_chunked_preserves_segment_only_text(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001, E501
+    # CodeX P2: a chunked response with segments/text but NO words[] must keep its recognised
+    # text (the single-request _parse path supports it), not collapse to an empty no-speech
+    # transcript. Each of the 3 chunks returns one wordless segment -> 3 offset lines.
+    from provider_adapters.asr import GroqASR
+
+    monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 30_000)
+    _stub_encode(monkeypatch, 1.0)
+    monkeypatch.setattr(GroqASR, "available", lambda self: True)
+    monkeypatch.setattr(GroqASR, "audio", AudioConstraints(("opus",), max_duration_ms=10_000))
+
+    def fake_request(self, path, source_lang):  # noqa: ANN001, ARG001
+        return {"language": "english",
+                "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}], "words": []}
+
+    monkeypatch.setattr(GroqASR, "_request_json", fake_request)
+    tr = GroqASR().transcribe(str(tmp_path / "long.wav"), None)
+    assert [ln.source_text for ln in tr.lines] == ["hello", "hello", "hello"]  # text preserved
+    assert [ln.start_ms for ln in tr.lines] == [0, 10_000, 20_000]  # offset per chunk
+    assert [ln.index for ln in tr.lines] == [0, 1, 2]  # re-indexed globally
+
+
 def test_cloudflare_over_duration_chunks_and_merges(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     # 超限切块合并: 15 min audio with a 5 min CF cap -> 3 chunks, offset-merged into one timeline.
     from provider_adapters.asr import CloudflareASR
