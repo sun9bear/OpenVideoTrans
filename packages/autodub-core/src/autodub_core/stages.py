@@ -16,12 +16,14 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
-from ovt_schemas.contracts import DubbingSegment, Transcript, TranslationResult
+from ovt_schemas.contracts import DubbingSegment, Job, Transcript, TranslationResult
 
 from . import config
 from . import ffmpeg_utils as ff
 from .config import JobPaths
+from .isolation import pin_resolver
 from .jsonio import atomic_output, read_json, write_json
+from .manifest import write_manifest
 from .providers import ProviderUnavailable, Resolver, TtsProvider
 
 
@@ -416,18 +418,27 @@ def run_pipeline(
     separate: bool = False,
     keep_ambient: bool = True,
     force: bool = False,
+    job: Job | None = None,
 ) -> Path:
     """End-to-end local dub: ingest -> prepare -> transcribe -> translate -> tts
     -> align -> mux. Returns the dubbed video path (subtitles alongside it).
 
     The Tier 1 kernel never enables paid providers (CLAUDE.md red line §1/§14):
-    there is deliberately no allow_paid opt-in here — the stages always pass
-    allow_paid=False to the resolver, which enforces the paid gate.
+    there is deliberately no allow_paid opt-in here, and the resolver is pinned
+    (T1.3a) so even a future change can't slip a paid provider past the gate — the
+    stages always pass allow_paid=False, and ``pin_resolver`` refuses anything else.
+
+    When ``job`` is supplied (the authoritative record from the control plane /
+    local-runner) a ``manifest.json`` is written alongside the deliverables (T1.3a).
     """
+    resolver = pin_resolver(resolver)
     ingest(paths, source, force=force)
     prepare(paths, separate=separate, force=force)
     transcribe(paths, resolver, asr, source_lang, force=force)
     translate(paths, resolver, mt, target_lang, source_lang, force=force)
     tts(paths, resolver, tts_provider, force=force)
     align(paths, force=force)
-    return mux(paths, keep_ambient=keep_ambient, force=force)
+    out = mux(paths, keep_ambient=keep_ambient, force=force)
+    if job is not None:
+        write_manifest(paths, job)
+    return out
