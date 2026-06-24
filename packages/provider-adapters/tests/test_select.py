@@ -24,6 +24,8 @@ from provider_adapters import (
     select,
 )
 from provider_adapters.asr import CloudflareASR, FasterWhisperASR, GroqASR
+from provider_adapters.base import ASRProvider
+from provider_adapters.mt import DeepLMT
 
 
 def _avail(monkeypatch: pytest.MonkeyPatch, dotted: str, value: bool) -> None:
@@ -123,3 +125,33 @@ def test_select_blocks_paid_provider_message_mentions_safety() -> None:
     # The block is loud and explains the rule (not a silent skip).
     with pytest.raises(PaidProviderBlocked, match="never invoked automatically"):
         select("mt", "deepseek", allow_paid=False)
+
+
+# ── CodeX review fixes (regression guards) ───────────────────────────────────
+def test_tts_ladder_prefers_piper() -> None:
+    # CodeX P2 / backlog T1.3b "piper 默认": piper is the default TTS; edge_tts is the
+    # experimental non-commercial lane and must not be the hosted default.
+    assert AUTO_LADDER["tts"][0] == "piper"
+    assert AUTO_LADDER["tts"].index("piper") < AUTO_LADDER["tts"].index("edge_tts")
+
+
+def test_deepl_only_free_key_is_auto_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    # RED LINE (CodeX P1): a DeepL FREE key (':fx' -> api-free.deepl.com) is auto-usable;
+    # a Pro key (paid, api.deepl.com) reports unavailable so select(auto) never bills it.
+    monkeypatch.setattr("provider_adapters.mt.has_module", lambda _name: True)
+    monkeypatch.setenv("DEEPL_API_KEY", "00000000-0000-0000-0000-000000000000:fx")
+    assert DeepLMT().available() is True
+    monkeypatch.setenv("DEEPL_API_KEY", "00000000-0000-0000-0000-000000000000")  # Pro key
+    assert DeepLMT().available() is False
+
+
+def test_unconfigured_default_raises_clean_setup_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CodeX P2: the auto fallback hands back the (free) ladder head even when nothing is
+    # configured; calling it must raise a clean ProviderUnavailable with the setup hint,
+    # not a raw ImportError / FileNotFoundError / HTTP deeper down.
+    for cls in (GroqASR, CloudflareASR, FasterWhisperASR):
+        _avail(monkeypatch, f"provider_adapters.asr.{cls.__name__}.available", False)
+    asr = select("asr", None, allow_paid=False)
+    assert isinstance(asr, ASRProvider)  # auto fallback returns a usable ASR provider type
+    with pytest.raises(ProviderUnavailable, match="not configured"):
+        asr.transcribe("nonexistent.wav", None)

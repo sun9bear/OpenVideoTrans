@@ -62,6 +62,7 @@ class CloudflareMT(MTProvider):
         self, texts: list[str], source_lang: str, target_lang: str,
         budgets_ms: list[int] | None = None,
     ) -> list[str]:
+        self._ensure_available()
         import requests
 
         acct, token = require_env("CLOUDFLARE_ACCOUNT_ID"), require_env("CLOUDFLARE_API_TOKEN")
@@ -90,21 +91,27 @@ class CloudflareMT(MTProvider):
 class DeepLMT(MTProvider):
     info = ProviderInfo(
         "deepl", "mt", paid=False,
-        requires="DEEPL_API_KEY (free 500k chars/mo)",
-        languages="~30", notes="highest free MT quality",
+        requires="DEEPL_API_KEY (FREE key — ends ':fx'; 500k chars/mo)",
+        languages="~30", notes="highest free MT quality; Pro keys are paid, never auto-used",
     )
 
     def available(self) -> bool:
-        return has_module("requests") and env("DEEPL_API_KEY") is not None
+        # RED LINE (§1): only a DeepL FREE key (':fx' suffix -> api-free.deepl.com) is
+        # auto-usable. A Pro key (no ':fx') bills via api.deepl.com, so report it
+        # UNAVAILABLE here and select(auto) skips it — a paid endpoint is never
+        # auto-invoked even though DeepL's free tier is genuinely $0 (CodeX P1).
+        key = env("DEEPL_API_KEY")
+        return has_module("requests") and key is not None and key.endswith(":fx")
 
     def translate(
         self, texts: list[str], source_lang: str, target_lang: str,
         budgets_ms: list[int] | None = None,
     ) -> list[str]:
+        self._ensure_available()  # only a FREE ':fx' key passes — never the paid endpoint
         import requests
 
         key = require_env("DEEPL_API_KEY")
-        host = "https://api-free.deepl.com" if key.endswith(":fx") else "https://api.deepl.com"
+        host = "https://api-free.deepl.com"  # FREE endpoint only (§1); Pro is gated out above
         out: list[str] = []
         for i in range(0, len(texts), 50):
             batch = texts[i:i + 50]
@@ -149,6 +156,7 @@ class _LLMTranslator(MTProvider):
         self, texts: list[str], source_lang: str, target_lang: str,
         budgets_ms: list[int] | None = None,
     ) -> list[str]:
+        self._ensure_available()
         budgets = budgets_ms or [4000] * len(texts)
         out: list[str] = []
         sysmsg = self._system(source_lang, target_lang)

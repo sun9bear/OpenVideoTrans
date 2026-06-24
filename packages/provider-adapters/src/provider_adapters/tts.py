@@ -49,6 +49,7 @@ class EdgeTTS(TTSProvider):
         return has_binary("edge-tts")
 
     def voices_for(self, lang: str) -> list[str]:
+        self._ensure_available()
         return _preset_ids("edge_tts", lang) or ["en-US-AriaNeural"]
 
     def synthesize(self, text: str, voice_id: str, lang: str, out_path: str) -> str:
@@ -80,6 +81,7 @@ class CloudflareTTS(TTSProvider):
         )
 
     def voices_for(self, lang: str) -> list[str]:
+        self._ensure_available()
         ids = _preset_ids("cloudflare", lang)
         if not ids:
             raise ProviderUnavailable(
@@ -121,6 +123,7 @@ class PiperTTS(TTSProvider):
         return has_binary("piper") and env("FVD_PIPER_MODEL") is not None
 
     def voices_for(self, lang: str) -> list[str]:
+        self._ensure_available()
         return [require_env("FVD_PIPER_MODEL")]
 
     def synthesize(self, text: str, voice_id: str, lang: str, out_path: str) -> str:
@@ -147,6 +150,7 @@ class ElevenLabsTTS(TTSProvider):
         return has_module("requests") and env("ELEVENLABS_API_KEY") is not None
 
     def voices_for(self, lang: str) -> list[str]:
+        self._ensure_available()
         custom = env("FVD_ELEVENLABS_VOICES")
         if custom:
             return [v.strip() for v in custom.split(",") if v.strip()]

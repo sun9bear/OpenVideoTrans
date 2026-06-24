@@ -36,6 +36,14 @@ def _wav_duration_ms(path: str) -> int:
         return 0
 
 
+def _iso639(lang: str | None) -> str | None:
+    """Reduce a BCP-47 source hint (project standard, e.g. 'pt-BR' / 'zh-Hans') to the
+    bare ISO-639 code Whisper-compatible ASR APIs expect ('pt' / 'zh'). Prevents a
+    region/script subtag from causing a provider 400; full language vetting is T1.3f.
+    Returns None for an empty/None hint (let the backend auto-detect)."""
+    return lang.split("-")[0].lower() if lang else None
+
+
 def _group_words_into_lines(
     words: list[Word], full_text: str, total_ms: int
 ) -> list[TranscriptLine]:
@@ -81,6 +89,7 @@ class FasterWhisperASR(ASRProvider):
         return has_module("faster_whisper")
 
     def transcribe(self, audio_path: str, source_lang: str | None) -> Transcript:
+        self._ensure_available()
         from faster_whisper import WhisperModel  # type: ignore[import-not-found]
 
         model_size = env("FVD_WHISPER_MODEL", "base")
@@ -88,7 +97,7 @@ class FasterWhisperASR(ASRProvider):
         compute = env("FVD_WHISPER_COMPUTE", "int8")
         model = WhisperModel(model_size, device=device, compute_type=compute)
         segments, info = model.transcribe(
-            audio_path, word_timestamps=True, language=(source_lang or None), vad_filter=True,
+            audio_path, word_timestamps=True, language=_iso639(source_lang), vad_filter=True,
         )
         lines: list[TranscriptLine] = []
         for seg in segments:
@@ -125,6 +134,7 @@ class _OpenAICompatASR(ASRProvider):
         return has_module("requests") and self._key() is not None
 
     def transcribe(self, audio_path: str, source_lang: str | None) -> Transcript:
+        self._ensure_available()
         import requests  # lazy
 
         model = env(self.model_env, self.default_model)
@@ -133,8 +143,9 @@ class _OpenAICompatASR(ASRProvider):
             "response_format": "verbose_json",
             "timestamp_granularities[]": ["segment", "word"],
         }
-        if source_lang:
-            data["language"] = source_lang
+        norm_lang = _iso639(source_lang)
+        if norm_lang:
+            data["language"] = norm_lang
         with open(audio_path, "rb") as fh:
             files = {"file": (Path(audio_path).name, fh, "audio/wav")}
             resp = requests.post(
@@ -218,6 +229,7 @@ class CloudflareASR(ASRProvider):
         )
 
     def transcribe(self, audio_path: str, source_lang: str | None) -> Transcript:
+        self._ensure_available()
         # Single request (no chunking yet — asr_chunker is T1.3e). Long inputs may be
         # rejected by the model's size limit until then.
         words = self._run_one(audio_path)

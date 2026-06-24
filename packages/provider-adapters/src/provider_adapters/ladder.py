@@ -10,13 +10,18 @@ from __future__ import annotations
 
 # AUTO ladder = $0 providers only. A provider is skipped at runtime when its
 # ``available()`` is False (missing key/binary), so the first usable $0 provider
-# wins. ASR is CLOUD-PREFERRED per backlog T1.2 acceptance ("阶梯云优先
-# groq→CF→(faster_whisper cli)") — the hosted worker prefers fast free cloud ASR
-# over slow local CPU whisper, which sits at the tail as the keyless fallback.
+# wins.
+#   - ASR is CLOUD-PREFERRED per backlog T1.2 acceptance ("阶梯云优先
+#     groq→CF→(faster_whisper cli)") — the hosted worker prefers fast free cloud ASR
+#     over slow local CPU whisper, which sits at the tail as the keyless fallback.
+#   - TTS prefers PIPER (local, permissively licensed) as the default per backlog
+#     T1.3b ("piper 默认") / AD-6: edge_tts is an experimental, arguably non-commercial
+#     lane, so it sits at the tail and is never the hosted default (CodeX). The full
+#     license gate + AIGC marking land in T1.3b/T1.3g.
 AUTO_LADDER: dict[str, list[str]] = {
     "asr": ["groq", "cloudflare", "faster_whisper"],
     "mt": ["cloudflare", "groq", "deepl", "ollama"],
-    "tts": ["edge_tts", "cloudflare", "piper"],
+    "tts": ["piper", "cloudflare", "edge_tts"],
 }
 
 # Providers that cost money (metered / pay-as-you-go / one-time credit) or hand the

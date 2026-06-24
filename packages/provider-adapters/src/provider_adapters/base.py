@@ -69,6 +69,19 @@ class _BaseProvider(ABC):
     def available(self) -> bool:
         """True when this provider's key/binary is present and it can run."""
 
+    def _ensure_available(self) -> None:
+        """Raise a clean ProviderUnavailable (with the setup hint) before doing work.
+
+        select()'s auto fallback may hand back the ladder's DEFAULT free provider when
+        nothing is configured (so the resolver always returns a non-paid provider, which
+        the red-line inv③ requires). The capability methods call this first so an
+        unconfigured default fails with the promised setup error instead of a raw
+        ImportError / FileNotFoundError / HTTP 401 deeper in the call (CodeX P2)."""
+        if not self.available():
+            raise ProviderUnavailable(
+                f"{self.info.name} is not configured: needs {self.info.requires}"
+            )
+
 
 class ASRProvider(_BaseProvider):
     @abstractmethod
