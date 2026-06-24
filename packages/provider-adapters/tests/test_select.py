@@ -10,6 +10,8 @@ real keys/binaries (CI has neither).
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import provider_adapters
 import pytest
 from provider_adapters import (
@@ -26,7 +28,7 @@ from provider_adapters import (
 from provider_adapters.asr import CloudflareASR, FasterWhisperASR, GroqASR
 from provider_adapters.base import ASRProvider
 from provider_adapters.mt import CloudflareMT, DeepLMT
-from provider_adapters.tts import CloudflareTTS
+from provider_adapters.tts import CloudflareTTS, PiperTTS
 
 
 def _avail(monkeypatch: pytest.MonkeyPatch, dotted: str, value: bool) -> None:
@@ -174,3 +176,18 @@ def test_cf_mt_auto_source_fails_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     _avail(monkeypatch, "provider_adapters.mt.CloudflareMT.available", True)
     with pytest.raises(ProviderUnavailable, match="explicit source language"):
         CloudflareMT().translate(["hello"], "auto", "en")
+
+
+def test_piper_unavailable_when_model_file_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # CodeX round-3 P2: piper is the TTS ladder head; a stale/missing FVD_PIPER_MODEL must
+    # report unavailable so the ladder falls through to cloudflare/edge_tts (not fail in
+    # synthesize() after being selected).
+    monkeypatch.setattr("provider_adapters.tts.has_binary", lambda _name: True)
+    monkeypatch.setenv("FVD_PIPER_MODEL", str(tmp_path / "missing.onnx"))
+    assert PiperTTS().available() is False
+    real = tmp_path / "voice.onnx"
+    real.write_bytes(b"\x00")
+    monkeypatch.setenv("FVD_PIPER_MODEL", str(real))
+    assert PiperTTS().available() is True

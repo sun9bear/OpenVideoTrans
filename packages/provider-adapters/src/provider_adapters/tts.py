@@ -126,7 +126,11 @@ class PiperTTS(TTSProvider):
     ext = "wav"
 
     def available(self) -> bool:
-        return has_binary("piper") and env("FVD_PIPER_MODEL") is not None
+        # Require BOTH the binary AND an existing model file: a stale/missing FVD_PIPER_MODEL
+        # path must report unavailable so the ladder falls through to cloudflare/edge_tts
+        # instead of selecting Piper and failing later in synthesize() (CodeX).
+        model = env("FVD_PIPER_MODEL")
+        return has_binary("piper") and model is not None and Path(model).is_file()
 
     def voices_for(self, lang: str) -> list[str]:
         self._ensure_available()
