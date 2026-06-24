@@ -104,3 +104,10 @@ CANON_SAMPLE_FMT = "s16"
 # Alignment tuning
 MAX_SPEEDUP = 2.0          # never speed a segment up more than 2x (quality floor)
 DEFAULT_CHARS_PER_SEC = 15.0   # fallback budget hint when no probe is available
+
+# Output feature flags
+# Burned-in subtitles (re-encode with libass) are an M2.1 fast-follow; the kernel
+# carries a guarded placeholder and the front-end disables the option in M1
+# (T1.3d). Flipping this on without the M2.1 burn implementation is a programming
+# error — the mux placeholder raises rather than silently shipping plain video.
+BURN_SUBTITLES_ENABLED = False

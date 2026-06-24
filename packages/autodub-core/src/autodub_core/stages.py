@@ -16,12 +16,21 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
-from ovt_schemas.contracts import DubbingSegment, Transcript, TranslationResult
+from ovt_schemas.contracts import (
+    AigcMarking,
+    DubbingSegment,
+    Job,
+    Transcript,
+    TranslationResult,
+    WorkerMeta,
+)
 
-from . import config
+from . import aigc, config
 from . import ffmpeg_utils as ff
 from .config import JobPaths
+from .isolation import pin_resolver
 from .jsonio import atomic_output, read_json, write_json
+from .manifest import write_manifest
 from .providers import ProviderUnavailable, Resolver, TtsProvider
 
 
@@ -45,6 +54,11 @@ def ingest(paths: JobPaths, source: str, force: bool = False) -> None:
     paths.ensure()
     existing = paths.original_video()
     if existing and paths.original_audio.exists() and not force:
+        # Validate even the cached original: a worker pre-stage, or an interrupted /
+        # rejected prior run, could have left a disallowed source here, and a cache hit
+        # must never feed an unvalidated source into transcribe/translate (CodeX R4).
+        ff.assert_ffmpeg()
+        ff.assert_allowed_input_format(existing)
         _log(f"ingest: cached ({existing.name})")
         return
 
@@ -82,10 +96,14 @@ def ingest(paths: JobPaths, source: str, force: bool = False) -> None:
     if not video:
         raise RuntimeError("ingest produced no video/original.* file")
     ff.assert_ffmpeg()
-    # Drop any prior audio BEFORE extracting: extract_audio only replaces on
-    # success, so a failed re-extract would otherwise leave the old audio paired
-    # with the freshly-staged video on a later non-force retry.
+    # Drop any prior audio BEFORE validating/extracting: a rejected or failed source
+    # must not leave stale audio that a later non-force run would pair with it (the
+    # cache return above keys on original_audio existing) — extract_audio also only
+    # replaces on success (CodeX R4 + T1.3c).
     paths.original_audio.unlink(missing_ok=True)
+    # SSRF guard (T1.3c): refuse a source whose real container is a playlist / concat /
+    # network demuxer disguised as media, before ffmpeg extracts audio from it.
+    ff.assert_allowed_input_format(video)
     ff.extract_audio(video, paths.original_audio, sr=16000, mono=True)
     _log(f"ingest: extracted audio -> {paths.original_audio.name}")
 
@@ -348,38 +366,146 @@ def _write_silence(out_wav: Path, ms: int) -> None:
 
 
 # --------------------------------------------------------------------------- #
-def mux(paths: JobPaths, keep_ambient: bool = True, force: bool = False) -> Path:
+_OUTPUT_MODES = ("subtitle_only", "dub_only", "both")
+_SUBTITLE_LANGS = ("target", "bilingual")
+_SUBTITLE_DELIVERIES = ("srt", "burned", "both")
+
+
+def mux(
+    paths: JobPaths,
+    keep_ambient: bool = True,
+    force: bool = False,
+    *,
+    output_mode: str = "both",
+    subtitle_lang: str = "target",
+    subtitle_delivery: str = "srt",
+    marking: AigcMarking | None = None,
+) -> Path:
+    """Compose the job's deliverables per ``output_mode`` (T1.3d).
+
+    - ``dub_only`` / ``both`` -> a dubbed ``dubbed_video.mp4`` (stitched dubbed
+      audio over the source video).
+    - ``subtitle_only`` / ``both`` -> ``subtitles.srt`` when ``subtitle_delivery``
+      includes srt; ``subtitle_lang == "bilingual"`` emits target + source lines.
+    - burned subtitle delivery is a guarded placeholder until M2.1 (feature-flag off).
+
+    When ``marking`` is enabled (T1.3b) the AIGC legal mark is applied conditionally
+    on output_mode: the dubbed video carries embedded AIGC container metadata and an
+    AIGC-marked subtitle leads with a machine-translation disclosure cue. ``marking``
+    is mutated with ``applied=True`` so the manifest/audit trail records it.
+
+    Returns the primary deliverable: the dubbed video when dubbing, else the srt.
+    The deliverable set is the resume cache gate — a re-run rebuilds until every
+    expected file is present, so a crash mid-build never looks cached.
+    """
+    if output_mode not in _OUTPUT_MODES:
+        raise ValueError(f"unknown output_mode: {output_mode!r} (expected {_OUTPUT_MODES})")
+    if subtitle_lang not in _SUBTITLE_LANGS:
+        raise ValueError(f"unknown subtitle_lang: {subtitle_lang!r}")
+    if subtitle_delivery not in _SUBTITLE_DELIVERIES:
+        raise ValueError(f"unknown subtitle_delivery: {subtitle_delivery!r}")
     paths.ensure()
-    # mux promises BOTH mp4 + srt; require both before skipping, so a crash
-    # between ff.mux() and _write_srt() is repaired on a non-force re-run.
-    if paths.dubbed_video.exists() and paths.subtitles.exists() and not force:
+    # RED LINE §3 (default-on): mux is exported and writes final deliverables directly, so it
+    # must NOT emit an unmarked output by omission. When no marking is supplied, default it ON
+    # by output_mode — exactly like run_pipeline — so a direct caller can't bypass the mark.
+    # Turning the mark OFF requires an explicit AigcMarking(enabled=False) (the audited
+    # acknowledgment §3 demands), which embed_method/_on already honour (CodeX bot P1).
+    if marking is None:
+        marking = aigc.default_marking(output_mode)
+
+    want_video = output_mode in ("dub_only", "both")
+    want_subs = output_mode in ("subtitle_only", "both")
+    want_srt = want_subs and subtitle_delivery in ("srt", "both")
+    if want_subs and subtitle_delivery in ("burned", "both"):
+        if config.BURN_SUBTITLES_ENABLED:
+            # M2.1 owns the libass re-encode burn-in; intentionally unreachable in M1.
+            raise NotImplementedError("burned subtitles are an M2.1 feature")
+        if not want_srt:
+            # burned-only with no srt fallback: there is no channel to carry the
+            # subtitle (nor its §3 AIGC disclosure), so fail explicitly rather than
+            # complete with zero deliverables and a dead primary path.
+            raise NotImplementedError(
+                "subtitle_delivery='burned' has no srt fallback; burned-in subtitles "
+                "are an M2.1 feature (BURN_SUBTITLES_ENABLED off)")
+        _log("mux: burned subtitles requested but deferred to M2.1 (feature-flag off)")
+
+    expected = [p for p, want in
+                ((paths.dubbed_video, want_video), (paths.subtitles, want_srt)) if want]
+    primary = paths.dubbed_video if want_video else paths.subtitles
+    # The AIGC mark the deliverables must carry ("" = unmarked). A marker file records
+    # what the cached artifacts were actually built with, so a marking change forces a
+    # re-mux: the cache can neither under-claim (resume of a marked run) nor over-claim
+    # (cached artifacts from an earlier unmarked run presented as marked) — red line §3.
+    want_method = aigc.embed_method(marking, output_mode) or ""
+    # The marker records EVERY setting that shapes the deliverables (AIGC method +
+    # output_mode + subtitle settings), so changing any of them (e.g. target ->
+    # bilingual subtitles, or a marking change) invalidates the cache and forces a
+    # rewrite (CodeX R3/R5) — the cache never serves a deliverable built for other
+    # settings, and never over-/under-claims the §3 mark.
+    cache_key = "|".join([want_method, output_mode, subtitle_lang, subtitle_delivery])
+    marker = paths.output / ".mux_cache"
+    cached_key = marker.read_text(encoding="utf-8") if marker.exists() else ""
+    if (expected and all(p.exists() for p in expected)
+            and cached_key == cache_key and not force):
         _log("mux: cached")
-        return paths.dubbed_video
-    # Reaching here means a (re)build is needed (forced, or an incomplete pair).
-    # Clear both deliverables first so a failure mid-rewrite leaves an incomplete
-    # (repairable) set, never a stale mp4+srt pair that looks cached next time.
-    paths.dubbed_video.unlink(missing_ok=True)
-    paths.subtitles.unlink(missing_ok=True)
+        if want_method and marking is not None:
+            marking.applied = True  # cached artifacts carry the recorded mark
+        return primary
+    # Rebuild: clear EVERY known deliverable, not just the requested ones. When the output
+    # mode narrows on a reused job dir (both -> subtitle_only / dub_only), a stale deliverable
+    # from the previous wider mode (e.g. dubbed_video.mp4 / subtitles.srt) must not linger for
+    # presence-based packaging/upload to publish (CodeX bot P2). Expected ones are rebuilt below;
+    # clearing first also keeps a mid-build failure repairable, never stale-looking-as-cached.
+    for p in (paths.dubbed_video, paths.subtitles):
+        p.unlink(missing_ok=True)
+
     result = TranslationResult.model_validate(read_json(paths.segments))
-    video = paths.original_video()
-    if not video:
-        raise RuntimeError("mux: no original video")
-    ff.assert_ffmpeg()
-    total_ms = ff.probe_duration_ms(video)
+    if want_video:
+        video = paths.original_video()
+        if not video:
+            raise RuntimeError("mux: no original video")
+        ff.assert_ffmpeg()
+        # mux is exported and may run on a pre-staged / resumed job that bypassed
+        # ingest's allowlist — validate the source at THIS ffmpeg boundary too, so a
+        # crafted video/original.* can never be parsed by ffprobe/ffmpeg here (CodeX R4).
+        ff.assert_allowed_input_format(video)
+        total_ms = ff.probe_duration_ms(video)
+        placements = [(s.start_ms, paths.tts_aligned(s.index))
+                      for s in result.segments if paths.tts_aligned(s.index).exists()]
+        ff.stitch_timeline(placements, paths.dubbed_audio, total_ms)
+        if placements:
+            _log(f"mux: composed {len(placements)} segments into dubbed audio")
+        else:
+            # A dub-mode job with no aligned audio (all keep_original, or every
+            # tts/align produced nothing) yields a silent track — surface it rather
+            # than ship a silently-silent video as if it were a normal dub.
+            _log(f"mux: WARNING dubbed 0 of {len(result.segments)} segments "
+                 "(all keep_original or missing aligned audio); dub track is silent")
+        ambient = paths.ambient if (keep_ambient and paths.ambient.exists()) else None
+        ff.mux(video, paths.dubbed_audio, paths.dubbed_video, ambient=ambient,
+               metadata=aigc.metadata_args(marking, output_mode))
+        _log(f"mux: wrote {paths.dubbed_video.name}")
+    # Write the srt LAST so a failed video mux above leaves no lone deliverable
+    # that the next run might otherwise treat as progress.
+    if want_srt:
+        _write_srt(result, paths.subtitles, bilingual=(subtitle_lang == "bilingual"),
+                   disclosure=aigc.subtitle_disclosure(marking))
+        _log(f"mux: wrote {paths.subtitles.name}")
+    # Record what was actually marked alongside the deliverables, so a later resume
+    # can trust (or invalidate) the cache. applied reflects an actually-written mark
+    # (non-empty method), never merely that marking was enabled — the §3 audit trail
+    # must not claim a mark that no artifact carries.
+    if expected:
+        marker.write_text(cache_key, encoding="utf-8")
+    if want_method and marking is not None:
+        marking.applied = True
+    return primary
 
-    placements = [(s.start_ms, paths.tts_aligned(s.index))
-                  for s in result.segments if paths.tts_aligned(s.index).exists()]
-    ff.stitch_timeline(placements, paths.dubbed_audio, total_ms)
-    _log(f"mux: composed {len(placements)} segments into dubbed audio")
 
-    ambient = paths.ambient if (keep_ambient and paths.ambient.exists()) else None
-    ff.mux(video, paths.dubbed_audio, paths.dubbed_video, ambient=ambient)
-    _write_srt(result, paths.subtitles)
-    _log(f"mux: wrote {paths.dubbed_video}")
-    return paths.dubbed_video
-
-
-def _write_srt(result: TranslationResult, path: Path) -> None:
+def _write_srt(
+    result: TranslationResult, path: Path, *,
+    bilingual: bool = False, disclosure: str | None = None,
+) -> None:
     def ts(ms: int) -> str:
         ms = max(0, ms)
         h, ms = divmod(ms, 3_600_000)
@@ -387,16 +513,38 @@ def _write_srt(result: TranslationResult, path: Path) -> None:
         s, ms = divmod(ms, 1000)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
+    segs = [s for s in result.segments if (s.target_text.strip() or s.source_text.strip())]
+    disc = disclosure or ""
+    # AIGC machine-translation disclosure (T1.3b): a short LEADING notice. Clamp its window to
+    # END at the first real cue so it never overlaps actual subtitle content — overlapping cues
+    # make players stack/hide text (@CodeX bot P2). With no usable gap before the first cue
+    # (< 500 ms), ride the disclosure on that first cue's text instead of an overlapping cue.
+    first_start = segs[0].start_ms if segs else 3000
+    disclose_standalone = bool(disc) and first_start >= 500
+    disclose_on_first = bool(disc) and not disclose_standalone
+
     lines: list[str] = []
     n = 0
-    for seg in result.segments:
-        text = seg.target_text.strip() or seg.source_text.strip()
-        if not text:
-            continue
+    if disclose_standalone:
+        n += 1
+        lines += [str(n), f"{ts(0)} --> {ts(min(3000, first_start))}", disc, ""]
+    for i, seg in enumerate(segs):
+        target = seg.target_text.strip()
+        source = seg.source_text.strip()
         n += 1
         lines.append(str(n))
         lines.append(f"{ts(seg.start_ms)} --> {ts(seg.end_ms)}")
-        lines.append(text)
+        body: list[str] = []
+        if disclose_on_first and i == 0:
+            body.append(disc)  # no gap for a standalone cue -> ride on the first cue
+        # Bilingual cue = target (deliverable language) on top, source below; both kept even
+        # when MT == source (names/acronyms/punctuation) for a consistent bilingual layout
+        # (@CodeX bot P3). Falls back to one line only when a side is empty (keep_original).
+        if bilingual and target and source:
+            body += [target, source]
+        else:
+            body.append(target or source)
+        lines += body
         lines.append("")
     with atomic_output(path) as tmp:
         tmp.write_text("\n".join(lines), encoding="utf-8")
@@ -416,18 +564,62 @@ def run_pipeline(
     separate: bool = False,
     keep_ambient: bool = True,
     force: bool = False,
+    output_mode: str = "both",
+    subtitle_lang: str = "target",
+    subtitle_delivery: str = "srt",
+    aigc_marking: AigcMarking | None = None,
+    job: Job | None = None,
 ) -> Path:
-    """End-to-end local dub: ingest -> prepare -> transcribe -> translate -> tts
-    -> align -> mux. Returns the dubbed video path (subtitles alongside it).
+    """End-to-end local pipeline: ingest -> prepare -> transcribe -> translate ->
+    [tts -> align] -> mux. Returns the primary deliverable path.
+
+    ``output_mode`` (T1.3d) decides which stages run and which deliverables are
+    produced: ``subtitle_only`` skips tts + align and emits only subtitles;
+    ``dub_only`` / ``both`` run the full dub. ``subtitle_lang`` / ``subtitle_delivery``
+    shape the subtitle output (bilingual lines; burned is an M2.1 placeholder).
 
     The Tier 1 kernel never enables paid providers (CLAUDE.md red line §1/§14):
-    there is deliberately no allow_paid opt-in here — the stages always pass
-    allow_paid=False to the resolver, which enforces the paid gate.
+    there is deliberately no allow_paid opt-in here, and the resolver is pinned
+    (T1.3a) so even a future change can't slip a paid provider past the gate.
+
+    When ``job`` is supplied (the authoritative record from the control plane /
+    local-runner) a ``manifest.json`` is written alongside the deliverables (T1.3a).
     """
+    resolver = pin_resolver(resolver)
+    if job is not None:
+        # The Job is the authoritative record — derive every job-defined setting from
+        # it so what runs can't diverge from the manifest written for it (CodeX P1).
+        # Runtime knobs (source / separate / keep_ambient / force) stay caller-supplied;
+        # the flat kwargs drive only the no-job ad-hoc (CLI) path.
+        target_lang = job.target_lang
+        source_lang = job.source_lang_hint
+        output_mode = job.output_mode
+        subtitle_lang = job.subtitle_lang
+        subtitle_delivery = job.subtitle_delivery
+        aigc_marking = job.aigc_marking
+        asr, mt, tts_provider = job.plan.asr, job.plan.mt, job.plan.tts
+    elif aigc_marking is None:
+        # Red line §3: AIGC marking is default-ON. The ad-hoc / no-job path never
+        # ships an unmarked deliverable by omission — disabling needs an explicit
+        # (audited) AigcMarking(enabled=False) from the caller.
+        aigc_marking = aigc.default_marking(output_mode)
     ingest(paths, source, force=force)
     prepare(paths, separate=separate, force=force)
     transcribe(paths, resolver, asr, source_lang, force=force)
     translate(paths, resolver, mt, target_lang, source_lang, force=force)
-    tts(paths, resolver, tts_provider, force=force)
-    align(paths, force=force)
-    return mux(paths, keep_ambient=keep_ambient, force=force)
+    # subtitle_only needs no synthesized/aligned audio — skip tts + align entirely.
+    if output_mode in ("dub_only", "both"):
+        tts(paths, resolver, tts_provider, force=force)
+        align(paths, force=force)
+    out = mux(paths, keep_ambient=keep_ambient, force=force, output_mode=output_mode,
+              subtitle_lang=subtitle_lang, subtitle_delivery=subtitle_delivery,
+              marking=aigc_marking)
+    if job is not None:
+        # Record the embed method only when a mark was actually applied (mux sets
+        # marking.applied on the non-empty deliverable set), so the manifest never
+        # over-claims. worker_meta.ffprobe blob is deferred to T1.4 worker
+        # integration; models[] sha256 pins land in T1.3g.
+        method = (aigc.embed_method(aigc_marking, output_mode)
+                  if aigc_marking is not None and aigc_marking.applied else None)
+        write_manifest(paths, job, WorkerMeta(aigc_embed_method=method))
+    return out

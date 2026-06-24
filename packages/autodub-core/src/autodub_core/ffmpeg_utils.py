@@ -28,7 +28,12 @@ def have(binary: str) -> bool:
 
 
 def _run(cmd: list[str]) -> str:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # ffmpeg/ffprobe emit UTF-8; decode as UTF-8 (not the Windows locale/cp936) and
+    # never crash the output-reader thread on odd bytes. AIGC metadata carries
+    # non-ASCII (e.g. Chinese), which a locale decode would choke on.
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
     if proc.returncode != 0:
         raise FfmpegError(
             f"command failed ({proc.returncode}): {' '.join(cmd[:6])} ...\n{proc.stderr[-2000:]}"
@@ -45,12 +50,115 @@ def assert_ffmpeg() -> None:
         )
 
 
+# --------------------------------------------------------------------------- #
+# SSRF / local-file-read hardening (T1.3c)
+# --------------------------------------------------------------------------- #
+# Every ffmpeg/ffprobe input is a local file, so demuxers may follow ONLY the
+# file protocol (+ crypto, for AES-encrypted local segments). This blocks a media
+# file that is secretly a playlist / concat script from making ffmpeg fetch
+# http(s):// URLs or read arbitrary file:// paths through a sub-protocol — the
+# classic ffmpeg SSRF / local-file-read vector. The kernel is network-free.
+_PROTOCOL_WHITELIST = ("-protocol_whitelist", "file,crypto")
+_FFPROBE_BASE = ("ffprobe", "-v", "error")
+
+# Container demuxers accepted as input. A strict allowlist: the source's probed
+# format_name (a comma list of demuxer aliases) must contain ONLY these tokens,
+# so a disguised playlist (hls/applehttp), concat script (concat/ffconcat), image
+# list (image2) or network demuxer (rtsp/rtp/sdp/data) is refused up front.
+ALLOWED_INPUT_FORMATS = frozenset({
+    # video containers
+    "mov", "mp4", "m4a", "m4v", "m4b", "3gp", "3g2", "mj2",
+    "matroska", "webm",
+    "avi", "mpegts", "mpeg", "mpegvideo", "flv", "asf", "mxf",
+    # audio containers / streams
+    "mp3", "mp2", "wav", "w64", "flac", "ogg", "oga", "opus", "aac", "ac3", "aiff",
+})
+
+# Playlist / concat / script container extensions whose demuxers (HLS, concat, …)
+# follow sub-resources. Rejected by extension BEFORE ffprobe ever opens the input,
+# so an honestly-named playlist can't even reach the probe.
+_PLAYLIST_EXTENSIONS = frozenset({
+    ".m3u", ".m3u8", ".pls", ".xspf", ".asx", ".smil", ".wpl", ".cue",
+    ".concat", ".ffconcat",
+})
+
+# Demuxer whitelist for the untrusted-source format probe: ffprobe refuses to even
+# OPEN an input whose demuxer is not allowed (e.g. a disguised concat/hls under a
+# media extension), so a playlist/concat demuxer can never dereference sub-resources
+# during the probe — constraining the probe itself, not only the post-probe validate.
+_FORMAT_WHITELIST = ("-format_whitelist", ",".join(sorted(ALLOWED_INPUT_FORMATS)))
+
+
+def _input(path: str | Path) -> list[str]:
+    """A protocol-restricted input: ``-protocol_whitelist file,crypto -i PATH``."""
+    return [*_PROTOCOL_WHITELIST, "-i", str(path)]
+
+
+def validate_format_name(format_name: str) -> None:
+    """Raise unless every demuxer token in ``format_name`` is an allowed media format.
+
+    ``format_name`` is ffprobe's comma-joined demuxer alias list (e.g.
+    ``"mov,mp4,m4a,3gp,3g2,mj2"``). A single disallowed token (``hls``, ``concat``,
+    ``image2``, ``rtsp`` …) means the input is a playlist/network/script demuxer
+    masquerading as media — refuse it (SSRF guard, T1.3c).
+    """
+    tokens = [t.strip().lower() for t in format_name.split(",") if t.strip()]
+    if not tokens:
+        raise FfmpegError("ffprobe reported no container format for the input")
+    disallowed = [t for t in tokens if t not in ALLOWED_INPUT_FORMATS]
+    if disallowed:
+        raise FfmpegError(
+            f"input container format {format_name!r} is not an allowed media format "
+            f"(disallowed demuxer(s): {', '.join(disallowed)}); refusing a possible "
+            f"playlist/concat/network demuxer (SSRF guard, T1.3c)."
+        )
+
+
+def probe_format_name(path: str | Path) -> str:
+    """ffprobe the input's container ``format_name`` (protocol- AND demuxer-restricted)."""
+    out = _run([
+        *_FFPROBE_BASE, *_FORMAT_WHITELIST, "-show_entries", "format=format_name",
+        "-of", "default=nokey=1:noprint_wrappers=1", *_PROTOCOL_WHITELIST, str(path),
+    ])
+    return out.strip()
+
+
+def assert_allowed_input_format(path: str | Path) -> None:
+    """Refuse ``path`` unless its container is an allowed media format (SSRF guard).
+
+    Layered defense so a playlist/concat demuxer never reads sub-resources:
+    1. reject known playlist/script *extensions* before ffprobe opens the input;
+    2. probe with ``-protocol_whitelist file,crypto`` (no network) — and ffmpeg's
+       own ``allowed_segment_extensions`` blocks ``file://`` segment reads — so even
+       a disguised playlist (media extension, hls content) cannot reach a resource
+       during the probe; then
+    3. reject any non-allowlisted detected demuxer (hls/concat/rtsp/…).
+    """
+    ext = Path(path).suffix.lower()
+    if ext in _PLAYLIST_EXTENSIONS:
+        raise FfmpegError(
+            f"input extension {ext!r} is a playlist/concat/script container, not media; "
+            f"refusing before probe (SSRF guard, T1.3c)."
+        )
+    validate_format_name(probe_format_name(path))
+
+
 def probe_duration_ms(path: str | Path) -> int:
     out = _run([
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "json", str(path),
+        *_FFPROBE_BASE, "-show_entries", "format=duration",
+        "-of", "json", *_PROTOCOL_WHITELIST, str(path),
     ])
-    dur = float(json.loads(out)["format"]["duration"])
+    # Malformed ffprobe output (empty/garbled JSON, a missing format/duration key,
+    # or a non-numeric duration like "N/A"/null) must surface as FfmpegError, not a
+    # bare KeyError/JSONDecodeError, so callers see one error type. JSONDecodeError
+    # is a ValueError subclass; TypeError covers a non-dict payload (e.g. "[]") and a
+    # null duration. Carry the raw stdout snippet for diagnosis.
+    try:
+        dur = float(json.loads(out)["format"]["duration"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise FfmpegError(
+            f"could not read duration from ffprobe output ({exc}); stdout was: {out[:500]!r}"
+        ) from exc
     return int(round(dur * 1000))
 
 
@@ -62,7 +170,7 @@ def extract_audio(src: str | Path, out_wav: str | Path, sr: int = 16000, mono: b
     check) would treat as a valid cached audio artifact.
     """
     with atomic_output(out_wav) as tmp:
-        cmd = ["ffmpeg", "-y", "-i", str(src), "-vn", "-ar", str(sr)]
+        cmd = ["ffmpeg", "-y", *_input(src), "-vn", "-ar", str(sr)]
         if mono:
             cmd += ["-ac", "1"]
         cmd += ["-c:a", "pcm_s16le", str(tmp)]
@@ -80,7 +188,7 @@ def to_canonical_wav(
     would otherwise treat a truncated ``_aligned.wav`` as done on resume.
     """
     with atomic_output(out_wav) as tmp:
-        cmd = ["ffmpeg", "-y", "-i", str(src)]
+        cmd = ["ffmpeg", "-y", *_input(src)]
         if atempo_chain:
             flt = ",".join(f"atempo={t:.6f}" for t in atempo_chain)
             cmd += ["-filter:a", flt]
@@ -145,6 +253,18 @@ def stitch_timeline(
                 out.writeframes(_silence_frames(start_ms - head_ms, sampwidth, channels, rate))
                 head_ms = start_ms
             with wave.open(str(seg_path), "rb") as w:
+                params = (w.getnchannels(), w.getsampwidth(), w.getframerate())
+                if params != (channels, sampwidth, rate):
+                    # A segment that bypassed to_canonical_wav (e.g. 16kHz or stereo)
+                    # would be spliced in raw and silently corrupt this span's
+                    # pitch/tempo with no error. Refuse it; atomic_output discards the
+                    # partial composed track. The pipeline always normalizes first, so
+                    # this is a defensive assertion, not an expected path.
+                    raise FfmpegError(
+                        f"stitch input {seg_path} is not canonical: (channels, sampwidth, "
+                        f"rate)={params}, expected {(channels, sampwidth, rate)}; all segments "
+                        "must be normalized through to_canonical_wav before stitching."
+                    )
                 data = w.readframes(w.getnframes())
                 out.writeframes(data)
             head_ms += wav_duration_ms(seg_path)
@@ -153,27 +273,33 @@ def stitch_timeline(
 
 
 def mux(
-    video: str | Path, audio: str | Path, out: str | Path, ambient: str | Path | None = None
+    video: str | Path, audio: str | Path, out: str | Path,
+    ambient: str | Path | None = None, metadata: list[str] | None = None,
 ) -> None:
     """Mux a composed dubbed audio track onto the original video (copy video
     stream). Optionally mixes a low background ambient track underneath.
 
+    ``metadata`` is a list of extra ffmpeg output options (e.g. the AIGC
+    ``-metadata`` tags from T1.3b); they go on the output container and are
+    stream-copy compatible (no re-encode).
+
     Atomic (temp + replace): a failed ffmpeg must not leave a partial mp4 that,
     alongside an already-written subtitles.srt, the mux cache would treat as done.
     """
+    extra = list(metadata or [])
     with atomic_output(out) as tmp:
         if ambient and Path(ambient).exists():
             cmd = [
-                "ffmpeg", "-y", "-i", str(video), "-i", str(audio), "-i", str(ambient),
+                "ffmpeg", "-y", *_input(video), *_input(audio), *_input(ambient),
                 "-filter_complex",
                 "[2:a]volume=0.35[amb];[1:a][amb]amix=inputs=2:normalize=0[aout]",
                 "-map", "0:v:0", "-map", "[aout]",
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(tmp),
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", *extra, "-shortest", str(tmp),
             ]
         else:
             cmd = [
-                "ffmpeg", "-y", "-i", str(video), "-i", str(audio),
+                "ffmpeg", "-y", *_input(video), *_input(audio),
                 "-map", "0:v:0", "-map", "1:a:0",
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(tmp),
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", *extra, "-shortest", str(tmp),
             ]
         _run(cmd)

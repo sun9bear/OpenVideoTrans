@@ -24,6 +24,18 @@ def _make_wav(path: Path, ms: int) -> Path:
     return path
 
 
+def _make_wav_with(path: Path, channels: int, sampwidth: int, rate: int, ms: int = 50) -> Path:
+    """Write a wav with arbitrary (channels, sampwidth, rate) — i.e. a *non-canonical*
+    input, used to prove the stitcher refuses to splice un-normalized segments."""
+    n = int(round(ms * rate / 1000))
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(sampwidth)
+        w.setframerate(rate)
+        w.writeframes(b"\x00" * (n * channels * sampwidth))
+    return path
+
+
 # ── atempo decomposition ─────────────────────────────────────────────────────
 @pytest.mark.parametrize(
     ("ratio", "max_total", "expected"),
@@ -172,3 +184,89 @@ def test_stitch_frame_level_placement(tmp_path: Path) -> None:
     assert _frame_at_ms(out, 300) == silence   # gap silence (100-500ms)
     assert _frame_at_ms(out, 550) == nonzero   # inside segment b (500-600ms)
     assert _frame_at_ms(out, 800) == silence   # trailing pad to total_ms
+
+
+# ── stitch rejects non-canonical segments (T1.1 defensive gap, T1.3 Batch A) ──
+@pytest.mark.parametrize(
+    ("channels", "sampwidth", "rate", "why"),
+    [
+        (CANON_CHANNELS, 2, 16000, "wrong sample rate (16k vs 48k)"),
+        (2, 2, CANON_SR, "stereo (wrong channel count)"),
+        (CANON_CHANNELS, 1, CANON_SR, "8-bit (wrong sample width)"),
+    ],
+)
+def test_stitch_rejects_noncanonical_segment(
+    tmp_path: Path, channels: int, sampwidth: int, rate: int, why: str
+) -> None:
+    # A segment that escaped to_canonical_wav (e.g. 16kHz or stereo) would be spliced
+    # in raw and silently corrupt that span's pitch/tempo with no error. The stitcher
+    # must refuse it instead, and (atomic_output) leave no partial composed track.
+    bad = _make_wav_with(tmp_path / "bad.wav", channels, sampwidth, rate)
+    out = tmp_path / "out.wav"
+    with pytest.raises(ff.FfmpegError, match="canonical"):
+        ff.stitch_timeline([(0, bad)], out, total_ms=500)
+    assert not out.exists(), f"no partial composed track on {why}"
+    assert not out.with_name(out.stem + ".part" + out.suffix).exists()
+
+
+def test_stitch_rejects_noncanonical_segment_among_good_ones(tmp_path: Path) -> None:
+    # A good segment is written first, then a non-canonical one is reached mid-loop:
+    # the raise must still abort and discard the (now non-empty) temp entirely.
+    good = _make_wav(tmp_path / "good.wav", 100)
+    bad = _make_wav_with(tmp_path / "bad.wav", CANON_CHANNELS, 2, 16000)
+    out = tmp_path / "out.wav"
+    with pytest.raises(ff.FfmpegError, match="canonical"):
+        ff.stitch_timeline([(0, good), (200, bad)], out, total_ms=1000)
+    assert not out.exists()
+    assert not out.with_name(out.stem + ".part" + out.suffix).exists()
+
+
+def test_stitch_accepts_canonical_segments(tmp_path: Path) -> None:
+    # The new guard must not reject genuinely canonical inputs (regression guard).
+    a = _make_wav(tmp_path / "a.wav", 100)
+    out = tmp_path / "out.wav"
+    ff.stitch_timeline([(0, a)], out, total_ms=500)
+    assert ff.wav_duration_ms(out) == 500
+
+
+# ── probe_duration_ms wraps malformed ffprobe output (T1.1 gap, T1.3 Batch A) ──
+@pytest.mark.parametrize(
+    "bad_stdout",
+    [
+        "not json at all",                      # JSONDecodeError (⊂ ValueError)
+        "",                                     # empty stdout -> JSONDecodeError
+        "{}",                                   # missing "format" key -> KeyError
+        '{"format": {}}',                       # missing "duration" key -> KeyError
+        '{"format": {"duration": "N/A"}}',      # non-numeric duration -> ValueError
+        '{"format": {"duration": null}}',       # null duration -> TypeError on float()
+        "[]",                                   # JSON array, not object -> TypeError
+    ],
+)
+def test_probe_duration_ms_wraps_malformed_output(monkeypatch, bad_stdout: str) -> None:  # noqa: ANN001
+    # Malformed ffprobe stdout must surface as FfmpegError (one error type for callers),
+    # never a bare KeyError/JSONDecodeError leaking out of the helper.
+    def fake_run(cmd):  # noqa: ANN001,ANN202,ARG001
+        return bad_stdout
+
+    monkeypatch.setattr(ff, "_run", fake_run)
+    with pytest.raises(ff.FfmpegError):
+        ff.probe_duration_ms("anything.mp4")
+
+
+def test_probe_duration_ms_error_includes_raw_output(monkeypatch) -> None:  # noqa: ANN001
+    # The wrapped error must carry the raw ffprobe output for diagnosis.
+    def fake_run(cmd):  # noqa: ANN001,ANN202,ARG001
+        return '{"format": {"duration": "N/A"}}'
+
+    monkeypatch.setattr(ff, "_run", fake_run)
+    with pytest.raises(ff.FfmpegError, match="N/A"):
+        ff.probe_duration_ms("anything.mp4")
+
+
+def test_probe_duration_ms_parses_well_formed_output(monkeypatch) -> None:  # noqa: ANN001
+    # The wrapping must not change the happy path (regression guard).
+    def fake_run(cmd):  # noqa: ANN001,ANN202,ARG001
+        return '{"format": {"duration": "12.5"}}'
+
+    monkeypatch.setattr(ff, "_run", fake_run)
+    assert ff.probe_duration_ms("anything.mp4") == 12500

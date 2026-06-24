@@ -16,6 +16,15 @@ from .config import (
     MAX_SPEEDUP,
     JobPaths,
 )
+from .isolation import (
+    PaidPinViolation,
+    PathEscapeError,
+    ensure_within,
+    job_root,
+    pin_resolver,
+    safe_component,
+)
+from .manifest import write_manifest
 from .providers import (
     AsrProvider,
     MtProvider,
@@ -46,6 +55,13 @@ __all__ = [
     "DEFAULT_CHARS_PER_SEC",
     "MAX_SPEEDUP",
     "JobPaths",
+    "PaidPinViolation",
+    "PathEscapeError",
+    "ensure_within",
+    "job_root",
+    "pin_resolver",
+    "safe_component",
+    "write_manifest",
     "AsrProvider",
     "MtProvider",
     "ProviderInfo",
