@@ -15,6 +15,7 @@ import re
 from ._env import env, require_env
 from .base import MTProvider, ProviderInfo, ProviderUnavailable, has_module, register
 from .ladder import DEFAULT_CHARS_PER_SEC
+from .languages import deepl_target_code
 
 _BATCH = 40
 
@@ -116,10 +117,10 @@ class DeepLMT(MTProvider):
         budgets_ms: list[int] | None = None,
     ) -> list[str]:
         self._ensure_available()  # only a FREE ':fx' key passes — never the paid endpoint
-        # TODO(T1.3f): map BCP-47 targets to DeepL's exact target codes (per-provider "逐语
-        # vet"). DeepL accepts e.g. PT-BR/EN-US but NOT script subtags (zh-Hans) or JA-JP, so
-        # those 400 here (loud, not silent). A naive base-strip would regress PT-BR/EN-US, so
-        # the correct per-provider mapping is deferred to the language_capabilities unit.
+        # T1.3f: per-provider "逐语 vet" — map the BCP-47 target to DeepL's exact code
+        # (PT-BR/EN-US kept, zh-Hans -> ZH), failing closed for targets DeepL doesn't offer
+        # rather than sending a code it 400s on.
+        deepl_code = deepl_target_code(target_lang)
         import requests
 
         key = require_env("DEEPL_API_KEY")
@@ -130,7 +131,7 @@ class DeepLMT(MTProvider):
             resp = requests.post(
                 f"{host}/v2/translate",
                 headers={"Authorization": f"DeepL-Auth-Key {key}"},
-                data=[("text", t) for t in batch] + [("target_lang", target_lang.upper())],
+                data=[("text", t) for t in batch] + [("target_lang", deepl_code)],
                 timeout=120,
             )
             if resp.status_code >= 400:

@@ -26,6 +26,25 @@ from .base import (
     select,
 )
 from .ladder import AUTO_LADDER, PAID_PROVIDERS, is_paid_provider
+from .languages import (
+    CAPABILITIES,
+    LanguageError,
+    assert_language_pair,
+    deepl_target_code,
+    get_capability,
+    resolve_source_language,
+)
+from .supply_chain import (
+    SupplyChainError,
+    assert_default_image_allowed,
+    is_non_commercial,
+    license_for,
+    sha256_file,
+    verify_ffmpeg,
+    verify_pinned,
+    verify_piper_model,
+    verify_sha256,
+)
 
 # Registering all adapters populates the kind→name→factory registry that select()
 # walks; REGISTRY is then flattened from it (name→ProviderInfo).
@@ -37,16 +56,31 @@ REGISTRY: dict[str, ProviderInfo] = build_registry()
 
 __all__ = [
     "AUTO_LADDER",
+    "CAPABILITIES",
     "PAID_PROVIDERS",
     "REGISTRY",
+    "LanguageError",
     "PaidProviderBlocked",
     "ProviderInfo",
     "ProviderUnavailable",
     "Resolver",
+    "SupplyChainError",
+    "assert_default_image_allowed",
+    "assert_language_pair",
+    "deepl_target_code",
+    "get_capability",
     "has_binary",
     "has_module",
+    "is_non_commercial",
     "is_paid_provider",
+    "license_for",
     "list_providers",
     "probe",
+    "resolve_source_language",
     "select",
+    "sha256_file",
+    "verify_ffmpeg",
+    "verify_pinned",
+    "verify_piper_model",
+    "verify_sha256",
 ]
