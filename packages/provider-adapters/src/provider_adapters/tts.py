@@ -80,13 +80,19 @@ class CloudflareTTS(TTSProvider):
             and env("CLOUDFLARE_API_TOKEN")
         )
 
+    # MeloTTS uses the language code itself as its single "voice"; the CF binding accepts
+    # en/es/fr/zh + jp/kr. Built-in so the ladder entry is usable WITHOUT the optional
+    # assets/voices.json catalog (a catalog, when present, still overrides — T1.3b/f).
+    _MELOTTS_LANGS = {"en": "en", "es": "es", "fr": "fr", "zh": "zh", "ja": "jp", "ko": "kr"}
+
     def voices_for(self, lang: str) -> list[str]:
         self._ensure_available()
-        ids = _preset_ids("cloudflare", lang)
+        code = self._MELOTTS_LANGS.get(lang.split("-")[0].lower())
+        ids = _preset_ids("cloudflare", lang) or ([code] if code else [])
         if not ids:
             raise ProviderUnavailable(
                 f"Cloudflare MeloTTS does not cover language {lang!r} (only en/es/fr/zh/ja/ko). "
-                f"Use edge_tts for broader coverage."
+                f"Use piper/edge_tts for broader coverage."
             )
         return ids
 

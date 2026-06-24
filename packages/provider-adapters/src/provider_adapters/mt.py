@@ -63,13 +63,21 @@ class CloudflareMT(MTProvider):
         budgets_ms: list[int] | None = None,
     ) -> list[str]:
         self._ensure_available()
+        # m2m100 expects bare ISO-639-1 codes; strip any region/script subtag (zh-Hans -> zh).
+        src, tgt = source_lang.split("-")[0].lower(), target_lang.split("-")[0].lower()
+        if src in ("", "auto"):
+            # m2m100 is many-to-many and needs an explicit source; "auto" (e.g. a CF ASR run
+            # with no source hint) would 400. Fail clean — source-lang detection backfill /
+            # fail-closed is T1.3f.
+            raise ProviderUnavailable(
+                f"Cloudflare m2m100 MT needs an explicit source language (got {source_lang!r}); "
+                f"pass a source-lang hint. (Auto-detection backfill is T1.3f.)"
+            )
         import requests
 
         acct, token = require_env("CLOUDFLARE_ACCOUNT_ID"), require_env("CLOUDFLARE_API_TOKEN")
         model = env("FVD_CF_MT_MODEL", "@cf/meta/m2m100-1.2b")
         url = f"https://api.cloudflare.com/client/v4/accounts/{acct}/ai/run/{model}"
-        # m2m100 expects bare ISO-639-1 codes; strip any region subtag (zh-CN -> zh).
-        src, tgt = source_lang.split("-")[0], target_lang.split("-")[0]
         out: list[str] = []
         for t in texts:
             if not t.strip():

@@ -25,7 +25,8 @@ from provider_adapters import (
 )
 from provider_adapters.asr import CloudflareASR, FasterWhisperASR, GroqASR
 from provider_adapters.base import ASRProvider
-from provider_adapters.mt import DeepLMT
+from provider_adapters.mt import CloudflareMT, DeepLMT
+from provider_adapters.tts import CloudflareTTS
 
 
 def _avail(monkeypatch: pytest.MonkeyPatch, dotted: str, value: bool) -> None:
@@ -155,3 +156,21 @@ def test_unconfigured_default_raises_clean_setup_error(monkeypatch: pytest.Monke
     assert isinstance(asr, ASRProvider)  # auto fallback returns a usable ASR provider type
     with pytest.raises(ProviderUnavailable, match="not configured"):
         asr.transcribe("nonexistent.wav", None)
+
+
+def test_cf_tts_has_builtin_melotts_voices(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CodeX round-2 P2: CF MeloTTS must be usable without assets/voices.json — built-in
+    # lang voices for the 6 supported languages; unsupported langs still raise.
+    _avail(monkeypatch, "provider_adapters.tts.CloudflareTTS.available", True)
+    assert CloudflareTTS().voices_for("zh-Hans") == ["zh"]
+    assert CloudflareTTS().voices_for("ja") == ["jp"]  # ja -> MeloTTS 'jp'
+    with pytest.raises(ProviderUnavailable):
+        CloudflareTTS().voices_for("pt-BR")  # unsupported by MeloTTS
+
+
+def test_cf_mt_auto_source_fails_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CodeX round-2 P1: m2m100 needs an explicit source; "auto" (no hint + CF ASR) must
+    # fail clean (clear error), not hit the API and 400. Detection backfill is T1.3f.
+    _avail(monkeypatch, "provider_adapters.mt.CloudflareMT.available", True)
+    with pytest.raises(ProviderUnavailable, match="explicit source language"):
+        CloudflareMT().translate(["hello"], "auto", "en")
