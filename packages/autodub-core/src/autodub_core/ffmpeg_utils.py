@@ -114,7 +114,17 @@ def probe_duration_ms(path: str | Path) -> int:
         *_FFPROBE_BASE, "-show_entries", "format=duration",
         "-of", "json", *_PROTOCOL_WHITELIST, str(path),
     ])
-    dur = float(json.loads(out)["format"]["duration"])
+    # Malformed ffprobe output (empty/garbled JSON, a missing format/duration key,
+    # or a non-numeric duration like "N/A"/null) must surface as FfmpegError, not a
+    # bare KeyError/JSONDecodeError, so callers see one error type. JSONDecodeError
+    # is a ValueError subclass; TypeError covers a non-dict payload (e.g. "[]") and a
+    # null duration. Carry the raw stdout snippet for diagnosis.
+    try:
+        dur = float(json.loads(out)["format"]["duration"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise FfmpegError(
+            f"could not read duration from ffprobe output ({exc}); stdout was: {out[:500]!r}"
+        ) from exc
     return int(round(dur * 1000))
 
 
@@ -209,6 +219,18 @@ def stitch_timeline(
                 out.writeframes(_silence_frames(start_ms - head_ms, sampwidth, channels, rate))
                 head_ms = start_ms
             with wave.open(str(seg_path), "rb") as w:
+                params = (w.getnchannels(), w.getsampwidth(), w.getframerate())
+                if params != (channels, sampwidth, rate):
+                    # A segment that bypassed to_canonical_wav (e.g. 16kHz or stereo)
+                    # would be spliced in raw and silently corrupt this span's
+                    # pitch/tempo with no error. Refuse it; atomic_output discards the
+                    # partial composed track. The pipeline always normalizes first, so
+                    # this is a defensive assertion, not an expected path.
+                    raise FfmpegError(
+                        f"stitch input {seg_path} is not canonical: (channels, sampwidth, "
+                        f"rate)={params}, expected {(channels, sampwidth, rate)}; all segments "
+                        "must be normalized through to_canonical_wav before stitching."
+                    )
                 data = w.readframes(w.getnframes())
                 out.writeframes(data)
             head_ms += wav_duration_ms(seg_path)
