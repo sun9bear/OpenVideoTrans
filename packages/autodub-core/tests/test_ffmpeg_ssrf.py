@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 from autodub_core import JobPaths, stages
 from autodub_core import ffmpeg_utils as ff
+from autodub_core.jsonio import write_json
+from ovt_schemas.contracts import TranslationResult
 
 
 # --------------------------------------------------------------------------- #
@@ -185,3 +187,33 @@ def test_ingest_refuses_disguised_playlist_source(
     with pytest.raises(ff.FfmpegError, match="SSRF guard"):
         stages.ingest(paths, str(staged))
     assert not paths.original_audio.exists()
+
+
+def test_ingest_cache_return_revalidates_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a pre-staged/cached job (video + audio present) whose source is a disguised
+    # playlist must be refused on the non-force cache hit, never fed unvalidated
+    # into transcribe/translate (CodeX R4).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    paths.original_audio.write_bytes(b"wav")  # both present -> cache-return path
+    monkeypatch.setattr(stages.ff, "assert_ffmpeg", lambda: None)
+    monkeypatch.setattr(stages.ff, "probe_format_name", lambda p: "hls,applehttp")  # noqa: ARG005
+    with pytest.raises(ff.FfmpegError, match="SSRF guard"):
+        stages.ingest(paths, str(paths.video / "original.mp4"))
+
+
+def test_mux_validates_source_before_probing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # mux is exported and may run on a pre-staged job that bypassed ingest's
+    # allowlist — it must validate the source container before probing/muxing (CodeX R4).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    write_json(paths.segments, TranslationResult(
+        source_language="en", target_language="zh", mt_provider="m", segments=[]).model_dump())
+    monkeypatch.setattr(stages.ff, "assert_ffmpeg", lambda: None)
+    monkeypatch.setattr(stages.ff, "probe_format_name", lambda p: "concat")  # noqa: ARG005
+    with pytest.raises(ff.FfmpegError, match="SSRF guard"):
+        stages.mux(paths, output_mode="dub_only")

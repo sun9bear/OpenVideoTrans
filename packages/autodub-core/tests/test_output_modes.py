@@ -37,6 +37,7 @@ def _write_segments(paths: JobPaths, pairs: list[tuple[str, str]]) -> None:
 
 def _mock_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(stages.ff, "assert_ffmpeg", lambda: None)
+    monkeypatch.setattr(stages.ff, "assert_allowed_input_format", lambda v: None)  # noqa: ARG005
     monkeypatch.setattr(stages.ff, "probe_duration_ms", lambda p: 1000)  # noqa: ARG005
     monkeypatch.setattr(stages.ff, "stitch_timeline",
                         lambda placements, out, total: Path(out).write_bytes(b"a"))  # noqa: ARG005

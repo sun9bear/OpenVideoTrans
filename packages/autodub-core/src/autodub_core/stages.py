@@ -54,6 +54,11 @@ def ingest(paths: JobPaths, source: str, force: bool = False) -> None:
     paths.ensure()
     existing = paths.original_video()
     if existing and paths.original_audio.exists() and not force:
+        # Validate even the cached original: a worker pre-stage, or an interrupted /
+        # rejected prior run, could have left a disallowed source here, and a cache hit
+        # must never feed an unvalidated source into transcribe/translate (CodeX R4).
+        ff.assert_ffmpeg()
+        ff.assert_allowed_input_format(existing)
         _log(f"ingest: cached ({existing.name})")
         return
 
@@ -91,13 +96,14 @@ def ingest(paths: JobPaths, source: str, force: bool = False) -> None:
     if not video:
         raise RuntimeError("ingest produced no video/original.* file")
     ff.assert_ffmpeg()
-    # SSRF guard (T1.3c): refuse a source whose real container is a playlist /
-    # concat / network demuxer disguised as media, before ffmpeg ever opens it.
-    ff.assert_allowed_input_format(video)
-    # Drop any prior audio BEFORE extracting: extract_audio only replaces on
-    # success, so a failed re-extract would otherwise leave the old audio paired
-    # with the freshly-staged video on a later non-force retry.
+    # Drop any prior audio BEFORE validating/extracting: a rejected or failed source
+    # must not leave stale audio that a later non-force run would pair with it (the
+    # cache return above keys on original_audio existing) — extract_audio also only
+    # replaces on success (CodeX R4 + T1.3c).
     paths.original_audio.unlink(missing_ok=True)
+    # SSRF guard (T1.3c): refuse a source whose real container is a playlist / concat /
+    # network demuxer disguised as media, before ffmpeg extracts audio from it.
+    ff.assert_allowed_input_format(video)
     ff.extract_audio(video, paths.original_audio, sr=16000, mono=True)
     _log(f"ingest: extracted audio -> {paths.original_audio.name}")
 
@@ -443,6 +449,10 @@ def mux(
         if not video:
             raise RuntimeError("mux: no original video")
         ff.assert_ffmpeg()
+        # mux is exported and may run on a pre-staged / resumed job that bypassed
+        # ingest's allowlist — validate the source at THIS ffmpeg boundary too, so a
+        # crafted video/original.* can never be parsed by ffprobe/ffmpeg here (CodeX R4).
+        ff.assert_allowed_input_format(video)
         total_ms = ff.probe_duration_ms(video)
         placements = [(s.start_ms, paths.tts_aligned(s.index))
                       for s in result.segments if paths.tts_aligned(s.index).exists()]
