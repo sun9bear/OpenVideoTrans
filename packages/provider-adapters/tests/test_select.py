@@ -10,6 +10,7 @@ real keys/binaries (CI has neither).
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import provider_adapters
@@ -211,3 +212,27 @@ def test_empty_asr_output_yields_no_lines() -> None:
     assert asr._parse({"language": "english", "segments": [], "words": []}, None).lines == []
     one = asr._parse({"language": "english", "text": "hello"}, None)  # text but no timings
     assert len(one.lines) == 1 and one.lines[0].source_text == "hello"
+
+
+def test_cf_asr_no_speech_yields_no_words(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # @CodeX bot P2: CloudflareASR must not fabricate a blank Word for no-speech (no words +
+    # empty text) — _run_one returns [] so the transcript has no lines (kernel skips MT).
+    class _Resp:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {"result": {"words": [], "text": "  "}}
+
+    class _FakeRequests:
+        @staticmethod
+        def post(*_a: object, **_k: object) -> _Resp:
+            return _Resp()
+
+    monkeypatch.setitem(sys.modules, "requests", _FakeRequests)  # type: ignore[arg-type]
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "tok")
+    audio = tmp_path / "silence.wav"
+    audio.write_bytes(b"\x00\x10")
+    assert CloudflareASR()._run_one(str(audio)) == []

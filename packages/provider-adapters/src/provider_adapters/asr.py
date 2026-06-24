@@ -296,6 +296,11 @@ class CloudflareASR(ASRProvider):
             ]
         # no words[]: one pseudo-word spanning the chunk text (duration via stdlib wave)
         text = str(result.get("text", "")).strip()
+        if not text:
+            # no words AND no text -> no speech: return [] so transcribe() builds an empty
+            # transcript and the kernel skips MT, instead of fabricating a blank Word that
+            # would yield a non-empty line (matches the OpenAI/Groq parse path — @CodeX).
+            return []
         return [Word(text=text, start_ms=0, end_ms=_wav_duration_ms(chunk_path))]
 
 
