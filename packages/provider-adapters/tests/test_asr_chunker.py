@@ -203,6 +203,17 @@ def test_openai_compat_chunked_preserves_segment_only_text(tmp_path: Path, monke
     assert [ln.index for ln in tr.lines] == [0, 1, 2]  # re-indexed globally
 
 
+def test_openai_negotiates_supported_codec_not_opus() -> None:
+    # @CodeX bot P2: OpenAI's STT API rejects ogg/opus + flac, so OpenAI ASR must negotiate a
+    # codec it accepts (mp3), NOT inherit Groq's opus-first list (which uploads a rejected .ogg).
+    from provider_adapters.asr import GroqASR, OpenAIASR
+
+    assert ck.negotiate_codec(OpenAIASR().audio) == "mp3"
+    assert ck.negotiate_codec(GroqASR().audio) == "opus"  # Groq still gets the compact Opus
+    assert "opus" not in OpenAIASR().audio.accepted_formats
+    assert "flac" not in OpenAIASR().audio.accepted_formats
+
+
 def test_cloudflare_over_duration_chunks_and_merges(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     # 超限切块合并: 15 min audio with a 5 min CF cap -> 3 chunks, offset-merged into one timeline.
     from provider_adapters.asr import CloudflareASR

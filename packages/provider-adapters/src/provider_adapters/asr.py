@@ -173,8 +173,9 @@ class _OpenAICompatASR(ASRProvider):
     key_env = ""
     model_env = ""
     default_model = ""
-    # Both Groq and OpenAI whisper ingest Opus(ogg)/FLAC, so compress-first negotiates Opus
+    # Default (Groq) codec list: Groq ingests Opus(ogg)/FLAC, so compress-first negotiates Opus
     # (the smallest); ~25 MB request cap triggers chunk + offset-merge on long audio (T1.3e).
+    # OpenAIASR overrides this — OpenAI's STT API rejects ogg/flac (see its own ``audio``).
     audio = AudioConstraints(("opus", "flac", "mp3", "wav"), max_bytes=_OPENAI_COMPAT_MAX_BYTES)
 
     def _key(self) -> str | None:
@@ -299,6 +300,10 @@ class OpenAIASR(_OpenAICompatASR):
     # verbose_json + word timestamp_granularities are only supported on whisper-1; do
     # NOT override with a gpt-4o-*-transcribe model (they reject verbose_json -> HTTP 400).
     default_model = "whisper-1"
+    # OpenAI's STT API ingests mp3/mp4/mpeg/mpga/m4a/wav/webm — NOT ogg/opus or flac. Override
+    # the shared (Groq) Opus-first list so compress-first negotiates MP3, not a .ogg OpenAI
+    # rejects with HTTP 400 (@CodeX bot P2). Paid + opt-in only; never auto-selected.
+    audio = AudioConstraints(("mp3", "wav"), max_bytes=_OPENAI_COMPAT_MAX_BYTES)
 
 
 # --------------------------------------------------------------------------- #
