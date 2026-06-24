@@ -19,11 +19,27 @@ from pathlib import Path
 
 from ovt_schemas.contracts import Transcript, TranscriptLine, Word
 
+from . import asr_chunker as chunker
 from ._env import env
+from .asr_chunker import AudioConstraints
 from .base import ASRProvider, ProviderInfo, ProviderUnavailable, has_module, register
 
 _LINE_GAP_MS = 700  # silence gap that starts a new transcript line when grouping words
 _MAX_LINE_MS = 12000
+
+# Cloud ASR request cap + the audio codecs each API ingests (T1.3e format negotiation).
+# The byte cap is the providers' documented free-tier file-size limit; Cloudflare whisper is
+# duration-limited (env-tunable) so long audio is chunked. accepted_formats are codec keys
+# (asr_chunker._ENCODERS): Groq/OpenAI accept Opus(ogg)/FLAC, Cloudflare gets MP3 (no Opus).
+_OPENAI_COMPAT_MAX_BYTES = 24_000_000  # groq/openai free file cap (~25 MB, with headroom)
+
+_MIME_BY_EXT = {
+    ".ogg": "audio/ogg", ".flac": "audio/flac", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+}
+
+
+def _mime_for(path: str) -> str:
+    return _MIME_BY_EXT.get(Path(path).suffix.lower(), "application/octet-stream")
 
 
 def _wav_duration_ms(path: str) -> int:
@@ -157,6 +173,9 @@ class _OpenAICompatASR(ASRProvider):
     key_env = ""
     model_env = ""
     default_model = ""
+    # Both Groq and OpenAI whisper ingest Opus(ogg)/FLAC, so compress-first negotiates Opus
+    # (the smallest); ~25 MB request cap triggers chunk + offset-merge on long audio (T1.3e).
+    audio = AudioConstraints(("opus", "flac", "mp3", "wav"), max_bytes=_OPENAI_COMPAT_MAX_BYTES)
 
     def _key(self) -> str | None:
         return env(self.key_env)
@@ -166,11 +185,30 @@ class _OpenAICompatASR(ASRProvider):
 
     def transcribe(self, audio_path: str, source_lang: str | None) -> Transcript:
         self._ensure_available()
+        # compress-first; ship one request if the compressed whole fits, else chunk by time
+        # and offset-merge the per-chunk words into one timeline (T1.3e).
+        work = str(Path(audio_path).parent / "_asr")
+        compressed, total_ms = chunker.compress(audio_path, self.audio, work)
+        if chunker.within_limits(compressed, total_ms, self.audio):
+            return self._parse(self._request_json(compressed, source_lang), source_lang)
+        whole_bytes = Path(compressed).stat().st_size
+        words = chunker.chunked_words(
+            lambda p, _d: self._words_from_json(self._request_json(p, source_lang)),
+            audio_path, self.audio, total_ms, whole_bytes, work,
+        )
+        total = words[-1].end_ms if words else total_ms
+        # Detected-language backfill needs the whole-file response; the chunked path keeps the
+        # caller's normalized hint (or "auto"). Full source-lang detection backfill is T1.3f.
+        return Transcript(
+            source_language=_iso639(source_lang) or "auto",
+            lines=_group_words_into_lines(words, "", total), asr_provider=self.info.name,
+        )
+
+    def _request_json(self, audio_path: str, source_lang: str | None) -> dict:
         import requests  # lazy
 
-        model = env(self.model_env, self.default_model)
         data = {
-            "model": model,
+            "model": env(self.model_env, self.default_model),
             "response_format": "verbose_json",
             "timestamp_granularities[]": ["segment", "word"],
         }
@@ -178,7 +216,7 @@ class _OpenAICompatASR(ASRProvider):
         if norm_lang:
             data["language"] = norm_lang
         with open(audio_path, "rb") as fh:
-            files = {"file": (Path(audio_path).name, fh, "audio/wav")}
+            files = {"file": (Path(audio_path).name, fh, _mime_for(audio_path))}
             resp = requests.post(
                 f"{self.base_url}/audio/transcriptions",
                 headers={"Authorization": f"Bearer {self._key()}"},
@@ -188,15 +226,18 @@ class _OpenAICompatASR(ASRProvider):
             raise ProviderUnavailable(
                 f"{self.info.name} ASR HTTP {resp.status_code}: {resp.text[:500]}"
             )
-        return self._parse(resp.json(), source_lang)
+        return resp.json()
 
-    def _parse(self, j: dict, source_lang: str | None) -> Transcript:
-        words_raw = j.get("words") or []
-        words = [
+    @staticmethod
+    def _words_from_json(j: dict) -> list[Word]:
+        return [
             Word(text=str(w.get("word", "")).strip(),
                  start_ms=int(float(w["start"]) * 1000), end_ms=int(float(w["end"]) * 1000))
-            for w in words_raw if "start" in w and "end" in w
+            for w in (j.get("words") or []) if "start" in w and "end" in w
         ]
+
+    def _parse(self, j: dict, source_lang: str | None) -> Transcript:
+        words = self._words_from_json(j)
         lines: list[TranscriptLine] = []
         for seg in j.get("segments") or []:
             s_ms, e_ms = int(float(seg["start"]) * 1000), int(float(seg["end"]) * 1000)
@@ -252,8 +293,15 @@ class CloudflareASR(ASRProvider):
         "cloudflare", "asr", paid=False,
         requires="CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (free 10k neurons/day)",
         languages="multilingual",
-        notes="@cf/openai/whisper; word timestamps. Long-audio chunking lands in T1.3e.",
+        notes="@cf/openai/whisper; word timestamps. Long audio is compressed + chunked (T1.3e).",
     )
+
+    @property
+    def audio(self) -> AudioConstraints:
+        # CF whisper is duration-limited; chunk audio longer than the (env-tunable) cap.
+        # MP3 only — do NOT assume CF ingests Opus; compress-first picks the smallest it accepts.
+        secs = env("FVD_CF_ASR_MAX_SECONDS", "300") or "300"
+        return AudioConstraints(("mp3", "wav"), max_duration_ms=int(float(secs) * 1000))
 
     def available(self) -> bool:
         return bool(
@@ -264,16 +312,24 @@ class CloudflareASR(ASRProvider):
 
     def transcribe(self, audio_path: str, source_lang: str | None) -> Transcript:
         self._ensure_available()
-        # Single request (no chunking yet — asr_chunker is T1.3e). Long inputs may be
-        # rejected by the model's size limit until then.
-        words = self._run_one(audio_path)
-        total = words[-1].end_ms if words else 0
+        # compress-first; one request if within the duration cap, else chunk + offset-merge.
+        work = str(Path(audio_path).parent / "_asr")
+        constraints = self.audio
+        compressed, total_ms = chunker.compress(audio_path, constraints, work)
+        if chunker.within_limits(compressed, total_ms, constraints):
+            words = self._run_one(compressed, total_ms)
+        else:
+            whole_bytes = Path(compressed).stat().st_size
+            words = chunker.chunked_words(
+                self._run_one, audio_path, constraints, total_ms, whole_bytes, work
+            )
+        total = words[-1].end_ms if words else total_ms
         lines = _group_words_into_lines(words, "", total)
         return Transcript(
             source_language=source_lang or "auto", lines=lines, asr_provider="cloudflare"
         )
 
-    def _run_one(self, chunk_path: str) -> list[Word]:
+    def _run_one(self, chunk_path: str, duration_hint_ms: int = 0) -> list[Word]:
         import requests  # lazy
 
         acct, token = env("CLOUDFLARE_ACCOUNT_ID"), env("CLOUDFLARE_API_TOKEN")
@@ -294,14 +350,17 @@ class CloudflareASR(ASRProvider):
                      start_ms=int(float(w["start"]) * 1000), end_ms=int(float(w["end"]) * 1000))
                 for w in words
             ]
-        # no words[]: one pseudo-word spanning the chunk text (duration via stdlib wave)
+        # no words[]: one pseudo-word spanning the chunk text. Duration via stdlib wave when
+        # the chunk is a wav; for a compressed/chunked input fall back to the chunk's known
+        # span (duration_hint_ms) so the line isn't collapsed to [0, 0].
         text = str(result.get("text", "")).strip()
         if not text:
             # no words AND no text -> no speech: return [] so transcribe() builds an empty
             # transcript and the kernel skips MT, instead of fabricating a blank Word that
             # would yield a non-empty line (matches the OpenAI/Groq parse path — @CodeX).
             return []
-        return [Word(text=text, start_ms=0, end_ms=_wav_duration_ms(chunk_path))]
+        span = _wav_duration_ms(chunk_path) or duration_hint_ms
+        return [Word(text=text, start_ms=0, end_ms=span)]
 
 
 def register_all() -> None:
