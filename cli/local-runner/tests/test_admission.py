@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 from local_runner.admission import admit
-from provider_adapters import LanguageError, ProviderUnavailable
+from provider_adapters import LanguageError, ProviderUnavailable, SupplyChainError, sha256_file
 
 
 class _FakeResolver:
@@ -62,3 +62,19 @@ def test_source_hint_is_resolved() -> None:
     adm = admit(target_lang="es", output_mode="subtitle_only", resolver=_FakeResolver(set()),
                 source_hint="pt-BR")
     assert adm.source_lang == "pt-BR"
+
+
+def test_dub_piper_enforces_supply_chain_pin_in_run_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch  # noqa: ANN001
+) -> None:
+    # @CodeX CLI P1: choosing piper for a dub must verify its .onnx pin HERE (the run path), not
+    # only in `doctor` — an unpinned / hash-mismatched model fails closed before synthesis.
+    model = tmp_path / "voice.onnx"
+    model.write_bytes(b"\x00piper")
+    monkeypatch.setenv("FVD_PIPER_MODEL", str(model))
+    monkeypatch.setenv("FVD_PIPER_MODEL_SHA256", "a" * 64)  # wrong pin -> tampered/mismatch
+    with pytest.raises(SupplyChainError, match="sha256 mismatch"):
+        admit(target_lang="es", output_mode="dub_only", resolver=_FakeResolver({"piper"}))
+    monkeypatch.setenv("FVD_PIPER_MODEL_SHA256", sha256_file(str(model)))  # correct pin
+    adm = admit(target_lang="es", output_mode="dub_only", resolver=_FakeResolver({"piper"}))
+    assert adm.tts_provider == "piper"

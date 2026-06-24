@@ -15,6 +15,7 @@ is where the fail-closed checks that provider-adapters only *exposes* actually f
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from provider_adapters import (
@@ -22,6 +23,7 @@ from provider_adapters import (
     ProviderUnavailable,
     assert_language_pair,
     resolve_source_language,
+    verify_piper_model,
 )
 
 # Commercial-safe TTS for a DEFAULT dub (mirrors provider_adapters.languages._COMMERCIAL_SAFE_TTS):
@@ -64,6 +66,15 @@ def admit(
             resolver.select("tts", name, allow_paid=False)  # type: ignore[attr-defined]
         except ProviderUnavailable:
             continue  # vetted for this locale but not configured on this host — try the next
+        if name == "piper":
+            # T1.3g supply-chain: a default dub must use a PINNED piper .onnx. Enforce the hash in
+            # the RUN path here (not only in `doctor`), so an unpinned / tampered model fails closed
+            # before synthesis (@CodeX CLI). The real Resolver marks piper available only when
+            # FVD_PIPER_MODEL is set, so this fires on every real run; a fake/test resolver that
+            # vouches availability with no model env is trusted (nothing on disk to verify).
+            model = os.getenv("FVD_PIPER_MODEL")
+            if model:
+                verify_piper_model(model)  # raises SupplyChainError on unpinned / hash mismatch
         return Admission(source_lang=source_lang, tts_provider=name)
     raise LanguageError(
         "no_tts_model_for_language",

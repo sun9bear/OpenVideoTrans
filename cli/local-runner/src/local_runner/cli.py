@@ -11,16 +11,31 @@ reports provider availability and the supply-chain pin/license status.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
 from collections.abc import Sequence
 
-from provider_adapters import LanguageError, ProviderUnavailable
+from autodub_core.ffmpeg_utils import FfmpegError
+from provider_adapters import (
+    LanguageError,
+    PaidProviderBlocked,
+    ProviderUnavailable,
+    SupplyChainError,
+)
 
 from .doctor import run_doctor
 from .ingest import IngestError
 from .runner import run_job
 
 _OUTPUT_MODES = ("subtitle_only", "dub_only", "both")
+
+
+def _default_out_dir() -> str:
+    """A UNIQUE job directory per run. The kernel caches stages by artifact existence (not keyed
+    by source/target), so a shared default dir would let a second run return the first run's
+    output (@CodeX). A timestamp + random suffix keeps each run isolated; pass --out to resume."""
+    return os.path.join("ovt_job", f"{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(3).hex()}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -30,7 +45,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="translate / dub a local file or URL to marked mp4 + srt")
     run.add_argument("source", help="a local media file path, or an http(s):// URL")
     run.add_argument("-t", "--target-lang", required=True, help="target BCP-47 locale (zh-Hans)")
-    run.add_argument("-o", "--out", default="./ovt_job", help="job output directory")
+    run.add_argument("-o", "--out", default=None,
+                     help="job output directory (default: a unique ovt_job/<timestamp> dir)")
     run.add_argument("--output-mode", default="both", choices=_OUTPUT_MODES)
     run.add_argument("--subtitle-lang", default="target", choices=("target", "bilingual"))
     run.add_argument("--subtitle-delivery", default="srt", choices=("srt", "burned", "both"))
@@ -51,7 +67,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = run_job(
             source=args.source,
             target_lang=args.target_lang,
-            out_dir=args.out,
+            out_dir=args.out or _default_out_dir(),
             output_mode=args.output_mode,
             subtitle_lang=args.subtitle_lang,
             subtitle_delivery=args.subtitle_delivery,
@@ -60,10 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             mt=args.mt,
             separate=args.separate,
         )
-    except LanguageError as exc:  # fail-closed admission: a clear, coded message
-        print(f"refused [{exc.code}]: {exc}", file=sys.stderr)
+    except (LanguageError, PaidProviderBlocked) as exc:  # fail-closed REFUSAL (policy), exit 2
+        code = getattr(exc, "code", "paid_provider_blocked")
+        print(f"refused [{code}]: {exc}", file=sys.stderr)
         return 2
-    except (IngestError, ProviderUnavailable, NotImplementedError, FileNotFoundError) as exc:
+    except (IngestError, ProviderUnavailable, SupplyChainError, FfmpegError,
+            NotImplementedError, FileNotFoundError) as exc:  # expected operational ERROR, exit 1
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"done [{result.admission.tts_provider or 'subtitle-only'}]: {result.primary}")

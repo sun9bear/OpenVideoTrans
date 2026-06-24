@@ -46,18 +46,37 @@ def fetch_source(source: str, work_dir: Path) -> Path:
 def _fetch_url(url: str, work_dir: Path) -> Path:
     if shutil.which("yt-dlp") is None:
         raise IngestError("URL ingest needs yt-dlp; install it (pip install 'local-runner[url]')")
-    work_dir.mkdir(parents=True, exist_ok=True)
-    out_tmpl = str(work_dir / "download.%(ext)s")
+    # A dedicated, FRESH download dir (not paths.video, which the kernel fills with original.*),
+    # cleared each run so neither a prior run's file nor a merge intermediate can be mis-picked
+    # (@CodeX). --merge-output-format gives a single final container.
+    dl_dir = work_dir / "_download"
+    if dl_dir.exists():
+        shutil.rmtree(dl_dir)
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    out_tmpl = str(dl_dir / "media.%(ext)s")
     # --no-playlist: never fan a playlist URL into many downloads (abuse + surprise). Single item.
+    # --print after_move:filepath: yt-dlp reports the EXACT final (post-merge) file — no globbing.
     proc = subprocess.run(
         ["yt-dlp", "--no-playlist", "--no-warnings", "--no-progress",
-         "-f", "bv*+ba/b", "-o", out_tmpl, url],
+         "-f", "bv*+ba/b", "--merge-output-format", "mp4",
+         "--print", "after_move:filepath", "-o", out_tmpl, url],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0:
         raise IngestError(f"yt-dlp failed: {proc.stderr[-400:]}")
-    downloaded = next(iter(sorted(work_dir.glob("download.*"))), None)
-    if downloaded is None:
-        raise IngestError("yt-dlp produced no output file")
-    ff.assert_allowed_input_format(downloaded)  # T1.3c allowlist on the fetched media
-    return downloaded
+    printed = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    final = Path(printed[-1]) if printed and Path(printed[-1]).exists() else _pick_merged(dl_dir)
+    if final is None or not final.exists():
+        raise IngestError("yt-dlp produced no usable output file")
+    ff.assert_allowed_input_format(final)  # T1.3c allowlist on the fetched media
+    return final
+
+
+# Merge intermediates are named ``media.f137.mp4`` / ``media.f140.m4a``; the merged deliverable
+# has no embedded format id (``media.mp4``). Exclude the intermediates when falling back to a glob.
+_INTERMEDIATE = re.compile(r"^media\.f\d+\.")
+
+
+def _pick_merged(dl_dir: Path) -> Path | None:
+    cands = [p for p in sorted(dl_dir.glob("media.*")) if not _INTERMEDIATE.match(p.name)]
+    return cands[-1] if cands else None

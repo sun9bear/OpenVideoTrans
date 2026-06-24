@@ -31,3 +31,14 @@ def test_url_without_yt_dlp_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(ingest.shutil, "which", lambda _name: None)  # yt-dlp absent
     with pytest.raises(IngestError, match="needs yt-dlp"):
         fetch_source("https://example.com/v.mp4", tmp_path / "work")
+
+
+def test_pick_merged_excludes_merge_intermediates(tmp_path: Path) -> None:
+    # @CodeX review P2: bv*+ba/b leaves video-only/audio-only intermediates (media.fNNN.*); the
+    # picker must select the MERGED deliverable (media.mp4), not a sort-first intermediate.
+    dl = tmp_path / "dl"
+    dl.mkdir()
+    (dl / "media.f137.mp4").write_bytes(b"v")  # video-only intermediate (sorts first)
+    (dl / "media.f140.m4a").write_bytes(b"a")  # audio-only intermediate
+    (dl / "media.mp4").write_bytes(b"final")  # the merged deliverable
+    assert ingest._pick_merged(dl).name == "media.mp4"
