@@ -42,7 +42,9 @@ def run_doctor(out: Callable[[str], None] = print) -> int:
         try:
             ref = verify_piper_model(model)
             out(f"  piper model pin: OK ({(ref.sha256 or '')[:12]}…)")
-        except SupplyChainError as exc:
+        except (SupplyChainError, OSError) as exc:
+            # OSError/FileNotFoundError: a stale FVD_PIPER_MODEL pointing at a moved/deleted file
+            # must be REPORTED as a failed pin, not crash doctor (@CodeX CLI).
             ok = False
             out(f"  piper model pin: FAIL — {exc}")
     else:

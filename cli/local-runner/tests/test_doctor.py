@@ -40,3 +40,15 @@ def test_doctor_fails_on_a_bad_piper_pin(tmp_path: Path, monkeypatch: pytest.Mon
     lines: list[str] = []
     assert run_doctor(out=lines.append) == 1  # doctor reports a non-zero rc on a failed pin
     assert any("piper model pin: FAIL" in ln for ln in lines)
+
+
+def test_doctor_reports_stale_piper_path_not_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # @CodeX CLI P2: FVD_PIPER_MODEL pointing at a moved/deleted file makes verify_piper_model
+    # raise OSError, not SupplyChainError; doctor must REPORT a failed pin, not crash.
+    monkeypatch.setenv("FVD_PIPER_MODEL", str(tmp_path / "gone.onnx"))  # does not exist
+    monkeypatch.setenv("FVD_PIPER_MODEL_SHA256", "a" * 64)
+    lines: list[str] = []
+    assert run_doctor(out=lines.append) == 1
+    assert any("piper model pin: FAIL" in ln for ln in lines)

@@ -42,10 +42,17 @@ def run_job(
     """Run one job end-to-end and return the primary deliverable path. Raises ``LanguageError``
     (fail-closed admission) / ``IngestError`` / ``ProviderUnavailable`` on failure."""
     resolver = resolver if resolver is not None else Resolver()
-    # Admission BEFORE any fetch/transcode: fail closed on an unsupported pair or a dub with no
-    # commercial-safe voice, so we never download/encode for a job that can't be delivered.
+    # Normalize the source hint: a blank or literal "auto" means "no hint" — forwarding "auto"
+    # would be taken by ASR as a language code and by MT over the detected language, disabling the
+    # intended detection backfill (@CodeX CLI).
+    hint = source_hint.strip() if source_hint else ""
+    clean_hint = None if hint.lower() in ("", "auto") else hint
+    # Admission BEFORE any fetch/transcode: fail closed on an unsupported pair, a forced paid/
+    # unconfigured ASR/MT, or a dub with no commercial-safe voice — never download/encode for a
+    # job that can't be delivered.
     adm = admit(
-        target_lang=target_lang, output_mode=output_mode, resolver=resolver, source_hint=source_hint
+        target_lang=target_lang, output_mode=output_mode, resolver=resolver,
+        source_hint=clean_hint, asr=asr, mt=mt,
     )
     paths = JobPaths(out_dir).ensure()
     local_source = fetch_source(source, paths.video)
@@ -54,7 +61,7 @@ def run_job(
         resolver,  # type: ignore[arg-type] - structural Resolver (kernel depends on the Protocol)
         source=str(local_source),
         target_lang=target_lang,
-        source_lang=source_hint,  # the raw hint; ASR detects + backfills when absent
+        source_lang=clean_hint,  # normalized hint (None lets ASR detect + backfill)
         output_mode=output_mode,
         subtitle_lang=subtitle_lang,
         subtitle_delivery=subtitle_delivery,

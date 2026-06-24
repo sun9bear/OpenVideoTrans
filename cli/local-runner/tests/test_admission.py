@@ -5,7 +5,14 @@ from __future__ import annotations
 
 import pytest
 from local_runner.admission import admit
-from provider_adapters import LanguageError, ProviderUnavailable, SupplyChainError, sha256_file
+from provider_adapters import (
+    LanguageError,
+    PaidProviderBlocked,
+    ProviderUnavailable,
+    Resolver,
+    SupplyChainError,
+    sha256_file,
+)
 
 
 class _FakeResolver:
@@ -78,3 +85,12 @@ def test_dub_piper_enforces_supply_chain_pin_in_run_path(
     monkeypatch.setenv("FVD_PIPER_MODEL_SHA256", sha256_file(str(model)))  # correct pin
     adm = admit(target_lang="es", output_mode="dub_only", resolver=_FakeResolver({"piper"}))
     assert adm.tts_provider == "piper"
+
+
+def test_forced_paid_asr_refused_at_admission_before_fetch() -> None:
+    # @CodeX CLI P2: a forced paid ASR/MT must be refused at admission (before any fetch/ingest),
+    # not deep inside run_pipeline after a download. The real Resolver's select fires the block.
+    with pytest.raises(PaidProviderBlocked):
+        admit(target_lang="es", output_mode="subtitle_only", resolver=Resolver(), asr="openai")
+    with pytest.raises(PaidProviderBlocked):
+        admit(target_lang="es", output_mode="subtitle_only", resolver=Resolver(), mt="deepseek")

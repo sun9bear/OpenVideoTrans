@@ -47,14 +47,23 @@ def admit(
     output_mode: str,
     resolver: object,
     source_hint: str | None = None,
+    asr: str | None = None,
+    mt: str | None = None,
 ) -> Admission:
     """Validate a job's language pair and choose its dub TTS provider. ``resolver`` is anything
     with a ``select(kind, requested, allow_paid)`` method (the provider-adapters ``Resolver``).
 
-    Raises ``LanguageError`` (fail-closed) on an unsupported pair, or when a dub is requested but
-    no commercial-safe TTS voice is configured."""
+    Raises ``LanguageError`` (fail-closed) on an unsupported pair, ``PaidProviderBlocked`` /
+    ``ProviderUnavailable`` on a forced paid/unconfigured ASR/MT, or ``LanguageError`` when a dub
+    is requested but no commercial-safe TTS voice is configured."""
     cap = assert_language_pair(source_hint, target_lang, output_mode)  # T1.3f capability gate
     source_lang = resolve_source_language(source_hint)
+    # Preflight an explicitly-requested ASR/MT BEFORE any fetch/transcode, so a forced paid name
+    # (--asr openai) is refused immediately with PaidProviderBlocked rather than after a URL
+    # download + ffmpeg ingest (@CodeX CLI). The $0 auto ladder (None) is validated at run time.
+    for kind, requested in (("asr", asr), ("mt", mt)):
+        if requested:
+            resolver.select(kind, requested, allow_paid=False)  # type: ignore[attr-defined]
     if output_mode not in _DUB_MODES:
         return Admission(source_lang=source_lang, tts_provider=None)
     # Dub: choose the first commercial-safe provider the registry vets for this locale AND that is
