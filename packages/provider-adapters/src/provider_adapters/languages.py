@@ -29,6 +29,12 @@ _DUB_MODES = ("dub_only", "both")
 _SUBTITLE_MODES = ("subtitle_only", "both")
 _OUTPUT_MODES = ("subtitle_only", "dub_only", "both")
 
+# Commercial-safe TTS providers for a DEFAULT dub output: piper (per-model license-checked,
+# T1.3g) + Cloudflare MeloTTS. edge_tts is kept in the non-commercial *experimental* lane and is
+# NOT a default dub output (plan "目标语言按 output_mode 分层" / AD-6), so a locale whose only
+# voice is edge_tts fails closed for dub with ``no_tts_model_for_language`` (@CodeX bot).
+_COMMERCIAL_SAFE_TTS = frozenset({"piper", "cloudflare"})
+
 
 class LanguageError(RuntimeError):
     """A language pair / capability gate failed closed. ``code`` is the schema ``ErrorCode``
@@ -57,10 +63,11 @@ def _cap(
     )
 
 
-# Curated Tier-1 target locales. ``tts_models`` lists the FREE providers that cover the
-# locale (piper local / edge_tts keyless / cloudflare MeloTTS — the latter only en/es/fr/zh/ja/ko).
-# Esperanto is the deliberate subtitle-only case: LLM MT translates it, but no free TTS voice
-# ships → a dub job for it fails closed with ``no_tts_model_for_language``.
+# Curated Tier-1 target locales. ``tts_models`` lists the free voices that cover the locale
+# (piper local / cloudflare MeloTTS — commercial-safe; edge_tts — experimental, non-commercial).
+# ``tts_supported`` = a COMMERCIAL-SAFE dub voice exists (the dub gate enforces this; edge_tts-only
+# locales report False). hi/ar (edge_tts only) and Esperanto (no voice) are subtitle-only: a dub
+# job for them fails closed with ``no_tts_model_for_language`` until a vetted piper/CF voice lands.
 CAPABILITIES: LanguageCapabilities = {
     "en": _cap(models=("piper", "edge_tts", "cloudflare"), tier="high",
                voice="en-US-AriaNeural"),
@@ -78,8 +85,11 @@ CAPABILITIES: LanguageCapabilities = {
     "pt-BR": _cap(models=("edge_tts", "piper"), voice="pt-BR-FranciscaNeural"),
     "ru": _cap(models=("edge_tts", "piper"), voice="ru-RU-SvetlanaNeural"),
     "it": _cap(models=("edge_tts", "piper"), voice="it-IT-ElsaNeural"),
-    "hi": _cap(models=("edge_tts",), font="Noto Sans Devanagari", voice="hi-IN-SwaraNeural"),
-    "ar": _cap(models=("edge_tts",), font="Noto Sans Arabic", tier="basic",
+    # hi/ar: only an edge_tts (experimental, non-commercial) voice today -> subtitle-only until a
+    # vetted piper/CF voice lands; tts=False so the dub gate fails closed (@CodeX bot).
+    "hi": _cap(tts=False, models=("edge_tts",), font="Noto Sans Devanagari",
+               voice="hi-IN-SwaraNeural"),
+    "ar": _cap(tts=False, models=("edge_tts",), font="Noto Sans Arabic", tier="basic",
                voice="ar-EG-SalmaNeural"),
     "eo": _cap(tts=False, models=(), tier="basic"),  # subtitle-only: no free TTS voice
 }
@@ -131,9 +141,9 @@ def assert_language_pair(
     """Layered, fail-closed admission for a job's language pair. Returns the target's
     capability on success; raises ``LanguageError`` (with the schema ErrorCode) otherwise.
 
-    * no registry entry / no MT path        -> ``unsupported_language_pair``
-    * subtitle layer requested, unsupported -> ``unsupported_language_pair``
-    * dub layer requested, no TTS model      -> ``no_tts_model_for_language``
+    * no registry entry / no MT path             -> ``unsupported_language_pair``
+    * subtitle layer requested, unsupported      -> ``unsupported_language_pair``
+    * dub layer requested, no commercial-safe TTS -> ``no_tts_model_for_language``
     """
     if output_mode not in _OUTPUT_MODES:
         raise ValueError(f"unknown output_mode {output_mode!r}")
@@ -148,12 +158,17 @@ def assert_language_pair(
             "unsupported_language_pair",
             f"subtitle output for {target_lang!r} is not supported",
         )
-    if output_mode in _DUB_MODES and not (cap.tts_supported and cap.tts_models):
-        raise LanguageError(
-            "no_tts_model_for_language",
-            f"no free TTS voice for {target_lang!r}; dubbing is unavailable "
-            f"(subtitle output is still supported)",
-        )
+    if output_mode in _DUB_MODES:
+        # A default dub output needs a COMMERCIAL-SAFE voice (piper/CF); an edge_tts-only
+        # locale (experimental lane) fails closed here even though a voice technically exists.
+        commercial_safe = [m for m in cap.tts_models if m in _COMMERCIAL_SAFE_TTS]
+        if not (cap.tts_supported and commercial_safe):
+            raise LanguageError(
+                "no_tts_model_for_language",
+                f"no commercial-safe TTS voice for {target_lang!r} (edge_tts is a non-commercial "
+                f"experimental lane, not a default dub output); dubbing is unavailable "
+                f"(subtitle output is still supported)",
+            )
     return cap
 
 

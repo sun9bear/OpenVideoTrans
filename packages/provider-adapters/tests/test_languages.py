@@ -56,6 +56,21 @@ def test_subtitle_only_language_passes_subtitle_fails_dub() -> None:
         assert ei.value.code == "no_tts_model_for_language"
 
 
+def test_edge_tts_only_language_fails_dub_but_allows_subtitle() -> None:
+    # @CodeX bot P2: edge_tts is the non-commercial experimental lane, NOT a default dub output
+    # (plan / AD-6). hi/ar have only an edge_tts voice, so a dub job must fail closed even though
+    # a voice technically exists; subtitle output still works.
+    for target in ("hi", "ar"):
+        assert assert_language_pair("en", target, "subtitle_only").subtitle_supported
+        cap = get_capability(target)
+        assert cap is not None and cap.tts_models  # an (experimental) voice technically exists
+        assert not cap.tts_supported  # but not a commercial-safe one
+        for dub_mode in ("dub_only", "both"):
+            with pytest.raises(LanguageError) as ei:
+                assert_language_pair("en", target, dub_mode)
+            assert ei.value.code == "no_tts_model_for_language"
+
+
 # ── fail-closed: unknown target ──────────────────────────────────────────────
 def test_unknown_target_fails_unsupported_language_pair() -> None:
     for mode in ("subtitle_only", "dub_only", "both"):
