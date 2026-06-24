@@ -241,6 +241,7 @@ def test_ingest_handles_already_staged_source(tmp_path: Path, monkeypatch) -> No
         Path(out).write_bytes(b"wav")
 
     monkeypatch.setattr(stages.ff, "assert_ffmpeg", lambda: None)
+    monkeypatch.setattr(stages.ff, "assert_allowed_input_format", lambda v: None)  # noqa: ARG005
     monkeypatch.setattr(stages.ff, "extract_audio", fake_extract)
 
     stages.ingest(paths, str(staged))  # must NOT raise SameFileError
@@ -261,6 +262,7 @@ def test_ingest_force_replaces_stale_original_of_other_ext(
         Path(out).write_bytes(b"wav")
 
     monkeypatch.setattr(stages.ff, "assert_ffmpeg", lambda: None)
+    monkeypatch.setattr(stages.ff, "assert_allowed_input_format", lambda v: None)  # noqa: ARG005
     monkeypatch.setattr(stages.ff, "extract_audio", fake_extract)
 
     stages.ingest(paths, str(new_src), force=True)
@@ -307,6 +309,7 @@ def test_ingest_force_invalidates_stale_audio_on_extract_failure(
         raise stages.ff.FfmpegError("ffmpeg killed")
 
     monkeypatch.setattr(stages.ff, "assert_ffmpeg", lambda: None)
+    monkeypatch.setattr(stages.ff, "assert_allowed_input_format", lambda v: None)  # noqa: ARG005
     monkeypatch.setattr(stages.ff, "extract_audio", boom_extract)
 
     with pytest.raises(stages.ff.FfmpegError):

@@ -45,10 +45,74 @@ def assert_ffmpeg() -> None:
         )
 
 
+# --------------------------------------------------------------------------- #
+# SSRF / local-file-read hardening (T1.3c)
+# --------------------------------------------------------------------------- #
+# Every ffmpeg/ffprobe input is a local file, so demuxers may follow ONLY the
+# file protocol (+ crypto, for AES-encrypted local segments). This blocks a media
+# file that is secretly a playlist / concat script from making ffmpeg fetch
+# http(s):// URLs or read arbitrary file:// paths through a sub-protocol — the
+# classic ffmpeg SSRF / local-file-read vector. The kernel is network-free.
+_PROTOCOL_WHITELIST = ("-protocol_whitelist", "file,crypto")
+_FFPROBE_BASE = ("ffprobe", "-v", "error")
+
+# Container demuxers accepted as input. A strict allowlist: the source's probed
+# format_name (a comma list of demuxer aliases) must contain ONLY these tokens,
+# so a disguised playlist (hls/applehttp), concat script (concat/ffconcat), image
+# list (image2) or network demuxer (rtsp/rtp/sdp/data) is refused up front.
+ALLOWED_INPUT_FORMATS = frozenset({
+    # video containers
+    "mov", "mp4", "m4a", "m4v", "m4b", "3gp", "3g2", "mj2",
+    "matroska", "webm",
+    "avi", "mpegts", "mpeg", "mpegvideo", "flv", "asf", "mxf",
+    # audio containers / streams
+    "mp3", "mp2", "wav", "w64", "flac", "ogg", "oga", "opus", "aac", "ac3", "aiff",
+})
+
+
+def _input(path: str | Path) -> list[str]:
+    """A protocol-restricted input: ``-protocol_whitelist file,crypto -i PATH``."""
+    return [*_PROTOCOL_WHITELIST, "-i", str(path)]
+
+
+def validate_format_name(format_name: str) -> None:
+    """Raise unless every demuxer token in ``format_name`` is an allowed media format.
+
+    ``format_name`` is ffprobe's comma-joined demuxer alias list (e.g.
+    ``"mov,mp4,m4a,3gp,3g2,mj2"``). A single disallowed token (``hls``, ``concat``,
+    ``image2``, ``rtsp`` …) means the input is a playlist/network/script demuxer
+    masquerading as media — refuse it (SSRF guard, T1.3c).
+    """
+    tokens = [t.strip().lower() for t in format_name.split(",") if t.strip()]
+    if not tokens:
+        raise FfmpegError("ffprobe reported no container format for the input")
+    disallowed = [t for t in tokens if t not in ALLOWED_INPUT_FORMATS]
+    if disallowed:
+        raise FfmpegError(
+            f"input container format {format_name!r} is not an allowed media format "
+            f"(disallowed demuxer(s): {', '.join(disallowed)}); refusing a possible "
+            f"playlist/concat/network demuxer (SSRF guard, T1.3c)."
+        )
+
+
+def probe_format_name(path: str | Path) -> str:
+    """ffprobe the input's container ``format_name`` (protocol-restricted)."""
+    out = _run([
+        *_FFPROBE_BASE, "-show_entries", "format=format_name",
+        "-of", "default=nokey=1:noprint_wrappers=1", *_PROTOCOL_WHITELIST, str(path),
+    ])
+    return out.strip()
+
+
+def assert_allowed_input_format(path: str | Path) -> None:
+    """Probe ``path`` and refuse it unless its container is an allowed media format."""
+    validate_format_name(probe_format_name(path))
+
+
 def probe_duration_ms(path: str | Path) -> int:
     out = _run([
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "json", str(path),
+        *_FFPROBE_BASE, "-show_entries", "format=duration",
+        "-of", "json", *_PROTOCOL_WHITELIST, str(path),
     ])
     dur = float(json.loads(out)["format"]["duration"])
     return int(round(dur * 1000))
@@ -62,7 +126,7 @@ def extract_audio(src: str | Path, out_wav: str | Path, sr: int = 16000, mono: b
     check) would treat as a valid cached audio artifact.
     """
     with atomic_output(out_wav) as tmp:
-        cmd = ["ffmpeg", "-y", "-i", str(src), "-vn", "-ar", str(sr)]
+        cmd = ["ffmpeg", "-y", *_input(src), "-vn", "-ar", str(sr)]
         if mono:
             cmd += ["-ac", "1"]
         cmd += ["-c:a", "pcm_s16le", str(tmp)]
@@ -80,7 +144,7 @@ def to_canonical_wav(
     would otherwise treat a truncated ``_aligned.wav`` as done on resume.
     """
     with atomic_output(out_wav) as tmp:
-        cmd = ["ffmpeg", "-y", "-i", str(src)]
+        cmd = ["ffmpeg", "-y", *_input(src)]
         if atempo_chain:
             flt = ",".join(f"atempo={t:.6f}" for t in atempo_chain)
             cmd += ["-filter:a", flt]
@@ -164,7 +228,7 @@ def mux(
     with atomic_output(out) as tmp:
         if ambient and Path(ambient).exists():
             cmd = [
-                "ffmpeg", "-y", "-i", str(video), "-i", str(audio), "-i", str(ambient),
+                "ffmpeg", "-y", *_input(video), *_input(audio), *_input(ambient),
                 "-filter_complex",
                 "[2:a]volume=0.35[amb];[1:a][amb]amix=inputs=2:normalize=0[aout]",
                 "-map", "0:v:0", "-map", "[aout]",
@@ -172,7 +236,7 @@ def mux(
             ]
         else:
             cmd = [
-                "ffmpeg", "-y", "-i", str(video), "-i", str(audio),
+                "ffmpeg", "-y", *_input(video), *_input(audio),
                 "-map", "0:v:0", "-map", "1:a:0",
                 "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(tmp),
             ]

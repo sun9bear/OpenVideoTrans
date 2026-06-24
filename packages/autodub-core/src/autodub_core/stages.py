@@ -84,6 +84,9 @@ def ingest(paths: JobPaths, source: str, force: bool = False) -> None:
     if not video:
         raise RuntimeError("ingest produced no video/original.* file")
     ff.assert_ffmpeg()
+    # SSRF guard (T1.3c): refuse a source whose real container is a playlist /
+    # concat / network demuxer disguised as media, before ffmpeg ever opens it.
+    ff.assert_allowed_input_format(video)
     # Drop any prior audio BEFORE extracting: extract_audio only replaces on
     # success, so a failed re-extract would otherwise leave the old audio paired
     # with the freshly-staged video on a later non-force retry.
