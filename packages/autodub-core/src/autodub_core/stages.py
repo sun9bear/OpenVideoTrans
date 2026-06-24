@@ -155,13 +155,21 @@ def translate(paths: JobPaths, resolver: Resolver, provider: str | None, target_
         return TranslationResult.model_validate(read_json(paths.segments))
     transcript = Transcript.model_validate(read_json(paths.transcript))
     src = source_lang or transcript.source_language or "auto"
+    texts = [ln.source_text for ln in transcript.lines]
+    if not texts:
+        # no speech -> nothing to translate; don't resolve an MT provider (it may
+        # be unavailable / quota-exhausted), still produce a valid empty result.
+        result = TranslationResult(source_language=src, target_language=target_lang,
+                                   mt_provider="", segments=[])
+        write_json(paths.segments, result.model_dump())
+        _log("translate: no transcript lines; nothing to translate")
+        return result
+
     mt = resolver.select("mt", provider, allow_paid=False)  # red line: never paid (§1/§14)
     _log(f"translate: provider={mt.info.name} {src}->{target_lang}")
-
-    texts = [ln.source_text for ln in transcript.lines]
     budgets = [_line_duration_ms(ln) for ln in transcript.lines]
-    translations = mt.translate(texts, src, target_lang, budgets) if texts else []
-    if texts and len(translations) != len(texts):
+    translations = mt.translate(texts, src, target_lang, budgets)
+    if len(translations) != len(texts):
         # The provider contract is one output per input line. A short/truncated
         # batch would silently leave segments untranslated (target_text="" ->
         # keep_original); surface the provider failure instead of shipping it.

@@ -94,6 +94,33 @@ def test_translate_builds_segments_with_budgets(tmp_path: Path) -> None:
     assert paths.segments.exists()
 
 
+def test_translate_no_lines_skips_mt_resolution(tmp_path: Path) -> None:
+    # silent / no-speech video: ASR returns zero lines, so translate must produce
+    # a valid empty result WITHOUT resolving an MT provider (it may be
+    # unavailable / quota-exhausted) (CodeX @PR P2).
+    class EmptyAsr(_FakeAsr):
+        def transcribe(self, audio_path: str, source_lang: str | None) -> Transcript:
+            return Transcript(source_language="en", asr_provider="fake_asr", lines=[])
+
+    class NoMtResolver(FakeResolver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.asr = EmptyAsr()
+
+        def select(self, kind: str, requested: str | None, allow_paid: bool):  # noqa: ANN202
+            if kind == "mt":
+                raise AssertionError("MT must not be resolved when there are no lines")
+            return super().select(kind, requested, allow_paid)
+
+    res = NoMtResolver()
+    paths = JobPaths(tmp_path).ensure()
+    stages.transcribe(paths, res, None, "en")
+    tr = stages.translate(paths, res, None, "zh", "en")  # must NOT raise
+    assert tr.segments == []
+    assert tr.mt_provider == ""
+    assert paths.segments.exists()
+
+
 def test_translate_empty_target_sets_keep_original(tmp_path: Path) -> None:
     class EmptyMt(_FakeMt):
         def translate(self, texts, source_lang, target_lang, budgets_ms=None):  # noqa: ANN001,ARG002
