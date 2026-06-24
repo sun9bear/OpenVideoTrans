@@ -222,6 +222,21 @@ def test_openai_compat_chunked_text_only_spans_chunk_duration(tmp_path: Path, mo
     assert all(ln.end_ms > ln.start_ms for ln in tr.lines)
 
 
+def test_openai_compat_single_request_text_only_spans_duration(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001, E501
+    # CodeX P2: the SINGLE-request path must also pass the file duration into text-only parsing,
+    # so a text-only response (no segments/words/duration) spans the audio, not a zero-length cue.
+    from provider_adapters.asr import GroqASR
+
+    monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 7000)
+    _stub_encode(monkeypatch, 1.0)
+    monkeypatch.setattr(GroqASR, "available", lambda self: True)
+    monkeypatch.setattr(GroqASR, "_request_json",
+                        lambda self, p, lang: {"language": "english", "text": "hi"})  # noqa: ARG005
+    tr = GroqASR().transcribe(str(tmp_path / "short.wav"), None)
+    assert len(tr.lines) == 1 and tr.lines[0].source_text == "hi"
+    assert tr.lines[0].end_ms == 7000  # spans the whole short file, not 0
+
+
 def test_openai_negotiates_supported_codec_not_opus() -> None:
     # @CodeX bot P2: OpenAI's STT API rejects ogg/opus + flac, so OpenAI ASR must negotiate a
     # codec it accepts (mp3), NOT inherit Groq's opus-first list (which uploads a rejected .ogg).

@@ -200,7 +200,11 @@ class _OpenAICompatASR(ASRProvider):
         work = str(Path(audio_path).parent / "_asr")
         plan = chunker.plan_requests(audio_path, self.audio, work)
         if len(plan) == 1:
-            return self._parse(self._request_json(plan[0].path, source_lang), source_lang)
+            # Pass the file duration so a text-only response (no segments/words/duration) spans
+            # the audio instead of a zero-length cue — same guard as the chunked path (CodeX).
+            return self._parse(
+                self._request_json(plan[0].path, source_lang), source_lang, plan[0].duration_ms
+            )
         # RED LINE (§1, CodeX): a PAID provider must not silently fan ONE authorised ASR
         # operation into N billed requests. Chunking over-limit audio multiplies paid calls,
         # so a paid provider fails-to-error here (mirrors the paid-MT no-auto-batch guard);
