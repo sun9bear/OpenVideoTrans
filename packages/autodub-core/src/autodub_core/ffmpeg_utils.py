@@ -217,14 +217,20 @@ def stitch_timeline(
 
 
 def mux(
-    video: str | Path, audio: str | Path, out: str | Path, ambient: str | Path | None = None
+    video: str | Path, audio: str | Path, out: str | Path,
+    ambient: str | Path | None = None, metadata: list[str] | None = None,
 ) -> None:
     """Mux a composed dubbed audio track onto the original video (copy video
     stream). Optionally mixes a low background ambient track underneath.
 
+    ``metadata`` is a list of extra ffmpeg output options (e.g. the AIGC
+    ``-metadata`` tags from T1.3b); they go on the output container and are
+    stream-copy compatible (no re-encode).
+
     Atomic (temp + replace): a failed ffmpeg must not leave a partial mp4 that,
     alongside an already-written subtitles.srt, the mux cache would treat as done.
     """
+    extra = list(metadata or [])
     with atomic_output(out) as tmp:
         if ambient and Path(ambient).exists():
             cmd = [
@@ -232,12 +238,12 @@ def mux(
                 "-filter_complex",
                 "[2:a]volume=0.35[amb];[1:a][amb]amix=inputs=2:normalize=0[aout]",
                 "-map", "0:v:0", "-map", "[aout]",
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(tmp),
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", *extra, "-shortest", str(tmp),
             ]
         else:
             cmd = [
                 "ffmpeg", "-y", *_input(video), *_input(audio),
                 "-map", "0:v:0", "-map", "1:a:0",
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(tmp),
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", *extra, "-shortest", str(tmp),
             ]
         _run(cmd)

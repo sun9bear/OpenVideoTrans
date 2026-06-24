@@ -16,9 +16,16 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
-from ovt_schemas.contracts import DubbingSegment, Job, Transcript, TranslationResult
+from ovt_schemas.contracts import (
+    AigcMarking,
+    DubbingSegment,
+    Job,
+    Transcript,
+    TranslationResult,
+    WorkerMeta,
+)
 
-from . import config
+from . import aigc, config
 from . import ffmpeg_utils as ff
 from .config import JobPaths
 from .isolation import pin_resolver
@@ -366,6 +373,7 @@ def mux(
     output_mode: str = "both",
     subtitle_lang: str = "target",
     subtitle_delivery: str = "srt",
+    marking: AigcMarking | None = None,
 ) -> Path:
     """Compose the job's deliverables per ``output_mode`` (T1.3d).
 
@@ -374,6 +382,11 @@ def mux(
     - ``subtitle_only`` / ``both`` -> ``subtitles.srt`` when ``subtitle_delivery``
       includes srt; ``subtitle_lang == "bilingual"`` emits target + source lines.
     - burned subtitle delivery is a guarded placeholder until M2.1 (feature-flag off).
+
+    When ``marking`` is enabled (T1.3b) the AIGC legal mark is applied conditionally
+    on output_mode: the dubbed video carries embedded AIGC container metadata and an
+    AIGC-marked subtitle leads with a machine-translation disclosure cue. ``marking``
+    is mutated with ``applied=True`` so the manifest/audit trail records it.
 
     Returns the primary deliverable: the dubbed video when dubbing, else the srt.
     The deliverable set is the resume cache gate — a re-run rebuilds until every
@@ -419,17 +432,24 @@ def mux(
         ff.stitch_timeline(placements, paths.dubbed_audio, total_ms)
         _log(f"mux: composed {len(placements)} segments into dubbed audio")
         ambient = paths.ambient if (keep_ambient and paths.ambient.exists()) else None
-        ff.mux(video, paths.dubbed_audio, paths.dubbed_video, ambient=ambient)
+        ff.mux(video, paths.dubbed_audio, paths.dubbed_video, ambient=ambient,
+               metadata=aigc.metadata_args(marking, output_mode))
         _log(f"mux: wrote {paths.dubbed_video.name}")
     # Write the srt LAST so a failed video mux above leaves no lone deliverable
     # that the next run might otherwise treat as progress.
     if want_srt:
-        _write_srt(result, paths.subtitles, bilingual=(subtitle_lang == "bilingual"))
+        _write_srt(result, paths.subtitles, bilingual=(subtitle_lang == "bilingual"),
+                   disclosure=aigc.subtitle_disclosure(marking))
         _log(f"mux: wrote {paths.subtitles.name}")
+    if marking is not None and marking.enabled:
+        marking.applied = True  # record on the marking for the manifest/audit trail
     return primary
 
 
-def _write_srt(result: TranslationResult, path: Path, *, bilingual: bool = False) -> None:
+def _write_srt(
+    result: TranslationResult, path: Path, *,
+    bilingual: bool = False, disclosure: str | None = None,
+) -> None:
     def ts(ms: int) -> str:
         ms = max(0, ms)
         h, ms = divmod(ms, 3_600_000)
@@ -439,6 +459,10 @@ def _write_srt(result: TranslationResult, path: Path, *, bilingual: bool = False
 
     lines: list[str] = []
     n = 0
+    # AIGC machine-translation disclosure (T1.3b): a short leading cue, when marked.
+    if disclosure:
+        n += 1
+        lines += [str(n), f"{ts(0)} --> {ts(3000)}", disclosure, ""]
     for seg in result.segments:
         target = seg.target_text.strip()
         source = seg.source_text.strip()
@@ -476,6 +500,7 @@ def run_pipeline(
     output_mode: str = "both",
     subtitle_lang: str = "target",
     subtitle_delivery: str = "srt",
+    aigc_marking: AigcMarking | None = None,
     job: Job | None = None,
 ) -> Path:
     """End-to-end local pipeline: ingest -> prepare -> transcribe -> translate ->
@@ -503,7 +528,9 @@ def run_pipeline(
         tts(paths, resolver, tts_provider, force=force)
         align(paths, force=force)
     out = mux(paths, keep_ambient=keep_ambient, force=force, output_mode=output_mode,
-              subtitle_lang=subtitle_lang, subtitle_delivery=subtitle_delivery)
+              subtitle_lang=subtitle_lang, subtitle_delivery=subtitle_delivery,
+              marking=aigc_marking)
     if job is not None:
-        write_manifest(paths, job)
+        worker_meta = WorkerMeta(aigc_embed_method=aigc.embed_method(aigc_marking, output_mode))
+        write_manifest(paths, job, worker_meta)
     return out

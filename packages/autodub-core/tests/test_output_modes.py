@@ -41,7 +41,7 @@ def _mock_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(stages.ff, "stitch_timeline",
                         lambda placements, out, total: Path(out).write_bytes(b"a"))  # noqa: ARG005
     monkeypatch.setattr(stages.ff, "mux",
-                        lambda v, a, o, ambient=None: Path(o).write_bytes(b"mp4"))  # noqa: ARG005
+                        lambda v, a, o, ambient=None, metadata=None: Path(o).write_bytes(b"mp4"))  # noqa: ARG005, E501
 
 
 # --------------------------------------------------------------------------- #
