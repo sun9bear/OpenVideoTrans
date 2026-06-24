@@ -94,7 +94,9 @@ def test_resolve_source_language_hint_wins_then_detected_then_auto() -> None:
 
 # ── DeepL per-target-code vet (resolves the T1.2 deferral) ───────────────────
 def test_deepl_target_code_maps_region_and_script() -> None:
-    assert deepl_target_code("en") == "EN-US"
+    assert deepl_target_code("en") == "EN-US"  # bare base -> US default
+    assert deepl_target_code("en-US") == "EN-US"
+    assert deepl_target_code("en-GB") == "EN-GB"  # @CodeX bot: British preserved, NOT folded to US
     assert deepl_target_code("pt-BR") == "PT-BR"  # region kept
     assert deepl_target_code("zh-Hans") == "ZH"  # script folded
     assert deepl_target_code("zh") == "ZH"  # bare base resolves
@@ -115,4 +117,5 @@ def test_deepl_target_code_fails_closed_on_variant_mismatch() -> None:
     for target in ("pt-PT", "zh-Hant", "zh-TW"):
         with pytest.raises(LanguageError):
             deepl_target_code(target)
-    assert deepl_target_code("en-GB") == "EN-US"  # region variant of generic "en" still folds
+    # en-GB is a DISTINCT DeepL target (not folded to EN-US) — preserved, not failed (@CodeX bot).
+    assert deepl_target_code("en-GB") == "EN-GB"

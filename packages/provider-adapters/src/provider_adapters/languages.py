@@ -183,10 +183,12 @@ def resolve_source_language(hint: str | None, detected: str | None = None) -> st
 
 
 # DeepL v2 target codes for the registry locales DeepL actually offers (per-provider "逐语 vet",
-# resolving the T1.2 deferral). EN/PT keep their region; zh-Hans folds to ZH; region subtags are
-# stripped where DeepL wants the bare code. Locales absent here (hi/ar/eo) fail closed.
+# resolving the T1.2 deferral). DeepL distinguishes the English/Portuguese regionals, so those are
+# listed EXPLICITLY (en-GB -> EN-GB, not folded to the generic EN-US — @CodeX bot); zh-Hans folds
+# to ZH. Locales absent here (hi/ar/eo) fail closed.
 _DEEPL_TARGETS: dict[str, str] = {
-    "en": "EN-US", "zh-Hans": "ZH", "es": "ES", "fr": "FR", "de": "DE",
+    "en": "EN-US", "en-US": "EN-US", "en-GB": "EN-GB",  # DeepL offers both English regionals
+    "zh-Hans": "ZH", "es": "ES", "fr": "FR", "de": "DE",
     "ja": "JA", "ko": "KO", "pt-BR": "PT-BR", "ru": "RU", "it": "IT",
 }
 
