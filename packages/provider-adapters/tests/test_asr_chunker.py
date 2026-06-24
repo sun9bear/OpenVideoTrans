@@ -223,3 +223,38 @@ def test_cloudflare_over_duration_chunks_and_merges(tmp_path: Path, monkeypatch)
     tr = CloudflareASR().transcribe(str(tmp_path / "long.wav"), "en")
     assert len(seen) == 3  # 900s / 300s -> 3 chunks
     assert [w.start_ms for ln in tr.lines for w in ln.words] == [0, 300_000, 600_000]
+
+
+def test_paid_asr_refuses_chunking_red_line(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # RED LINE (§1, CodeX P1): a PAID provider must not fan one authorised ASR op into N billed
+    # requests. Over-limit paid input fails-to-error BEFORE any request, never auto-batches.
+    from provider_adapters.asr import OpenAIASR
+
+    monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 30_000)
+    _stub_encode(monkeypatch, 1.0)
+    monkeypatch.setattr(OpenAIASR, "available", lambda self: True)
+    monkeypatch.setattr(OpenAIASR, "audio", AudioConstraints(("mp3",), max_duration_ms=10_000))
+    reqs: list[str] = []
+    monkeypatch.setattr(OpenAIASR, "_request_json",
+                        lambda self, p, lang: reqs.append(p))  # noqa: ARG005
+    with pytest.raises(ProviderUnavailable, match="never auto-batches"):
+        OpenAIASR().transcribe(str(tmp_path / "long.wav"), None)
+    assert reqs == []  # no billed request was made
+
+
+def test_chunked_detected_language_preserved(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # CodeX P2: the chunked path must keep the chunk-detected language (not write "auto", which
+    # the default CF MT rejects) so a no-hint long video can still translate after ASR.
+    from provider_adapters.asr import GroqASR
+
+    monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 30_000)
+    _stub_encode(monkeypatch, 1.0)
+    monkeypatch.setattr(GroqASR, "available", lambda self: True)
+    monkeypatch.setattr(GroqASR, "audio", AudioConstraints(("opus",), max_duration_ms=10_000))
+    monkeypatch.setattr(
+        GroqASR, "_request_json",
+        lambda self, p, lang: {"language": "english",  # noqa: ARG005
+                               "segments": [{"start": 0.0, "end": 1.0, "text": "hi"}], "words": []},
+    )
+    tr = GroqASR().transcribe(str(tmp_path / "long.wav"), None)  # NO source hint
+    assert tr.source_language == "en"  # detected name -> ISO, preserved across the merge

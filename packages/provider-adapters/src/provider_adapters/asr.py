@@ -191,17 +191,30 @@ class _OpenAICompatASR(ASRProvider):
         plan = chunker.plan_requests(audio_path, self.audio, work)
         if len(plan) == 1:
             return self._parse(self._request_json(plan[0].path, source_lang), source_lang)
+        # RED LINE (§1, CodeX): a PAID provider must not silently fan ONE authorised ASR
+        # operation into N billed requests. Chunking over-limit audio multiplies paid calls,
+        # so a paid provider fails-to-error here (mirrors the paid-MT no-auto-batch guard);
+        # free providers (groq) chunk freely. A future explicit BYOK path can authorise this.
+        if self.info.paid:
+            raise ProviderUnavailable(
+                f"{self.info.name} (paid) input exceeds the single-request limit; chunking would "
+                f"fan it into multiple billed requests. Paid ASR never auto-batches (§1) — use a "
+                f"free provider, or pre-split the audio with explicit authorisation."
+            )
         # Parse each chunk through the SAME _parse as the single path (so a segments/text-only
         # response keeps its text — CodeX: a word-only merge dropped segment-only chunks), then
         # offset-merge the per-chunk lines into one global timeline.
-        parts = [
-            (self._parse(self._request_json(c.path, source_lang), source_lang).lines, c.offset_ms)
-            for c in plan
-        ]
-        # Detected-language backfill needs the whole-file response; the chunked path keeps the
-        # caller's normalized hint (or "auto"). Full source-lang detection backfill is T1.3f.
+        parts: list[tuple[list[TranscriptLine], int]] = []
+        detected: str | None = None
+        for c in plan:
+            t = self._parse(self._request_json(c.path, source_lang), source_lang)
+            parts.append((t.lines, c.offset_ms))
+            if detected is None and t.source_language not in (None, "auto"):
+                detected = t.source_language  # keep the first chunk-detected language (CodeX)
+        # Caller hint wins; else the first chunk-detected language; else "auto". The default CF
+        # MT rejects "auto", so dropping the detection would fail a no-hint long-video job.
         return Transcript(
-            source_language=_iso639(source_lang) or "auto",
+            source_language=_iso639(source_lang) or detected or "auto",
             lines=chunker.merge_lines(parts), asr_provider=self.info.name,
         )
 
