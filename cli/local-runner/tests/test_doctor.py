@@ -52,3 +52,13 @@ def test_doctor_reports_stale_piper_path_not_crash(
     lines: list[str] = []
     assert run_doctor(out=lines.append) == 1
     assert any("piper model pin: FAIL" in ln for ln in lines)
+
+
+def test_doctor_enforces_ffmpeg_pin_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    # @CodeX CLI P2: doctor is the supply-chain preflight, so it must enforce the ffmpeg binary
+    # pin too — a wrong/absent pin reports FAIL (rc 1), not a silent pass.
+    monkeypatch.delenv("FVD_PIPER_MODEL", raising=False)
+    monkeypatch.setenv("FVD_FFMPEG_SHA256", "a" * 64)  # mismatch (or ffmpeg absent) -> FAIL
+    lines: list[str] = []
+    assert run_doctor(out=lines.append) == 1
+    assert any("ffmpeg pin: FAIL" in ln for ln in lines)

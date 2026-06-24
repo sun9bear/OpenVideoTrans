@@ -18,6 +18,7 @@ from provider_adapters import (
     SupplyChainError,
     assert_default_image_allowed,
     probe,
+    verify_ffmpeg,
     verify_piper_model,
 )
 
@@ -49,6 +50,18 @@ def run_doctor(out: Callable[[str], None] = print) -> int:
             out(f"  piper model pin: FAIL — {exc}")
     else:
         out("  piper model pin: skipped (FVD_PIPER_MODEL unset)")
+
+    # The ffmpeg binary is the other T1.3g-pinned artifact run_pipeline invokes; enforce its pin
+    # here too (verify_ffmpeg had no caller before — @CodeX CLI), when the operator has set one.
+    if os.getenv("FVD_FFMPEG_SHA256"):
+        try:
+            ref = verify_ffmpeg()
+            out(f"  ffmpeg pin: OK ({(ref.sha256 or '')[:12]}…)")
+        except (SupplyChainError, OSError) as exc:
+            ok = False
+            out(f"  ffmpeg pin: FAIL — {exc}")
+    else:
+        out("  ffmpeg pin: skipped (FVD_FFMPEG_SHA256 unset)")
 
     for name in _BUNDLED_MODELS:
         try:

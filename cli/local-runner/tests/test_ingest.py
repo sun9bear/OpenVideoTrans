@@ -41,4 +41,5 @@ def test_pick_merged_excludes_merge_intermediates(tmp_path: Path) -> None:
     (dl / "media.f137.mp4").write_bytes(b"v")  # video-only intermediate (sorts first)
     (dl / "media.f140.m4a").write_bytes(b"a")  # audio-only intermediate
     (dl / "media.mp4").write_bytes(b"final")  # the merged deliverable
-    assert ingest._pick_merged(dl).name == "media.mp4"
+    picked = ingest._pick_merged(dl)
+    assert picked is not None and picked.name == "media.mp4"
