@@ -36,16 +36,19 @@ from ovt_schemas.contracts import (
     [
         "..", "../x", "x/../y", "a/b", "a\\b", "..\\..", "",
         "   ", ".", "C:evil", "foo\x00bar", "/abs", "\\unc",
+        "u.", "u..", " u", "u ", "u\t",  # surrounding whitespace / Windows trailing dot
     ],
 )
-def test_safe_component_rejects_traversal_and_separators(bad: str) -> None:
+def test_safe_component_rejects_traversal_separators_and_windows_collisions(bad: str) -> None:
     with pytest.raises(PathEscapeError):
         safe_component(bad, label="job_id")
 
 
-def test_safe_component_accepts_and_trims_plain_ids() -> None:
+def test_safe_component_accepts_clean_ids() -> None:
+    # not trimmed: a clean id is returned verbatim (surrounding whitespace / trailing
+    # dots are rejected above, not silently normalized into a colliding component).
     assert safe_component("job_0001", label="job_id") == "job_0001"
-    assert safe_component("  anon_AbC-123 ", label="owner_id") == "anon_AbC-123"
+    assert safe_component("anon_AbC-123", label="owner_id") == "anon_AbC-123"
 
 
 def test_job_root_namespaces_owner_and_job(tmp_path: Path) -> None:
@@ -58,7 +61,8 @@ def test_job_root_namespaces_owner_and_job(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("owner", "job"),
-    [("..", "j"), ("u", ".."), ("a/b", "j"), ("u", "../../etc"), ("", "j"), ("u", "")],
+    [("..", "j"), ("u", ".."), ("a/b", "j"), ("u", "../../etc"), ("", "j"), ("u", ""),
+     ("u.", "j"), ("u", "j."), (" u", "j")],  # Windows trailing-dot / whitespace collisions
 )
 def test_job_root_rejects_escaping_ids(tmp_path: Path, owner: str, job: str) -> None:
     with pytest.raises(PathEscapeError):

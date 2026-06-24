@@ -44,13 +44,17 @@ def embed_method(marking: AigcMarking | None, output_mode: str) -> str | None:
 def metadata_args(marking: AigcMarking | None, output_mode: str) -> list[str]:
     """ffmpeg ``-metadata`` args embedding the AIGC mark into the output container.
 
-    Stream-copy compatible (no re-encode). Empty when marking is disabled.
+    Stream-copy compatible (no re-encode). Empty when marking is disabled. Both the
+    notice and the method are folded into the standard ``comment`` tag: the mp4
+    muxer drops arbitrary custom keys (e.g. a separate ``aigc_mark``) unless
+    ``-movflags use_metadata_tags`` is set, but ``comment`` always survives, so the
+    mark stays auditable from the container (the manifest's ``aigc_embed_method``
+    remains the authoritative record).
     """
     if not _on(marking):
         return []
     notice = _DUB_NOTICE if output_mode in _DUB_MODES else _MT_DISCLOSURE
-    return ["-metadata", f"comment=AIGC: {notice}",
-            "-metadata", f"aigc_mark={embed_method(marking, output_mode)}"]
+    return ["-metadata", f"comment=AIGC: {notice} (aigc_mark={embed_method(marking, output_mode)})"]
 
 
 def subtitle_disclosure(marking: AigcMarking | None) -> str | None:

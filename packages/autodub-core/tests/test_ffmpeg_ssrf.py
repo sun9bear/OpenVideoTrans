@@ -77,6 +77,20 @@ def test_assert_allowed_input_format_uses_probe(monkeypatch: pytest.MonkeyPatch)
         ff.assert_allowed_input_format("x.mp4")
 
 
+@pytest.mark.parametrize("ext", [".m3u8", ".m3u", ".concat", ".ffconcat", ".pls", ".xspf"])
+def test_assert_allowed_input_format_rejects_playlist_extension_before_probe(
+    ext: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # an honestly-named playlist/script is refused by extension BEFORE ffprobe ever
+    # opens it, so the playlist demuxer never runs (CodeX R2 P1).
+    def _no_probe(p: object) -> str:
+        raise AssertionError("probe must not run for a playlist extension")
+
+    monkeypatch.setattr(ff, "probe_format_name", _no_probe)
+    with pytest.raises(ff.FfmpegError, match="before probe"):
+        ff.assert_allowed_input_format(f"evil{ext}")
+
+
 # --------------------------------------------------------------------------- #
 # protocol whitelist on every ffmpeg/ffprobe command
 # --------------------------------------------------------------------------- #

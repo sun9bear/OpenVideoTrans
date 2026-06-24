@@ -41,18 +41,24 @@ _ILLEGAL_IN_COMPONENT = ("/", "\\", "\x00", ":")
 def safe_component(value: str, *, label: str) -> str:
     """Validate a single trusted-but-untrusted path component (owner_id / job_id).
 
-    Rejects anything that could traverse or absolutize the path: empty/blank,
-    a parent/self reference, a path separator, a NUL, or a drive/UNC marker.
-    Returns the trimmed component on success.
+    Rejects anything that could traverse, absolutize, or *collide* the path:
+    empty, surrounding whitespace, a parent/self reference, a path separator, a
+    NUL, a drive/UNC marker, or a trailing dot. The value is NOT trimmed — surrounding
+    whitespace is rejected, not silently stripped, because Windows normalizes
+    trailing dots/spaces, so ``'u.'`` / ``'u '`` would otherwise collide with ``'u'``
+    and break the non-colliding-namespace guarantee (these ids are attacker-influenced).
     """
-    v = value.strip()
-    if not v:
-        raise PathEscapeError(f"{label} must be a non-empty path component")
-    if v in (".", ".."):
+    if not value or value != value.strip():
+        raise PathEscapeError(
+            f"{label} must be a non-empty component with no surrounding whitespace: {value!r}")
+    if value in (".", ".."):
         raise PathEscapeError(f"{label} must not be a parent/self reference: {value!r}")
-    if ".." in v or any(ch in v for ch in _ILLEGAL_IN_COMPONENT):
+    if value != value.rstrip("."):
+        # Windows strips trailing dots from names: 'u.' resolves to the same dir as 'u'.
+        raise PathEscapeError(f"{label} must not end with a dot (Windows normalizes it): {value!r}")
+    if ".." in value or any(ch in value for ch in _ILLEGAL_IN_COMPONENT):
         raise PathEscapeError(f"{label} contains an illegal path character: {value!r}")
-    return v
+    return value
 
 
 def ensure_within(root: str | Path, candidate: str | Path) -> Path:

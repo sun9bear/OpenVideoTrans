@@ -69,6 +69,14 @@ ALLOWED_INPUT_FORMATS = frozenset({
     "mp3", "mp2", "wav", "w64", "flac", "ogg", "oga", "opus", "aac", "ac3", "aiff",
 })
 
+# Playlist / concat / script container extensions whose demuxers (HLS, concat, …)
+# follow sub-resources. Rejected by extension BEFORE ffprobe ever opens the input,
+# so an honestly-named playlist can't even reach the probe.
+_PLAYLIST_EXTENSIONS = frozenset({
+    ".m3u", ".m3u8", ".pls", ".xspf", ".asx", ".smil", ".wpl", ".cue",
+    ".concat", ".ffconcat",
+})
+
 
 def _input(path: str | Path) -> list[str]:
     """A protocol-restricted input: ``-protocol_whitelist file,crypto -i PATH``."""
@@ -105,7 +113,22 @@ def probe_format_name(path: str | Path) -> str:
 
 
 def assert_allowed_input_format(path: str | Path) -> None:
-    """Probe ``path`` and refuse it unless its container is an allowed media format."""
+    """Refuse ``path`` unless its container is an allowed media format (SSRF guard).
+
+    Layered defense so a playlist/concat demuxer never reads sub-resources:
+    1. reject known playlist/script *extensions* before ffprobe opens the input;
+    2. probe with ``-protocol_whitelist file,crypto`` (no network) — and ffmpeg's
+       own ``allowed_segment_extensions`` blocks ``file://`` segment reads — so even
+       a disguised playlist (media extension, hls content) cannot reach a resource
+       during the probe; then
+    3. reject any non-allowlisted detected demuxer (hls/concat/rtsp/…).
+    """
+    ext = Path(path).suffix.lower()
+    if ext in _PLAYLIST_EXTENSIONS:
+        raise FfmpegError(
+            f"input extension {ext!r} is a playlist/concat/script container, not media; "
+            f"refusing before probe (SSRF guard, T1.3c)."
+        )
     validate_format_name(probe_format_name(path))
 
 
