@@ -1,9 +1,19 @@
 [project]
 name = "local-runner"
 version = "0.0.1"
-description = "Local CLI runner stub for OpenVideoTrans (Tier 1 MVP skeleton)"
+description = "Local end-to-end CLI for OpenVideoTrans (Tier 1, T1.4 = M1)"
 requires-python = ">=3.11"
-dependencies = []
+# The local runner is the ORCHESTRATOR (unlike the kernel, it may import both sides of the
+# provider seam): it wires autodub-core's run_pipeline to the provider-adapters Resolver, and
+# calls the admission / supply-chain gates that the kernel cannot (the kernel has no import edge
+# to provider-adapters). yt-dlp is an OPTIONAL extra — URL ingest is opened ONLY here.
+dependencies = ["ovt-schemas", "autodub-core", "provider-adapters"]
+
+[project.optional-dependencies]
+url = ["yt-dlp"]
+
+[project.scripts]
+ovt = "local_runner.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -11,3 +21,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/local_runner"]
+
+[tool.uv.sources]
+ovt-schemas = { workspace = true }
+autodub-core = { workspace = true }
+provider-adapters = { workspace = true }
