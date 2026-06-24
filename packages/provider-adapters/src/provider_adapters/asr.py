@@ -71,9 +71,15 @@ def _group_words_into_lines(
     words: list[Word], full_text: str, total_ms: int
 ) -> list[TranscriptLine]:
     if not words:
+        text = full_text.strip()
+        if not text:
+            # No words AND no text -> genuinely no speech (silence / ambient-only): return
+            # NO lines, so the kernel's translate() skips MT for the no-speech job rather
+            # than seeing a blank line and still selecting/configuring a provider (CodeX).
+            return []
         return [
             TranscriptLine(
-                index=0, start_ms=0, end_ms=total_ms, source_text=full_text.strip(),
+                index=0, start_ms=0, end_ms=total_ms, source_text=text,
                 words=[], speaker_id="SPEAKER_00",
             )
         ]

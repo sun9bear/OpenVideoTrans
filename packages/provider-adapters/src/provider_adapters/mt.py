@@ -116,6 +116,10 @@ class DeepLMT(MTProvider):
         budgets_ms: list[int] | None = None,
     ) -> list[str]:
         self._ensure_available()  # only a FREE ':fx' key passes — never the paid endpoint
+        # TODO(T1.3f): map BCP-47 targets to DeepL's exact target codes (per-provider "逐语
+        # vet"). DeepL accepts e.g. PT-BR/EN-US but NOT script subtags (zh-Hans) or JA-JP, so
+        # those 400 here (loud, not silent). A naive base-strip would regress PT-BR/EN-US, so
+        # the correct per-provider mapping is deferred to the language_capabilities unit.
         import requests
 
         key = require_env("DEEPL_API_KEY")

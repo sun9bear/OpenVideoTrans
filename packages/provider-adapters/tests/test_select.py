@@ -202,3 +202,12 @@ def test_asr_normalizes_detected_language_name_to_iso() -> None:
     assert asr._parse({"language": "english"}, None).source_language == "en"
     assert asr._parse({"language": "portuguese"}, "pt-BR").source_language == "pt"  # hint wins
     assert asr._parse({"language": "klingon"}, None).source_language == "auto"  # unmapped
+
+
+def test_empty_asr_output_yields_no_lines() -> None:
+    # CodeX round-5 P2: a no-speech result (no words, no text) must yield NO transcript
+    # lines so the kernel's translate() skips MT, not a blank line that still triggers it.
+    asr = GroqASR()
+    assert asr._parse({"language": "english", "segments": [], "words": []}, None).lines == []
+    one = asr._parse({"language": "english", "text": "hello"}, None)  # text but no timings
+    assert len(one.lines) == 1 and one.lines[0].source_text == "hello"
