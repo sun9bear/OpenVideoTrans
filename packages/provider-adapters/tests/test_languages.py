@@ -29,6 +29,17 @@ def test_get_capability_exact_then_base_fallback() -> None:
     assert get_capability("tlh") is None  # Klingon: not in the Tier-1 registry
 
 
+def test_get_capability_fails_closed_on_variant_mismatch() -> None:
+    # CodeX-review P2: a specific sibling variant must NOT silently collapse to the wrong
+    # curated entry (the worst case zh-Hant -> Simplified ships semantically wrong characters).
+    assert get_capability("zh-Hant") is None  # NOT zh-Hans
+    assert get_capability("zh-TW") is None
+    assert get_capability("pt-PT") is None  # NOT pt-BR
+    # A region variant of a GENERIC base entry ("en") may still fold to it (English -> English).
+    assert get_capability("en-GB") is get_capability("en")
+    assert get_capability("en-US") is get_capability("en")
+
+
 # ── layered admission: subtitle layer vs dub layer ───────────────────────────
 def test_fully_capable_language_passes_every_output_mode() -> None:
     for mode in ("subtitle_only", "dub_only", "both"):
@@ -82,3 +93,11 @@ def test_deepl_target_code_fails_closed_for_unsupported() -> None:
         with pytest.raises(LanguageError) as ei:
             deepl_target_code(target)
         assert ei.value.code == "unsupported_language_pair"
+
+
+def test_deepl_target_code_fails_closed_on_variant_mismatch() -> None:
+    # CodeX-review P2: pt-PT must NOT mis-map to DeepL PT-BR, nor zh-Hant to ZH (Simplified).
+    for target in ("pt-PT", "zh-Hant", "zh-TW"):
+        with pytest.raises(LanguageError):
+            deepl_target_code(target)
+    assert deepl_target_code("en-GB") == "EN-US"  # region variant of generic "en" still folds

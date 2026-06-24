@@ -104,16 +104,25 @@ def normalize_locale(locale: str) -> str:
 
 
 def get_capability(locale: str) -> LanguageCapability | None:
-    """Capability for ``locale``: exact BCP-47 match first, then a base-language fallback
-    (``pt`` -> ``pt-BR``, ``zh`` -> ``zh-Hans``) so a bare code still resolves. ``None`` when
-    the locale is not in the Tier-1 registry at all."""
+    """Capability for ``locale``, fail-closed on variant mismatch:
+
+    * exact BCP-47 key wins;
+    * a region/script variant folds **only into a GENERIC base entry** (e.g. ``en-GB`` ->
+      ``en``), never into a *specific* sibling variant — so ``zh-Hant`` does NOT collapse to
+      ``zh-Hans`` and ``pt-PT`` does NOT collapse to ``pt-BR`` (that would silently ship the
+      wrong-variant artifact); those return ``None``;
+    * a BARE base with no generic entry takes the curated regional default (``pt`` -> ``pt-BR``,
+      ``zh`` -> ``zh-Hans``).
+    """
     norm = normalize_locale(locale)
     if norm in CAPABILITIES:
         return CAPABILITIES[norm]
     base = norm.split("-")[0]
-    if base in CAPABILITIES:
+    if base in CAPABILITIES:  # a GENERIC base entry exists (e.g. "en"): fold region variants in
         return CAPABILITIES[base]
-    return next((cap for key, cap in CAPABILITIES.items() if key.split("-")[0] == base), None)
+    if norm == base:  # bare base, no generic entry: curated regional default (pt->pt-BR)
+        return next((cap for key, cap in CAPABILITIES.items() if key.split("-")[0] == base), None)
+    return None  # region/script variant of a specific-only base -> fail closed (no fuzzy collapse)
 
 
 def assert_language_pair(
@@ -172,11 +181,12 @@ def deepl_target_code(target_lang: str) -> str:
     does not offer (rather than sending a code DeepL 400s on)."""
     norm = normalize_locale(target_lang)
     base = norm.split("-")[0]
-    code = (
-        _DEEPL_TARGETS.get(norm)
-        or _DEEPL_TARGETS.get(base)
-        or next((v for k, v in _DEEPL_TARGETS.items() if k.split("-")[0] == base), None)
-    )
+    # Same fail-closed rule as get_capability: exact code, else fold into a GENERIC base entry,
+    # else a BARE base takes the curated default — but a specific sibling variant (pt-PT when we
+    # map pt-BR, zh-Hant when we map zh-Hans) fails closed rather than mis-mapping.
+    code = _DEEPL_TARGETS.get(norm) or _DEEPL_TARGETS.get(base)
+    if code is None and norm == base:
+        code = next((v for k, v in _DEEPL_TARGETS.items() if k.split("-")[0] == base), None)
     if code is None:
         raise LanguageError(
             "unsupported_language_pair",

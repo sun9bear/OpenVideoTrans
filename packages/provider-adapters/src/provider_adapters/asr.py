@@ -185,18 +185,17 @@ class _OpenAICompatASR(ASRProvider):
 
     def transcribe(self, audio_path: str, source_lang: str | None) -> Transcript:
         self._ensure_available()
-        # compress-first; ship one request if the compressed whole fits, else chunk by time
-        # and offset-merge the per-chunk words into one timeline (T1.3e).
+        # compress-first; one request if the whole fits (keep native segment grouping), else
+        # chunk by time and offset-merge the per-chunk words. plan_requests does ONE encode pass.
         work = str(Path(audio_path).parent / "_asr")
-        compressed, total_ms = chunker.compress(audio_path, self.audio, work)
-        if chunker.within_limits(compressed, total_ms, self.audio):
-            return self._parse(self._request_json(compressed, source_lang), source_lang)
-        whole_bytes = Path(compressed).stat().st_size
-        words = chunker.chunked_words(
-            lambda p, _d: self._words_from_json(self._request_json(p, source_lang)),
-            audio_path, self.audio, total_ms, whole_bytes, work,
+        plan = chunker.plan_requests(audio_path, self.audio, work)
+        if len(plan) == 1:
+            return self._parse(self._request_json(plan[0].path, source_lang), source_lang)
+        words = chunker.merge_words(
+            [(self._words_from_json(self._request_json(c.path, source_lang)), c.offset_ms)
+             for c in plan]
         )
-        total = words[-1].end_ms if words else total_ms
+        total = words[-1].end_ms if words else 0
         # Detected-language backfill needs the whole-file response; the chunked path keeps the
         # caller's normalized hint (or "auto"). Full source-lang detection backfill is T1.3f.
         return Transcript(
@@ -313,17 +312,10 @@ class CloudflareASR(ASRProvider):
     def transcribe(self, audio_path: str, source_lang: str | None) -> Transcript:
         self._ensure_available()
         # compress-first; one request if within the duration cap, else chunk + offset-merge.
+        # plan_requests does ONE encode pass (no throwaway whole-encode on the chunk path).
         work = str(Path(audio_path).parent / "_asr")
-        constraints = self.audio
-        compressed, total_ms = chunker.compress(audio_path, constraints, work)
-        if chunker.within_limits(compressed, total_ms, constraints):
-            words = self._run_one(compressed, total_ms)
-        else:
-            whole_bytes = Path(compressed).stat().st_size
-            words = chunker.chunked_words(
-                self._run_one, audio_path, constraints, total_ms, whole_bytes, work
-            )
-        total = words[-1].end_ms if words else total_ms
+        words = chunker.chunked_words(self._run_one, audio_path, self.audio, work)
+        total = words[-1].end_ms if words else 0
         lines = _group_words_into_lines(words, "", total)
         return Transcript(
             source_language=source_lang or "auto", lines=lines, asr_provider="cloudflare"

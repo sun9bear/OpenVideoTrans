@@ -16,14 +16,20 @@ from provider_adapters.asr_chunker import AudioConstraints
 from provider_adapters.base import ProviderUnavailable
 
 
+def _recording_encode(spans: list, bytes_per_ms: float):  # noqa: ANN001, ANN201
+    """An ffmpeg-encode stub that records each encoded (start_ms, end_ms) span and writes a
+    file sized to ``bytes_per_ms``. Lets a test prove the whole isn't re-encoded twice."""
+    def enc(src: str, dst: str, codec: str, start_ms: int, end_ms: int) -> None:  # noqa: ARG001
+        spans.append((start_ms, end_ms))
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(b"\x00" * max(1, int(max(1, end_ms - start_ms) * bytes_per_ms)))
+    return enc
+
+
 def _stub_encode(monkeypatch: pytest.MonkeyPatch, bytes_per_ms: float) -> None:
     """Replace the ffmpeg encode with a stub that writes a file whose size models the
     codec bitrate: ``bytes_per_ms`` bytes per ms of the encoded [start, end) span."""
-    def enc(src: str, dst: str, codec: str, start_ms: int, end_ms: int) -> None:  # noqa: ARG001
-        span = max(1, end_ms - start_ms)
-        Path(dst).parent.mkdir(parents=True, exist_ok=True)
-        Path(dst).write_bytes(b"\x00" * max(1, int(span * bytes_per_ms)))
-    monkeypatch.setattr(ck, "_encode", enc)
+    monkeypatch.setattr(ck, "_encode", _recording_encode([], bytes_per_ms))
 
 
 # ── format negotiation ───────────────────────────────────────────────────────
@@ -54,17 +60,31 @@ def test_within_limits_checks_bytes_and_duration(tmp_path: Path) -> None:
     assert ck.within_limits(str(f), 5000, AudioConstraints(("opus",)))  # no caps -> within
 
 
-# ── compress-first ───────────────────────────────────────────────────────────
-def test_compress_encodes_whole_and_reports_duration(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+# ── compress-first (one encode pass, no throwaway whole-encode on the chunk path) ──
+def test_plan_requests_single_when_whole_fits(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # CodeX-review P2: within-limits -> exactly ONE whole-encode, used as the single request.
     monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 5000)
-    _stub_encode(monkeypatch, 1.0)  # 1 byte/ms -> 5000 bytes
-    src = tmp_path / "src.wav"
-    src.write_bytes(b"\x00")
-    caps = AudioConstraints(("opus",), max_bytes=10_000)
-    comp, total = ck.compress(str(src), caps, str(tmp_path / "w"))
-    assert total == 5000
-    assert Path(comp).suffix == ".ogg" and Path(comp).stat().st_size == 5000
-    assert ck.within_limits(comp, total, caps)  # fits the byte cap -> single request
+    encodes: list[tuple[int, int]] = []
+    monkeypatch.setattr(ck, "_encode", _recording_encode(encodes, 1.0))
+    caps = AudioConstraints(("opus",), max_bytes=1_000_000)
+    plan = ck.plan_requests(str(tmp_path / "src.wav"), caps, str(tmp_path / "w"))
+    assert len(plan) == 1 and plan[0].offset_ms == 0  # single request
+    assert Path(plan[0].path).suffix == ".ogg"
+    assert encodes == [(0, 5000)]  # whole encoded exactly once, never re-encoded
+
+
+def test_plan_requests_chunked_does_not_reencode_whole(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # CodeX-review P2: over-limit -> split straight from the wav, NO throwaway whole-encode.
+    monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 30_000)
+    encodes: list[tuple[int, int]] = []
+    monkeypatch.setattr(ck, "_encode", _recording_encode(encodes, 1.0))
+    plan = ck.plan_requests(
+        str(tmp_path / "src.wav"), AudioConstraints(("opus",), max_duration_ms=10_000),
+        str(tmp_path / "w"),
+    )
+    assert len(plan) == 3  # 30s / 10s
+    # exactly the 3 chunk encodes — no extra (0, 30000) whole-encode that gets discarded.
+    assert encodes == [(0, 10_000), (10_000, 20_000), (20_000, 30_000)]
 
 
 # ── offset merge ─────────────────────────────────────────────────────────────
@@ -77,13 +97,14 @@ def test_merge_words_offsets_each_chunk() -> None:
 
 # ── chunked_words: single request when one chunk fits ────────────────────────
 def test_chunked_words_single_request_when_one_chunk(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    # 长音频一次请求: a duration that fits the per-chunk cap yields exactly one run_one call.
+    # 长音频一次请求: a duration that fits the cap yields exactly one run_one call.
+    monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 8000)
     _stub_encode(monkeypatch, 1.0)
     calls: list[str] = []
     words = ck.chunked_words(
         lambda p, _d: (calls.append(p) or [Word(text="w", start_ms=0, end_ms=100)]),
         str(tmp_path / "src.wav"), AudioConstraints(("opus",), max_duration_ms=20_000),
-        total_ms=8000, whole_bytes=8000, work=str(tmp_path / "w"),
+        str(tmp_path / "w"),
     )
     assert len(calls) == 1
     assert [w.start_ms for w in words] == [0]  # no offset applied for the single chunk
@@ -92,40 +113,45 @@ def test_chunked_words_single_request_when_one_chunk(tmp_path: Path, monkeypatch
 # ── chunked_words: split + merge when over the duration cap ──────────────────
 def test_chunked_words_splits_over_duration_and_merges(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     # 超限切块合并: 30s with a 10s/chunk cap -> 3 chunks at offsets 0/10000/20000.
+    monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 30_000)
     _stub_encode(monkeypatch, 1.0)
     calls: list[tuple[str, int]] = []
     words = ck.chunked_words(
         lambda p, d: (calls.append((p, d)) or [Word(text="w", start_ms=0, end_ms=100)]),
         str(tmp_path / "src.wav"), AudioConstraints(("opus",), max_duration_ms=10_000),
-        total_ms=30_000, whole_bytes=30_000, work=str(tmp_path / "w"),
+        str(tmp_path / "w"),
     )
     assert len(calls) == 3
     assert [d for _p, d in calls] == [10_000, 10_000, 10_000]  # each chunk's duration hint
     assert [w.start_ms for w in words] == [0, 10_000, 20_000]  # each chunk's lone word, offset
 
 
-# ── chunked_words: split sized from a byte cap ───────────────────────────────
+# ── chunked_words: split sized from a byte cap (estimate, not a measured encode) ──
 def test_chunked_words_splits_from_byte_cap(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    # max_bytes=10000 at 2 bytes/ms -> ~4500ms/chunk (0.9 safety) -> ceil(20000/4500)=5 chunks.
-    _stub_encode(monkeypatch, 2.0)
+    # opus est 2.2 B/ms: 20s -> 44_000 B > 10_000 cap -> split; chunk = 10000*0.9/2.2 = 4090ms
+    # -> ceil(20000/4090) = 5 chunks.
+    monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 20_000)
+    _stub_encode(monkeypatch, 1.0)
     calls: list[str] = []
     ck.chunked_words(
         lambda p, _d: (calls.append(p) or [Word(text="w", start_ms=0, end_ms=10)]),
         str(tmp_path / "s.wav"), AudioConstraints(("opus",), max_bytes=10_000),
-        total_ms=20_000, whole_bytes=40_000, work=str(tmp_path / "w"),
+        str(tmp_path / "w"),
     )
     assert len(calls) == 5
 
 
-def test_chunked_words_zero_duration_falls_back_to_single(tmp_path: Path) -> None:
-    # A 0-duration (unreadable) source can't be time-split: one request over the source.
+def test_chunked_words_zero_duration_falls_back_to_single(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # A 0-duration (unreadable) source can't be time-split: one whole-encode, one request.
+    monkeypatch.setattr(ck, "_src_duration_ms", lambda _p: 0)
+    _stub_encode(monkeypatch, 1.0)
     calls: list[str] = []
     ck.chunked_words(
         lambda p, _d: (calls.append(p) or []),
         str(tmp_path / "broken.wav"), AudioConstraints(("opus",), max_bytes=1),
-        total_ms=0, whole_bytes=999, work=str(tmp_path / "w"),
+        str(tmp_path / "w"),
     )
-    assert calls == [str(tmp_path / "broken.wav")]
+    assert len(calls) == 1  # the single compressed whole
 
 
 # --------------------------------------------------------------------------- #
