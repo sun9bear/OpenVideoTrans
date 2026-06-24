@@ -513,27 +513,38 @@ def _write_srt(
         s, ms = divmod(ms, 1000)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
+    segs = [s for s in result.segments if (s.target_text.strip() or s.source_text.strip())]
+    disc = disclosure or ""
+    # AIGC machine-translation disclosure (T1.3b): a short LEADING notice. Clamp its window to
+    # END at the first real cue so it never overlaps actual subtitle content — overlapping cues
+    # make players stack/hide text (@CodeX bot P2). With no usable gap before the first cue
+    # (< 500 ms), ride the disclosure on that first cue's text instead of an overlapping cue.
+    first_start = segs[0].start_ms if segs else 3000
+    disclose_standalone = bool(disc) and first_start >= 500
+    disclose_on_first = bool(disc) and not disclose_standalone
+
     lines: list[str] = []
     n = 0
-    # AIGC machine-translation disclosure (T1.3b): a short leading cue, when marked.
-    if disclosure:
+    if disclose_standalone:
         n += 1
-        lines += [str(n), f"{ts(0)} --> {ts(3000)}", disclosure, ""]
-    for seg in result.segments:
+        lines += [str(n), f"{ts(0)} --> {ts(min(3000, first_start))}", disc, ""]
+    for i, seg in enumerate(segs):
         target = seg.target_text.strip()
         source = seg.source_text.strip()
-        if not (target or source):
-            continue
         n += 1
         lines.append(str(n))
         lines.append(f"{ts(seg.start_ms)} --> {ts(seg.end_ms)}")
-        # Bilingual cue = target (the deliverable language) on top, source below;
-        # falls back to a single line when one side is empty (e.g. keep_original).
-        if bilingual and target and source and target != source:
-            lines.append(target)
-            lines.append(source)
+        body: list[str] = []
+        if disclose_on_first and i == 0:
+            body.append(disc)  # no gap for a standalone cue -> ride on the first cue
+        # Bilingual cue = target (deliverable language) on top, source below; both kept even
+        # when MT == source (names/acronyms/punctuation) for a consistent bilingual layout
+        # (@CodeX bot P3). Falls back to one line only when a side is empty (keep_original).
+        if bilingual and target and source:
+            body += [target, source]
         else:
-            lines.append(target or source)
+            body.append(target or source)
+        lines += body
         lines.append("")
     with atomic_output(path) as tmp:
         tmp.write_text("\n".join(lines), encoding="utf-8")

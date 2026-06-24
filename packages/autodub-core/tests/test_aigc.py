@@ -150,6 +150,49 @@ def test_mux_both_marks_video_and_subtitle(tmp_path: Path, monkeypatch) -> None:
     assert "机器翻译" in paths.subtitles.read_text(encoding="utf-8")           # disclosure on srt
 
 
+def test_disclosure_rides_on_first_cue_when_no_gap(tmp_path: Path) -> None:
+    # @CodeX bot P2: first real cue at 0ms -> no gap for a standalone notice, so the disclosure
+    # rides on that cue's text rather than an overlapping [0,3000] cue (overlaps stack/hide).
+    paths = JobPaths(tmp_path).ensure()
+    _write_segments(paths, [("hello", "你好")])  # seg 0 at [0, 1000]
+    stages.mux(paths, output_mode="subtitle_only")  # default-on marking
+    blocks = [b for b in paths.subtitles.read_text(encoding="utf-8").split("\n\n") if b.strip()]
+    assert len(blocks) == 1  # one cue only — no separate overlapping disclosure cue
+    cue = blocks[0].splitlines()
+    assert cue[1] == "00:00:00,000 --> 00:00:01,000"  # the real cue's own timing
+    assert "本字幕由机器翻译生成" in cue and "你好" in cue  # disclosure folded onto it
+
+
+def test_disclosure_standalone_cue_clamped_to_first_cue(tmp_path: Path) -> None:
+    # @CodeX bot P2: with a gap before the first cue, the disclosure is a standalone leading cue
+    # CLAMPED to end at the first cue's start, so it never overlaps real content.
+    paths = JobPaths(tmp_path).ensure()
+    seg = DubbingSegment(
+        segment_id="seg_0000", index=0, speaker_id="SPEAKER_00",
+        start_ms=2000, end_ms=4000, target_duration_ms=2000,
+        source_text="hi", target_text="你好", keep_original=False,
+    )
+    write_json(paths.segments, TranslationResult(
+        source_language="en", target_language="zh", mt_provider="m", segments=[seg]).model_dump())
+    stages.mux(paths, output_mode="subtitle_only")  # default-on marking
+    blocks = [b for b in paths.subtitles.read_text(encoding="utf-8").split("\n\n") if b.strip()]
+    assert len(blocks) == 2
+    assert blocks[0].splitlines()[1] == "00:00:00,000 --> 00:00:02,000"  # clamped to first cue
+    assert "本字幕由机器翻译生成" in blocks[0]
+    assert blocks[1].splitlines()[1] == "00:00:02,000 --> 00:00:04,000"  # real cue, no overlap
+
+
+def test_bilingual_keeps_both_lines_when_target_equals_source(tmp_path: Path) -> None:
+    # @CodeX bot P3: bilingual layout stays consistent — both lines kept even when MT returns
+    # text identical to the source (names / acronyms / punctuation).
+    paths = JobPaths(tmp_path).ensure()
+    _write_segments(paths, [("OK", "OK")])  # MT == source
+    off = AigcMarking(enabled=False, implicit=False, explicit=False, form="disclosure_only")
+    stages.mux(paths, output_mode="subtitle_only", subtitle_lang="bilingual", marking=off)
+    block = paths.subtitles.read_text(encoding="utf-8").split("\n\n")[0].splitlines()
+    assert block[2:] == ["OK", "OK"]  # both lines present despite being identical
+
+
 # --------------------------------------------------------------------------- #
 # run_pipeline records the applied method in manifest.json
 # --------------------------------------------------------------------------- #
