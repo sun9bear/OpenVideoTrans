@@ -26,6 +26,14 @@ from .base import (
     select,
 )
 from .ladder import AUTO_LADDER, PAID_PROVIDERS, is_paid_provider
+from .languages import (
+    CAPABILITIES,
+    LanguageError,
+    assert_language_pair,
+    deepl_target_code,
+    get_capability,
+    resolve_source_language,
+)
 
 # Registering all adapters populates the kind→name→factory registry that select()
 # walks; REGISTRY is then flattened from it (name→ProviderInfo).
@@ -37,16 +45,22 @@ REGISTRY: dict[str, ProviderInfo] = build_registry()
 
 __all__ = [
     "AUTO_LADDER",
+    "CAPABILITIES",
     "PAID_PROVIDERS",
     "REGISTRY",
+    "LanguageError",
     "PaidProviderBlocked",
     "ProviderInfo",
     "ProviderUnavailable",
     "Resolver",
+    "assert_language_pair",
+    "deepl_target_code",
+    "get_capability",
     "has_binary",
     "has_module",
     "is_paid_provider",
     "list_providers",
     "probe",
+    "resolve_source_language",
     "select",
 ]
