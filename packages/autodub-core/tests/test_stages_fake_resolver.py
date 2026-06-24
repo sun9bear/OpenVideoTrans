@@ -223,11 +223,12 @@ def test_mux_not_cached_when_srt_missing(tmp_path: Path) -> None:
 def test_mux_cached_when_both_outputs_exist(tmp_path: Path) -> None:
     # both promised outputs present AND the cache marker matches the requested
     # settings -> cached early-return before any ffmpeg work (no segments.json /
-    # video needed). The marker records the default settings key (unmarked|both|target|srt).
+    # video needed). marking defaults ON at the mux boundary (§3), so a default `both`
+    # run's key carries the av_voice_mark method.
     paths = JobPaths(tmp_path).ensure()
     paths.dubbed_video.write_bytes(b"\x00")
     paths.subtitles.write_text("1\n", encoding="utf-8")
-    (paths.output / ".mux_cache").write_text("|both|target|srt", encoding="utf-8")
+    (paths.output / ".mux_cache").write_text("av_voice_mark|both|target|srt", encoding="utf-8")
     assert stages.mux(paths, force=False) == paths.dubbed_video
 
 

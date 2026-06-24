@@ -10,11 +10,16 @@ import pytest
 from autodub_core import JobPaths, stages
 from autodub_core.jsonio import write_json
 from ovt_schemas.contracts import (
+    AigcMarking,
     DubbingSegment,
     Transcript,
     TranscriptLine,
     TranslationResult,
 )
+
+# Marking is default-ON at the mux boundary (§3); these tests isolate output-mode / bilingual
+# STRUCTURE from the AIGC disclosure cue by passing an explicit disabled marking.
+_NO_MARK = AigcMarking(enabled=False, implicit=False, explicit=False, form="disclosure_only")
 
 
 def _segments(pairs: list[tuple[str, str]]) -> TranslationResult:
@@ -63,7 +68,7 @@ def test_mux_subtitle_only_writes_srt_only(tmp_path: Path) -> None:
 def test_mux_subtitle_only_bilingual_has_target_and_source_lines(tmp_path: Path) -> None:
     paths = JobPaths(tmp_path).ensure()
     _write_segments(paths, [("hello", "你好")])
-    stages.mux(paths, output_mode="subtitle_only", subtitle_lang="bilingual")
+    stages.mux(paths, output_mode="subtitle_only", subtitle_lang="bilingual", marking=_NO_MARK)
     srt = paths.subtitles.read_text(encoding="utf-8")
     block = srt.split("\n\n")[0].splitlines()  # [index, timing, target, source]
     assert block[2] == "你好"  # target on top (the deliverable language)
@@ -86,7 +91,7 @@ def test_mux_bilingual_falls_back_to_one_line_when_no_target(tmp_path: Path) -> 
     # keep_original (empty target): even bilingual emits a single source line.
     paths = JobPaths(tmp_path).ensure()
     _write_segments(paths, [("hello", "")])
-    stages.mux(paths, output_mode="subtitle_only", subtitle_lang="bilingual")
+    stages.mux(paths, output_mode="subtitle_only", subtitle_lang="bilingual", marking=_NO_MARK)
     block = paths.subtitles.read_text(encoding="utf-8").split("\n\n")[0]
     assert block.splitlines()[2:] == ["hello"]
 
@@ -114,6 +119,20 @@ def test_mux_both_produces_video_and_srt(tmp_path: Path, monkeypatch) -> None:  
     assert out == paths.dubbed_video
     assert paths.dubbed_video.exists()
     assert paths.subtitles.exists()
+
+
+def test_mux_clears_stale_deliverable_when_mode_narrows(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001, E501
+    # CodeX bot P2: reuse a job dir from `both`, then re-run subtitle_only -> the old
+    # dubbed_video.mp4 must be removed, not left for presence-based packaging to publish.
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    _mock_ffmpeg(monkeypatch)
+    stages.mux(paths, output_mode="both")  # -> dubbed_video.mp4 + subtitles.srt
+    assert paths.dubbed_video.exists()
+    stages.mux(paths, output_mode="subtitle_only")  # mode narrows: video is no longer requested
+    assert paths.subtitles.exists()
+    assert not paths.dubbed_video.exists()  # stale deliverable cleared, not left behind
 
 
 def test_mux_burned_delivery_deferred_no_crash(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001

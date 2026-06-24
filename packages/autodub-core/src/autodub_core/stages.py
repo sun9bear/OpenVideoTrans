@@ -405,6 +405,13 @@ def mux(
     if subtitle_delivery not in _SUBTITLE_DELIVERIES:
         raise ValueError(f"unknown subtitle_delivery: {subtitle_delivery!r}")
     paths.ensure()
+    # RED LINE §3 (default-on): mux is exported and writes final deliverables directly, so it
+    # must NOT emit an unmarked output by omission. When no marking is supplied, default it ON
+    # by output_mode — exactly like run_pipeline — so a direct caller can't bypass the mark.
+    # Turning the mark OFF requires an explicit AigcMarking(enabled=False) (the audited
+    # acknowledgment §3 demands), which embed_method/_on already honour (CodeX bot P1).
+    if marking is None:
+        marking = aigc.default_marking(output_mode)
 
     want_video = output_mode in ("dub_only", "both")
     want_subs = output_mode in ("subtitle_only", "both")
@@ -444,9 +451,12 @@ def mux(
         if want_method and marking is not None:
             marking.applied = True  # cached artifacts carry the recorded mark
         return primary
-    # Rebuild: clear the expected deliverables first so a mid-build failure leaves
-    # an incomplete (repairable) set, never a stale one that looks cached next time.
-    for p in expected:
+    # Rebuild: clear EVERY known deliverable, not just the requested ones. When the output
+    # mode narrows on a reused job dir (both -> subtitle_only / dub_only), a stale deliverable
+    # from the previous wider mode (e.g. dubbed_video.mp4 / subtitles.srt) must not linger for
+    # presence-based packaging/upload to publish (CodeX bot P2). Expected ones are rebuilt below;
+    # clearing first also keeps a mid-build failure repairable, never stale-looking-as-cached.
+    for p in (paths.dubbed_video, paths.subtitles):
         p.unlink(missing_ok=True)
 
     result = TranslationResult.model_validate(read_json(paths.segments))

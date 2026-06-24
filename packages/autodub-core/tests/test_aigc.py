@@ -112,16 +112,31 @@ def test_mux_subtitle_only_leads_with_mt_disclosure(tmp_path: Path) -> None:
     assert marking.applied is True
 
 
-def test_mux_without_marking_is_unmarked(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+def test_mux_default_marks_when_marking_omitted(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # RED LINE §3 (CodeX bot P1): mux is exported and writes deliverables directly, so marking
+    # MUST default ON — never an unmarked output by omission. marking=None marks by output_mode.
     paths = JobPaths(tmp_path).ensure()
     (paths.video / "original.mp4").write_bytes(b"vid")
     _write_segments(paths, [("hello", "你好")])
     captured: dict = {}
     _mock_video_ffmpeg(monkeypatch, captured)
-    stages.mux(paths, output_mode="both")  # marking=None
-    assert captured["metadata"] == []           # no AIGC metadata on the video
-    srt = paths.subtitles.read_text(encoding="utf-8")
-    assert "机器翻译" not in srt                  # no disclosure cue
+    stages.mux(paths, output_mode="both")  # marking=None -> default-on
+    assert any("aigc_mark=av_voice_mark" in a for a in captured["metadata"])  # video marked
+    assert "机器翻译" in paths.subtitles.read_text(encoding="utf-8")           # subtitle disclosed
+
+
+def test_mux_explicit_disabled_marking_is_unmarked(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # The ONLY way to ship unmarked is an explicit AigcMarking(enabled=False) — the audited §14
+    # acknowledgment, never omission.
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    captured: dict = {}
+    _mock_video_ffmpeg(monkeypatch, captured)
+    off = AigcMarking(enabled=False, implicit=False, explicit=False, form="tail_notice")
+    stages.mux(paths, output_mode="both", marking=off)
+    assert captured["metadata"] == []                                  # no AIGC metadata on video
+    assert "机器翻译" not in paths.subtitles.read_text(encoding="utf-8")  # no disclosure cue
 
 
 def test_mux_both_marks_video_and_subtitle(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
