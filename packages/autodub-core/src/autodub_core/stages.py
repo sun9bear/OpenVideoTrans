@@ -353,38 +353,83 @@ def _write_silence(out_wav: Path, ms: int) -> None:
 
 
 # --------------------------------------------------------------------------- #
-def mux(paths: JobPaths, keep_ambient: bool = True, force: bool = False) -> Path:
+_OUTPUT_MODES = ("subtitle_only", "dub_only", "both")
+_SUBTITLE_LANGS = ("target", "bilingual")
+_SUBTITLE_DELIVERIES = ("srt", "burned", "both")
+
+
+def mux(
+    paths: JobPaths,
+    keep_ambient: bool = True,
+    force: bool = False,
+    *,
+    output_mode: str = "both",
+    subtitle_lang: str = "target",
+    subtitle_delivery: str = "srt",
+) -> Path:
+    """Compose the job's deliverables per ``output_mode`` (T1.3d).
+
+    - ``dub_only`` / ``both`` -> a dubbed ``dubbed_video.mp4`` (stitched dubbed
+      audio over the source video).
+    - ``subtitle_only`` / ``both`` -> ``subtitles.srt`` when ``subtitle_delivery``
+      includes srt; ``subtitle_lang == "bilingual"`` emits target + source lines.
+    - burned subtitle delivery is a guarded placeholder until M2.1 (feature-flag off).
+
+    Returns the primary deliverable: the dubbed video when dubbing, else the srt.
+    The deliverable set is the resume cache gate — a re-run rebuilds until every
+    expected file is present, so a crash mid-build never looks cached.
+    """
+    if output_mode not in _OUTPUT_MODES:
+        raise ValueError(f"unknown output_mode: {output_mode!r} (expected {_OUTPUT_MODES})")
+    if subtitle_lang not in _SUBTITLE_LANGS:
+        raise ValueError(f"unknown subtitle_lang: {subtitle_lang!r}")
+    if subtitle_delivery not in _SUBTITLE_DELIVERIES:
+        raise ValueError(f"unknown subtitle_delivery: {subtitle_delivery!r}")
     paths.ensure()
-    # mux promises BOTH mp4 + srt; require both before skipping, so a crash
-    # between ff.mux() and _write_srt() is repaired on a non-force re-run.
-    if paths.dubbed_video.exists() and paths.subtitles.exists() and not force:
+
+    want_video = output_mode in ("dub_only", "both")
+    want_subs = output_mode in ("subtitle_only", "both")
+    want_srt = want_subs and subtitle_delivery in ("srt", "both")
+    if want_subs and subtitle_delivery in ("burned", "both"):
+        if config.BURN_SUBTITLES_ENABLED:
+            # M2.1 owns the libass re-encode burn-in; intentionally unreachable in M1.
+            raise NotImplementedError("burned subtitles are an M2.1 feature")
+        _log("mux: burned subtitles requested but deferred to M2.1 (feature-flag off)")
+
+    expected = [p for p, want in
+                ((paths.dubbed_video, want_video), (paths.subtitles, want_srt)) if want]
+    primary = paths.dubbed_video if want_video else paths.subtitles
+    if expected and all(p.exists() for p in expected) and not force:
         _log("mux: cached")
-        return paths.dubbed_video
-    # Reaching here means a (re)build is needed (forced, or an incomplete pair).
-    # Clear both deliverables first so a failure mid-rewrite leaves an incomplete
-    # (repairable) set, never a stale mp4+srt pair that looks cached next time.
-    paths.dubbed_video.unlink(missing_ok=True)
-    paths.subtitles.unlink(missing_ok=True)
+        return primary
+    # Rebuild: clear the expected deliverables first so a mid-build failure leaves
+    # an incomplete (repairable) set, never a stale one that looks cached next time.
+    for p in expected:
+        p.unlink(missing_ok=True)
+
     result = TranslationResult.model_validate(read_json(paths.segments))
-    video = paths.original_video()
-    if not video:
-        raise RuntimeError("mux: no original video")
-    ff.assert_ffmpeg()
-    total_ms = ff.probe_duration_ms(video)
+    if want_video:
+        video = paths.original_video()
+        if not video:
+            raise RuntimeError("mux: no original video")
+        ff.assert_ffmpeg()
+        total_ms = ff.probe_duration_ms(video)
+        placements = [(s.start_ms, paths.tts_aligned(s.index))
+                      for s in result.segments if paths.tts_aligned(s.index).exists()]
+        ff.stitch_timeline(placements, paths.dubbed_audio, total_ms)
+        _log(f"mux: composed {len(placements)} segments into dubbed audio")
+        ambient = paths.ambient if (keep_ambient and paths.ambient.exists()) else None
+        ff.mux(video, paths.dubbed_audio, paths.dubbed_video, ambient=ambient)
+        _log(f"mux: wrote {paths.dubbed_video.name}")
+    # Write the srt LAST so a failed video mux above leaves no lone deliverable
+    # that the next run might otherwise treat as progress.
+    if want_srt:
+        _write_srt(result, paths.subtitles, bilingual=(subtitle_lang == "bilingual"))
+        _log(f"mux: wrote {paths.subtitles.name}")
+    return primary
 
-    placements = [(s.start_ms, paths.tts_aligned(s.index))
-                  for s in result.segments if paths.tts_aligned(s.index).exists()]
-    ff.stitch_timeline(placements, paths.dubbed_audio, total_ms)
-    _log(f"mux: composed {len(placements)} segments into dubbed audio")
 
-    ambient = paths.ambient if (keep_ambient and paths.ambient.exists()) else None
-    ff.mux(video, paths.dubbed_audio, paths.dubbed_video, ambient=ambient)
-    _write_srt(result, paths.subtitles)
-    _log(f"mux: wrote {paths.dubbed_video}")
-    return paths.dubbed_video
-
-
-def _write_srt(result: TranslationResult, path: Path) -> None:
+def _write_srt(result: TranslationResult, path: Path, *, bilingual: bool = False) -> None:
     def ts(ms: int) -> str:
         ms = max(0, ms)
         h, ms = divmod(ms, 3_600_000)
@@ -395,13 +440,20 @@ def _write_srt(result: TranslationResult, path: Path) -> None:
     lines: list[str] = []
     n = 0
     for seg in result.segments:
-        text = seg.target_text.strip() or seg.source_text.strip()
-        if not text:
+        target = seg.target_text.strip()
+        source = seg.source_text.strip()
+        if not (target or source):
             continue
         n += 1
         lines.append(str(n))
         lines.append(f"{ts(seg.start_ms)} --> {ts(seg.end_ms)}")
-        lines.append(text)
+        # Bilingual cue = target (the deliverable language) on top, source below;
+        # falls back to a single line when one side is empty (e.g. keep_original).
+        if bilingual and target and source and target != source:
+            lines.append(target)
+            lines.append(source)
+        else:
+            lines.append(target or source)
         lines.append("")
     with atomic_output(path) as tmp:
         tmp.write_text("\n".join(lines), encoding="utf-8")
@@ -421,15 +473,22 @@ def run_pipeline(
     separate: bool = False,
     keep_ambient: bool = True,
     force: bool = False,
+    output_mode: str = "both",
+    subtitle_lang: str = "target",
+    subtitle_delivery: str = "srt",
     job: Job | None = None,
 ) -> Path:
-    """End-to-end local dub: ingest -> prepare -> transcribe -> translate -> tts
-    -> align -> mux. Returns the dubbed video path (subtitles alongside it).
+    """End-to-end local pipeline: ingest -> prepare -> transcribe -> translate ->
+    [tts -> align] -> mux. Returns the primary deliverable path.
+
+    ``output_mode`` (T1.3d) decides which stages run and which deliverables are
+    produced: ``subtitle_only`` skips tts + align and emits only subtitles;
+    ``dub_only`` / ``both`` run the full dub. ``subtitle_lang`` / ``subtitle_delivery``
+    shape the subtitle output (bilingual lines; burned is an M2.1 placeholder).
 
     The Tier 1 kernel never enables paid providers (CLAUDE.md red line §1/§14):
     there is deliberately no allow_paid opt-in here, and the resolver is pinned
-    (T1.3a) so even a future change can't slip a paid provider past the gate — the
-    stages always pass allow_paid=False, and ``pin_resolver`` refuses anything else.
+    (T1.3a) so even a future change can't slip a paid provider past the gate.
 
     When ``job`` is supplied (the authoritative record from the control plane /
     local-runner) a ``manifest.json`` is written alongside the deliverables (T1.3a).
@@ -439,9 +498,12 @@ def run_pipeline(
     prepare(paths, separate=separate, force=force)
     transcribe(paths, resolver, asr, source_lang, force=force)
     translate(paths, resolver, mt, target_lang, source_lang, force=force)
-    tts(paths, resolver, tts_provider, force=force)
-    align(paths, force=force)
-    out = mux(paths, keep_ambient=keep_ambient, force=force)
+    # subtitle_only needs no synthesized/aligned audio — skip tts + align entirely.
+    if output_mode in ("dub_only", "both"):
+        tts(paths, resolver, tts_provider, force=force)
+        align(paths, force=force)
+    out = mux(paths, keep_ambient=keep_ambient, force=force, output_mode=output_mode,
+              subtitle_lang=subtitle_lang, subtitle_delivery=subtitle_delivery)
     if job is not None:
         write_manifest(paths, job)
     return out
