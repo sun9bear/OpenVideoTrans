@@ -156,6 +156,7 @@ def process_job(
     *,
     workdir_base: Path | str,
     config: WorkerConfig,
+    clock: Callable[[], float] = time.monotonic,
 ) -> None:
     """Run one claimed job through the stub: copy source -> artifact(s) -> complete (or fail)."""
     job = claim.job
@@ -173,6 +174,7 @@ def process_job(
         on_lost=lease_lost.set,
     )
     heartbeat.start()
+    started = clock()
     try:
         try:
             artifacts = _produce_artifacts(storage, job, claim_version, workdir)
@@ -183,10 +185,11 @@ def process_job(
             cp.fail(job_id, claim_version, error_code="internal_error")
             logger.warning("job %s failed (stub)", job_id)
             return
-        if lease_lost.is_set():
-            # The hard timeout tripped (or the lease was reclaimed) during processing: do NOT mark
-            # the job done. Report processing_timeout — a no-op server-side if the lease was already
-            # reclaimed (claim_version-gated), terminal if we still hold it.
+        # Hard-timeout gate, checked PRECISELY here (not only on the coarse heartbeat tick): a job
+        # that finished after the cap — even within a heartbeat interval — must not be marked done.
+        # lease_lost also covers a lease reclaimed mid-run. Either way report processing_timeout (a
+        # no-op server-side if the lease was already reclaimed; terminal if we still hold it).
+        if clock() - started >= config.job_hard_timeout_sec or lease_lost.is_set():
             cp.fail(job_id, claim_version, error_code="processing_timeout")
             logger.warning("job %s exceeded the hard timeout; reported processing_timeout", job_id)
             return

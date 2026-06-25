@@ -11,6 +11,7 @@ from media_worker.worker import (
     artifact_key,
     clean_orphan_workdirs,
     job_workdir,
+    process_job,
     run_forever,
     run_once,
     source_key_for,
@@ -136,34 +137,23 @@ def test_heartbeat_renews_during_a_long_single_stage(tmp_path: Path) -> None:
 
 
 def test_exceeding_hard_timeout_reports_processing_timeout(tmp_path: Path) -> None:
-    # A job finishing AFTER the hard cap must NOT be marked done — it is failed processing_timeout
-    # (CodeX P2). A zero hard-cap trips the heartbeat watchdog on its first tick mid-stage.
+    # Precise elapsed gate (CodeX P2): a job whose work finishes after the hard cap is failed
+    # processing_timeout even within one heartbeat interval. Inject a clock that jumps past the cap.
     cfg = WorkerConfig(
-        heartbeat_interval_sec=0.01, lease_ttl_sec=1.0, job_hard_timeout_sec=0.0, max_attempts=2
+        heartbeat_interval_sec=30.0, lease_ttl_sec=180.0, job_hard_timeout_sec=10.0, max_attempts=2
     )
-    entered = threading.Event()
-    release = threading.Event()
-
-    class _BlockingStorage(FakeStorage):
-        def download(self, key: str) -> bytes:
-            data = super().download(key)
-            entered.set()
-            assert release.wait(3.0)
-            return data
-
     job = make_job(job_id="job_t", upload_session_id="us_t", output_mode="dub_only")
-    cp = FakeControlPlane(config=cfg, claims=[Claim(job=job, claim_version=1, attempt=1)])
-    storage = _BlockingStorage({"uploads/us_t": b"X"})
-    worker = threading.Thread(
-        target=run_once, args=(cp, storage),
-        kwargs={"workdir_base": tmp_path, "config": cfg},
+    cp = FakeControlPlane(config=cfg)
+    storage = FakeStorage({"uploads/us_t": b"X"})
+    times = iter([0.0, 100.0])  # started=0; post-produce check=100 (>= 10s cap)
+    process_job(
+        cp,
+        storage,
+        Claim(job=job, claim_version=1, attempt=1),
+        workdir_base=tmp_path,
+        config=cfg,
+        clock=lambda: next(times, 100.0),
     )
-    worker.start()
-    assert entered.wait(3.0)
-    time.sleep(0.1)  # let the zero hard-cap watchdog trip while the stage is still blocked
-    release.set()
-    worker.join(5.0)
-    assert not worker.is_alive()
     assert cp.completed == []  # NOT marked done
     assert cp.failed == [("job_t", 1, "processing_timeout", None)]
     assert not (tmp_path / "job_t").exists()
