@@ -78,6 +78,16 @@ provides-extras = ["url"]
 name = "media-worker"
 version = "0.0.1"
 source = { editable = "workers/media-worker" }
+dependencies = [
+    { name = "autodub-core" },
+    { name = "ovt-schemas" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "autodub-core", editable = "packages/autodub-core" },
+    { name = "ovt-schemas", editable = "packages/schemas" },
+]
 
 [[package]]
 name = "nodeenv"
