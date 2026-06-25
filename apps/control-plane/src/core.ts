@@ -1,4 +1,4 @@
-import type { D1Database, KVNamespace, R2Bucket } from "@cloudflare/workers-types";
+import type { D1Database, KVNamespace, Queue, R2Bucket } from "@cloudflare/workers-types";
 import type { RuntimeConfig } from "./config";
 
 // The Worker's binding + secret surface. Bindings come from wrangler.jsonc; the R2 S3 presign
@@ -19,6 +19,29 @@ export interface Env {
   // MUST match the deployment secret (docs prep-checklist: TURNSTILE_SECRET_KEY) or the gate stays
   // silently inert in production. A wrangler secret injected by SECRETS/deploy — never in the repo.
   TURNSTILE_SECRET_KEY?: string;
+  // CF Queues wake-signal producer binding (T2.5). Optional: absent in tests / pre-deploy / the
+  // D1-claim backend, in which case the producer falls back to D1-claim (jobs table is the
+  // authoritative worklist, so a missing queue never strands a job). Wired in wrangler.jsonc.
+  JOB_QUEUE?: Queue<WakeMessage>;
+}
+
+// The CF Queues message body (T2.5). Deliberately just the job id: the authoritative job state lives
+// in D1, the queue carries only a low-latency "this job is claimable" wake. No secrets ever ride here.
+export interface WakeMessage {
+  job_id: string;
+}
+
+// Which queue_adapter backs job dispatch. `d1` = the jobs table IS the worklist (long-poll claim);
+// `cf_queues` = additionally emit a wake message to shave poll latency, D1 still authoritative. The
+// production lock + break-glass switch (audited) is CFG-GUARD's; the default here is the safe `d1`.
+export type QueueBackend = "d1" | "cf_queues";
+
+// Producer seam invoked AFTER the authoritative D1 INSERT in createJob. Implemented in queue.ts
+// (D1-claim no-op vs CF-Queues best-effort send); named here so Ctx can carry it injectably, the
+// same pattern as TurnstileVerifier (type in core, impl in abuse.ts).
+export interface QueueProducer {
+  readonly backend: QueueBackend;
+  wake(jobId: string): Promise<void>;
 }
 
 // Verifies a Turnstile token. (secret, token, remoteip) -> true iff valid. Injected via the router
@@ -55,6 +78,7 @@ export interface Ctx {
   params: Record<string, string>;
   actor: string | undefined;
   verifyTurnstile: TurnstileVerifier;
+  producer: QueueProducer;
 }
 
 // A request-level failure carrying an HTTP status + stable error code. Thrown by handlers and

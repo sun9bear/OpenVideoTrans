@@ -1,4 +1,4 @@
-import type { Env } from "./core";
+import type { Env, QueueBackend } from "./core";
 
 // Runtime knobs the Worker reads each request. These are NON-security operational values; the
 // authoritative source is the D1 `settings` table behind per-key validation + audit — that table,
@@ -22,6 +22,12 @@ export interface RuntimeConfig {
   // re-admission (T2.4). Surfaced via /internal/config so the cap is config-driven end-to-end;
   // CFG-GUARD owns the real settings table + validation.
   maxVideoDurationMs: { subtitle_only: number; dub_only: number; both: number };
+  // Which queue_adapter dispatches jobs (T2.5). `d1` (default, safe): the jobs table is the
+  // authoritative worklist and the worker long-polls claim — no external queue. `cf_queues`:
+  // additionally emit a best-effort wake message to shave poll latency, D1 still authoritative. The
+  // production lock to cf_queues + the audited break-glass switch back to d1 is CFG-GUARD's; here it
+  // defaults to the conservative d1 so a Worker with no queue binding is fully functional.
+  queueBackend: QueueBackend;
 }
 
 export const DEFAULT_CONFIG: RuntimeConfig = {
@@ -56,6 +62,7 @@ export const DEFAULT_CONFIG: RuntimeConfig = {
     dub_only: 300 * 1000,
     both: 300 * 1000,
   },
+  queueBackend: "d1", // safe default; CFG-GUARD locks prod to cf_queues with an audited break-glass.
 };
 
 export async function getConfig(env: Env): Promise<RuntimeConfig> {

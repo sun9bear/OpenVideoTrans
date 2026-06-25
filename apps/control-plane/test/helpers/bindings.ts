@@ -1,5 +1,5 @@
-import type { KVNamespace, R2Bucket, R2Object } from "@cloudflare/workers-types";
-import type { Deps, Env, TurnstileVerifier } from "../../src/core";
+import type { KVNamespace, Queue, R2Bucket, R2Object } from "@cloudflare/workers-types";
+import type { Deps, Env, TurnstileVerifier, WakeMessage } from "../../src/core";
 import { handle } from "../../src/router";
 import { makeD1, type RawDb } from "./d1";
 
@@ -32,6 +32,17 @@ export class FakeR2 {
   }
 }
 
+// In-memory CF Queue producer stand-in (T2.5): records each wake send. `throwOnSend` models a Queues
+// blip so tests can assert the producer is best-effort (a send failure must not fail job creation).
+export class FakeQueue {
+  readonly sent: WakeMessage[] = [];
+  constructor(private readonly throwOnSend = false) {}
+  async send(message: WakeMessage): Promise<void> {
+    if (this.throwOnSend) throw new Error("queue unavailable");
+    this.sent.push(message);
+  }
+}
+
 // In-memory KV modelling get("key","json"|"text").
 export class FakeKV {
   private readonly store = new Map<string, string>();
@@ -49,6 +60,7 @@ export interface TestEnvOptions {
   internalToken?: string;
   r2Creds?: boolean;
   turnstileSecret?: string;
+  jobQueue?: FakeQueue;
 }
 
 export function makeEnv(opts: TestEnvOptions = {}): {
@@ -66,6 +78,9 @@ export function makeEnv(opts: TestEnvOptions = {}): {
     CONFIG: kv as unknown as KVNamespace,
     ...(opts.internalToken !== undefined ? { INTERNAL_TOKEN: opts.internalToken } : {}),
     ...(opts.turnstileSecret !== undefined ? { TURNSTILE_SECRET_KEY: opts.turnstileSecret } : {}),
+    ...(opts.jobQueue !== undefined
+      ? { JOB_QUEUE: opts.jobQueue as unknown as Queue<WakeMessage> }
+      : {}),
     ...(opts.r2Creds
       ? {
           R2_ACCOUNT_ID: "acct-test",

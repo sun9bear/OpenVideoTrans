@@ -1,7 +1,8 @@
-import type { Ctx, Deps, Env, TurnstileVerifier } from "./core";
+import type { Ctx, Deps, Env, QueueProducer, TurnstileVerifier } from "./core";
 import { HttpError, apiError, json, realDeps } from "./core";
 import { realTurnstileVerifier } from "./abuse";
 import { getConfig } from "./config";
+import { selectProducer } from "./queue";
 import { signUpload } from "./uploads";
 import { claimNext, complete, createJob, download, fail, getJob, heartbeat } from "./jobs";
 
@@ -77,6 +78,7 @@ export async function handle(
   env: Env,
   deps: Deps = realDeps,
   verifyTurnstile: TurnstileVerifier = realTurnstileVerifier,
+  producer?: QueueProducer,
 ): Promise<Response> {
   const url = new URL(request.url);
   try {
@@ -92,7 +94,20 @@ export async function handle(
       if (r.auth === "worker") requireWorker(request, env);
       else if (r.auth === "actor") actor = getActor(request);
       const config = await getConfig(env);
-      const ctx: Ctx = { request, env, deps, config, url, params, actor, verifyTurnstile };
+      // The queue_adapter producer is selected from config + bindings (cf_queues vs d1), injectable
+      // for tests. Both depend on `config`, so select it here rather than at module load.
+      const queueProducer = producer ?? selectProducer(env, config);
+      const ctx: Ctx = {
+        request,
+        env,
+        deps,
+        config,
+        url,
+        params,
+        actor,
+        verifyTurnstile,
+        producer: queueProducer,
+      };
       return await r.handler(ctx);
     }
     return apiError(404, "not_found", "no such route");

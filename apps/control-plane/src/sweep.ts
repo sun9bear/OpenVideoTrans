@@ -1,6 +1,7 @@
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import type { RuntimeConfig } from "./config";
-import type { Deps, Env } from "./core";
+import type { Deps, Env, QueueProducer } from "./core";
+import { selectProducer } from "./queue";
 
 // T2.3 — the CF Cron sweeper. Four periodic duties keep the worklist + storage consistent without a
 // request in flight (plan §6 / §177 / §261-264 / §92):
@@ -121,7 +122,10 @@ export async function recoverLeases(
   now: number,
   maxAttempts: number,
   limit: number = SWEEP_BATCH_LIMIT,
-): Promise<{ requeued: number; workerLost: number }> {
+): Promise<{ requeued: number; requeuedIds: string[]; workerLost: number }> {
+  // RETURNING the requeued ids so runSweep can re-emit a CF-Queues wake for each (T2.5): a job that
+  // went running->queued is claimable again and, under cf_queues, needs a fresh wake (its original
+  // create-time wake is long gone). worker_lost rows are terminal, so they get no wake.
   const requeue = await db
     .prepare(
       `UPDATE jobs SET status = 'queued', lease_expires_at = NULL, current_stage = 'requeued'
@@ -129,10 +133,12 @@ export async function recoverLeases(
            SELECT job_id FROM jobs
              WHERE status = 'running' AND lease_expires_at <= ? AND attempt < ?
              ORDER BY lease_expires_at ASC LIMIT ?
-         )`,
+         )
+       RETURNING job_id`,
     )
     .bind(now, maxAttempts, limit)
-    .run();
+    .all<{ job_id: string }>();
+  const requeuedIds = requeue.results.map((r) => r.job_id);
   const lost = await db
     .prepare(
       `UPDATE jobs SET status = 'failed', error_code = 'worker_lost', finished_at = ?,
@@ -145,7 +151,7 @@ export async function recoverLeases(
     )
     .bind(now, now, maxAttempts, limit)
     .run();
-  return { requeued: requeue.meta.changes, workerLost: lost.meta.changes };
+  return { requeued: requeuedIds.length, requeuedIds, workerLost: lost.meta.changes };
 }
 
 interface OrphanRow {
@@ -211,11 +217,12 @@ export async function cleanUploadOrphans(
 }
 
 // Duty 4 — reconcile the queue. Returns the ids of `queued` jobs that have waited longer than
-// staleMs. In the D1-claim adapter this is a read-only liveness check: the jobs table is the
-// authoritative worklist, so these stay claimable by long-poll claim() regardless of any external
-// queue signal — they cannot be stranded by a lost CF-Queues message. The actual re-enqueue of a
-// wake-message belongs to the CF-Queues adapter (T2.5, which depends on T2.3); this returns exactly
-// the worklist T2.5 will re-signal, and feeds OBS metrics meanwhile.
+// staleMs. This is a read-only liveness/metric check: the jobs table is the authoritative worklist,
+// so these stay claimable by long-poll claim() regardless of any external queue signal — they cannot
+// be stranded by a lost CF-Queues message. T2.5 deliberately does NOT re-emit a wake for this set:
+// the same rows recur every tick (enqueue_at is immutable), so re-waking them would storm the queue
+// during a worker outage (CodeX bot P2); the D1 long-poll backstop already serves them. runSweep
+// re-wakes only the requeue STATE TRANSITION. The count feeds OBS.
 export async function reconcileQueue(
   db: D1Database,
   now: number,
@@ -242,10 +249,23 @@ export async function reconcileQueue(
 // Recovery still runs before reconcile, so a just-requeued lost job is counted by reconcile. A
 // stale-queued threshold of one lease TTL flags a job that has sat unclaimed longer than a worker
 // would hold it.
-export async function runSweep(env: Env, deps: Deps, config: RuntimeConfig): Promise<SweepSummary> {
+//
+// T2.5: a lost-worker job that recoverLeases flips running->queued this tick gets a fresh best-effort
+// wake re-emitted through the producer (no-op under d1; a CF-Queues send under cf_queues) — that is a
+// real, bounded state transition, so createJob is no longer the only wake site. Stale-queued jobs are
+// NOT re-woken (see the wake duty below: re-waking the same recurring rows every tick would storm the
+// queue; the D1 long-poll backstop serves them). The producer defaults from config+bindings so the
+// scheduled handler need not thread it.
+export async function runSweep(
+  env: Env,
+  deps: Deps,
+  config: RuntimeConfig,
+  producer: QueueProducer = selectProducer(env, config),
+): Promise<SweepSummary> {
   const now = deps.now();
   const summary: SweepSummary = { purged: 0, requeued: 0, workerLost: 0, orphans: 0, reconciled: 0 };
   const errors: unknown[] = [];
+  let requeuedIds: string[] = [];
   const duty = async (run: () => Promise<void>): Promise<void> => {
     try {
       await run();
@@ -258,6 +278,7 @@ export async function runSweep(env: Env, deps: Deps, config: RuntimeConfig): Pro
     const r = await recoverLeases(env.DB, now, config.maxAttempts, SWEEP_BATCH_LIMIT);
     summary.requeued = r.requeued;
     summary.workerLost = r.workerLost;
+    requeuedIds = r.requeuedIds;
   });
   await duty(async () => {
     summary.purged = await purgeExpired(env.DB, env.MEDIA, now);
@@ -267,6 +288,20 @@ export async function runSweep(env: Env, deps: Deps, config: RuntimeConfig): Pro
   });
   await duty(async () => {
     summary.reconciled = (await reconcileQueue(env.DB, now, config.leaseTtlMs)).length;
+  });
+  // Re-signal ONLY a real state transition: a lost worker's job that recoverLeases flipped
+  // running->queued THIS tick (bounded — at most once per lease loss; next tick it is queued, not
+  // running, so it is not requeued again). Stale-queued jobs are deliberately NOT re-woken here:
+  // reconcileQueue returns the SAME rows every tick (enqueue_at is immutable), so re-waking them would
+  // send a duplicate wake per stale job per minute during a worker outage (CodeX bot P2). They are
+  // already served by the D1 long-poll backstop (the spec's no-orphan acceptance); a per-job throttled
+  // re-wake would need a last_wake_at column + audit -> routed to CFG-GUARD/OBS, out of this spike.
+  // Each wake is best-effort (the producer swallows a send blip) and isolated, so it never fails the
+  // sweep — D1 stays authoritative regardless.
+  await duty(async () => {
+    for (const id of requeuedIds) {
+      await producer.wake(id);
+    }
   });
 
   if (errors.length > 0) throw errors[0];

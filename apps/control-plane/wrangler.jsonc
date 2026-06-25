@@ -21,6 +21,17 @@
   ],
   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "ovt-media" }],
   "kv_namespaces": [{ "binding": "CONFIG", "id": "0000-set-at-deploy" }],
+  // T2.5 queue_adapter (CF Queues Free). The SAME Worker is producer (createJob emits a wake) and the
+  // thin consumer (the `queue` handler reconciles the wake against the authoritative D1 worklist —
+  // it never mutates job state). D1 stays the source of truth, so this is a latency-shaving overlay:
+  // queueBackend defaults to `d1`; CFG-GUARD locks prod to cf_queues with an audited break-glass.
+  // max_batch_timeout bounds wake latency; max_retries small because the D1 long-poll is the backstop.
+  "queues": {
+    "producers": [{ "binding": "JOB_QUEUE", "queue": "ovt-job-wake" }],
+    "consumers": [
+      { "queue": "ovt-job-wake", "max_batch_size": 100, "max_batch_timeout": 5, "max_retries": 3 }
+    ]
+  },
   "vars": {
     // Non-secret defaults; the authoritative runtime values come from the settings table / KV
     // (CFG-GUARD owns validation). R2 account id + bucket are non-secret deploy vars.

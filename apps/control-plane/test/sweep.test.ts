@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RawDb } from "./helpers/d1";
 import {
   call,
+  FakeQueue,
   insertJob,
   insertUploadSession,
   makeClock,
@@ -45,7 +46,7 @@ describe("recoverLeases — kill-worker re-queue (H1)", () => {
     // worker killed mid-run: it never heartbeats, so the 180s lease lapses.
     clock.advance(LEASE + 1000);
     const r = await recoverLeases(env.DB, clock.deps.now(), MAX);
-    expect(r).toEqual({ requeued: 1, workerLost: 0 });
+    expect(r).toEqual({ requeued: 1, requeuedIds: ["j1"], workerLost: 0 });
 
     const row = jobRow(raw, "j1");
     expect(row.status).toBe("queued");
@@ -73,7 +74,7 @@ describe("recoverLeases — kill-worker re-queue (H1)", () => {
     });
     const now = 10_000; // past the lease
     const r = await recoverLeases(env.DB, now, MAX);
-    expect(r).toEqual({ requeued: 0, workerLost: 1 });
+    expect(r).toEqual({ requeued: 0, requeuedIds: [], workerLost: 1 });
 
     const row = jobRow(raw, "j2");
     expect(row.status).toBe("failed");
@@ -112,7 +113,7 @@ describe("recoverLeases — kill-worker re-queue (H1)", () => {
       lease_expires_at: 100_000,
     });
     const r = await recoverLeases(env.DB, 50_000, MAX); // lease still in the future
-    expect(r).toEqual({ requeued: 0, workerLost: 0 });
+    expect(r).toEqual({ requeued: 0, requeuedIds: [], workerLost: 0 });
     expect(jobRow(raw, "j3").status).toBe("running");
   });
 
@@ -523,5 +524,70 @@ describe("runSweep — all four duties in one pass", () => {
     expect(jobRow(raw, "lost").status).toBe("queued");
     // ...and the failed purge did NOT falsely stamp data_purged_at, so the next tick retries it.
     expect(jobRow(raw, "boom").data_purged_at).toBeNull();
+  });
+});
+
+// ── T2.5: the sweeper re-wakes only a real state transition; no stale-job wake storm (CodeX bot P2) ──
+describe("runSweep — wake re-signal (T2.5 bridge symmetry)", () => {
+  function seed(raw: RawDb) {
+    // a lost worker (expired lease, attempt < max) -> recoverLeases requeues it (a real transition)
+    insertJob(raw, {
+      job_id: "lost",
+      enqueue_at: 0,
+      status: "running",
+      attempt: 1,
+      claim_version: 1,
+      lease_expires_at: 1000,
+    });
+    // a long-aged queued job that just sits there -> reconcileQueue surfaces it, but it is NOT a
+    // transition, so it must NOT be re-woken (the D1 long-poll backstop serves it).
+    insertJob(raw, { job_id: "stale", enqueue_at: 0 });
+  }
+
+  it("cf_queues: re-signals ONLY the requeue state transition, not stale-queued jobs", async () => {
+    const queue = new FakeQueue();
+    const { env, raw } = makeEnv({ jobQueue: queue });
+    seed(raw);
+    const now = LEASE + 100_000;
+    await runSweep(env, { now: () => now, newId: (p) => p }, { ...DEFAULT_CONFIG, queueBackend: "cf_queues" });
+    // 'lost' flipped running->queued this tick -> woken once. 'stale' was already queued -> NOT woken.
+    expect(queue.sent.map((m) => m.job_id)).toEqual(["lost"]);
+  });
+
+  it("cf_queues: a stale-queued job is NOT re-woken across ticks (no wake storm)", async () => {
+    const queue = new FakeQueue();
+    const { env, raw } = makeEnv({ jobQueue: queue });
+    seed(raw);
+    const cfg = { ...DEFAULT_CONFIG, queueBackend: "cf_queues" as const };
+    // tick 1: 'lost' requeued+woken once; 'stale' not woken.
+    await runSweep(env, { now: () => LEASE + 100_000, newId: (p) => p }, cfg);
+    // tick 2 (a minute later): 'lost' is now queued (not running) -> not requeued -> not re-woken;
+    // 'stale' is still queued -> still not woken. So NO duplicate wakes accumulate over ticks.
+    await runSweep(env, { now: () => LEASE + 160_000, newId: (p) => p }, cfg);
+    expect(queue.sent.map((m) => m.job_id)).toEqual(["lost"]); // exactly one wake total, ever
+  });
+
+  it("d1 backend (default): emits NO wake even with a queue bound", async () => {
+    const queue = new FakeQueue();
+    const { env, raw } = makeEnv({ jobQueue: queue });
+    seed(raw);
+    const now = LEASE + 100_000;
+    await runSweep(env, { now: () => now, newId: (p) => p }, DEFAULT_CONFIG);
+    expect(queue.sent).toEqual([]);
+  });
+
+  it("a wake send blip does not fail the sweep (best-effort, isolated)", async () => {
+    const queue = new FakeQueue(true); // send throws
+    const { env, raw } = makeEnv({ jobQueue: queue });
+    seed(raw);
+    const now = LEASE + 100_000;
+    // the sweep still completes and the recovery still happened despite the wake blip
+    const summary = await runSweep(
+      env,
+      { now: () => now, newId: (p) => p },
+      { ...DEFAULT_CONFIG, queueBackend: "cf_queues" },
+    );
+    expect(summary.requeued).toBe(1);
+    expect(jobRow(raw, "lost").status).toBe("queued");
   });
 });
