@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from spike.claim import claim_one, init_schema, seed_jobs
 
@@ -20,6 +20,7 @@ class SpikeResult:
     n_jobs: int
     n_consumers: int
     claims: list[tuple[str, str]]  # (job_id, consumer) for every successful claim
+    errors: list[str] = field(default_factory=list)  # any consumer-thread failure (must be empty)
 
     @property
     def claim_counts(self) -> Counter[str]:
@@ -41,6 +42,10 @@ class SpikeResult:
     @property
     def all_claimed(self) -> bool:
         return self.distinct_claimed == self.n_jobs
+
+    @property
+    def ok(self) -> bool:
+        return self.no_double_claim and self.all_claimed and not self.errors
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -72,6 +77,7 @@ def run_local_spike(
     setup.close()
 
     claims: list[tuple[str, str]] = []
+    errors: list[str] = []
     lock = threading.Lock()
     gate = threading.Barrier(n_consumers)
 
@@ -88,6 +94,9 @@ def run_local_spike(
                     break  # nothing claimable -> drained (writes serialize, so no false drain)
                 with lock:
                     claims.append((claim.job_id, consumer_id))
+        except Exception as exc:  # don't swallow: a thread failure must fail the gate, not pass it
+            with lock:
+                errors.append(f"{consumer_id}: {exc}")
         finally:
             conn.close()
 
@@ -99,4 +108,4 @@ def run_local_spike(
         t.start()
     for t in threads:
         t.join()
-    return SpikeResult(n_jobs=n_jobs, n_consumers=n_consumers, claims=claims)
+    return SpikeResult(n_jobs=n_jobs, n_consumers=n_consumers, claims=claims, errors=errors)

@@ -107,6 +107,15 @@ def test_extract_rows_failure_raises_without_token() -> None:
     assert "Bearer" not in str(exc.value) and "token" not in str(exc.value).lower()
 
 
+def test_extract_rows_statement_level_failure_raises() -> None:
+    # A 200 envelope (success:true) whose inner statement failed (success:false) must NOT read as
+    # empty rows — that would be indistinguishable from "nothing claimable" and mask the error.
+    payload = {"success": True, "result": [{"success": False, "error": "database is locked"}]}
+    with pytest.raises(RemoteD1Error) as exc:
+        _extract_rows(payload)
+    assert "locked" in str(exc.value)
+
+
 def test_main_missing_env_returns_2(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OVT_D1_DATABASE_ID"):
         monkeypatch.delenv(var, raising=False)

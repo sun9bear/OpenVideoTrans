@@ -78,7 +78,14 @@ def _extract_rows(payload: dict[str, object]) -> list[dict[str, object]]:
     if not isinstance(result, list) or not result:
         return []
     first = result[0]
-    rows = first.get("results") if isinstance(first, dict) else None
+    if not isinstance(first, dict):
+        return []
+    if first.get("success") is False:
+        # A statement-level failure (SQL/lock error) inside an otherwise-200 envelope. Without this
+        # it falls through as [] — indistinguishable from "nothing claimable", masking the error on
+        # a drain check and letting the gate pass when it should fail.
+        raise RemoteD1Error(f"D1 statement failed: {first.get('error') or payload.get('errors')}")
+    rows = first.get("results")
     return list(rows) if isinstance(rows, list) else []
 
 

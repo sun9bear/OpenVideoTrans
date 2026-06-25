@@ -13,6 +13,7 @@ from spike.local_spike import connect, run_local_spike
 def test_concurrent_claim_no_double_and_all_claimed(tmp_path: Path) -> None:
     # 20 consumers race 100 jobs (spec): each job claimed exactly once, all claimed.
     res = run_local_spike(str(tmp_path / "spike.db"), n_jobs=100, n_consumers=20)
+    assert not res.errors, f"consumer-thread failures: {res.errors}"
     assert res.no_double_claim, f"double-claimed: {res.double_claimed}"
     assert res.all_claimed, f"only {res.distinct_claimed}/{res.n_jobs} claimed"
     assert len(res.claims) == 100  # exactly 100 total claims (no extras)
@@ -22,7 +23,7 @@ def test_repeated_runs_stay_exactly_once(tmp_path: Path) -> None:
     # Concurrency is nondeterministic — repeat to catch a flaky double-claim / lost job.
     for i in range(8):
         res = run_local_spike(str(tmp_path / f"r{i}.db"), n_jobs=60, n_consumers=16)
-        assert res.no_double_claim and res.all_claimed, f"run {i}: {res.double_claimed}"
+        assert res.ok, f"run {i}: double={res.double_claimed} errors={res.errors}"
 
 
 def test_expired_lease_is_reclaimable_and_attempt_increments(tmp_path: Path) -> None:
