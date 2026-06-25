@@ -38,6 +38,7 @@ testpaths = [
     "packages/provider-adapters/tests",
     "workers/media-worker/tests",
     "cli/local-runner/tests",
+    "apps/control-plane/spike/tests",
 ]
 addopts = "-v --import-mode=importlib"
 markers = [
