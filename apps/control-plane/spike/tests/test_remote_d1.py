@@ -8,18 +8,25 @@ single connection + lock models D1's single-primary write-serialization. So a gr
 """
 from __future__ import annotations
 
+import email.message
+import io
+import json
 import re
 import sqlite3
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
 from spike.claim import CLAIM_SQL
 from spike.remote_d1 import (
+    HttpD1Client,
     RemoteD1Error,
     _extract_rows,
     main,
     retarget,
+    run_remote_reclaim_check,
     run_remote_spike,
 )
 
@@ -104,3 +111,134 @@ def test_main_missing_env_returns_2(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "OVT_D1_DATABASE_ID"):
         monkeypatch.delenv(var, raising=False)
     assert main() == 2  # misconfig -> exit 2, never attempts a network call
+
+
+# ── reclaim + attempt-cap: the two invariants the race alone cannot prove (run on real D1 too) ──
+
+
+def test_remote_reclaim_check_offline(tmp_path: Path) -> None:
+    res = run_remote_reclaim_check(_fake(tmp_path), max_attempt=3, lease_ms=1000)
+    assert res.attempts == [1, 2, 3]  # expired leases reclaim w/ bumped attempt; cap halts at 3
+    assert res.ok
+
+
+# ── HttpD1Client: real request construction + token-safe error branches + retry, no network ─────
+
+_TOKEN = "SEKRET-TOKEN-do-not-leak"
+_OK_BODY = json.dumps(
+    {"success": True, "result": [{"success": True, "results": [{"job_id": "job_0001"}]}]}
+).encode()
+
+
+class _Resp:
+    """Duck-typed stand-in for the HTTPResponse context manager that urlopen returns."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def __enter__(self) -> _Resp:
+        return self
+
+    def __exit__(self, *_: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._data
+
+
+def _http_error(req: urllib.request.Request, code: int, body: bytes) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        req.full_url, code, "err", email.message.Message(), io.BytesIO(body)
+    )
+
+
+def test_http_client_builds_post_with_bearer_and_json_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(req: urllib.request.Request, timeout: float | None = None) -> _Resp:
+        assert isinstance(req.data, bytes)
+        captured.update(
+            method=req.get_method(),
+            auth=req.get_header("Authorization"),
+            body=json.loads(req.data.decode()),
+            url=req.full_url,
+        )
+        return _Resp(_OK_BODY)
+
+    monkeypatch.setattr(urllib.request, "urlopen", handler)
+    client = HttpD1Client("acct123", "db456", _TOKEN, sleep=lambda _: None)
+    assert client.query("SELECT 1", ["a", 2]) == [{"job_id": "job_0001"}]
+    assert captured["method"] == "POST"
+    assert captured["auth"] == f"Bearer {_TOKEN}"
+    assert captured["body"] == {"sql": "SELECT 1", "params": ["a", 2]}
+    assert _TOKEN not in str(captured["url"])  # token is header-only, never in the URL
+
+
+def test_http_client_http_error_omits_token_and_drops_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(req: urllib.request.Request, timeout: float | None = None) -> _Resp:
+        raise _http_error(req, 400, b'{"errors":[{"message":"bad sql"}]}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", handler)
+    client = HttpD1Client("acct", "db", _TOKEN, sleep=lambda _: None)
+    with pytest.raises(RemoteD1Error) as exc:
+        client.query("SELECT 1")
+    assert _TOKEN not in str(exc.value)  # non-retryable 4xx -> surfaced, token absent
+    assert exc.value.__cause__ is None  # `from None` keeps URL/headers/token out of the traceback
+
+
+def test_http_client_url_error_retries_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def handler(req: urllib.request.Request, timeout: float | None = None) -> _Resp:
+        calls["n"] += 1
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", handler)
+    client = HttpD1Client("acct", "db", _TOKEN, max_retries=3, sleep=sleeps.append)
+    with pytest.raises(RemoteD1Error) as exc:
+        client.query("SELECT 1")
+    assert calls["n"] == 4  # initial try + 3 retries
+    assert len(sleeps) == 3
+    assert _TOKEN not in str(exc.value)
+
+
+def test_http_client_retries_429_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    seq = [429, 429]
+    sleeps: list[float] = []
+
+    def handler(req: urllib.request.Request, timeout: float | None = None) -> _Resp:
+        if seq:
+            raise _http_error(req, seq.pop(0), b"{}")
+        return _Resp(_OK_BODY)
+
+    monkeypatch.setattr(urllib.request, "urlopen", handler)
+    client = HttpD1Client("acct", "db", _TOKEN, max_retries=4, sleep=sleeps.append)
+    assert client.query("SELECT 1") == [{"job_id": "job_0001"}]
+    assert len(sleeps) == 2  # two 429s retried, third attempt succeeded
+
+
+def test_http_client_success_false_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    body = json.dumps({"success": False, "errors": [{"message": "no table"}]}).encode()
+
+    def handler(req: urllib.request.Request, timeout: float | None = None) -> _Resp:
+        return _Resp(body)
+
+    monkeypatch.setattr(urllib.request, "urlopen", handler)
+    client = HttpD1Client("acct", "db", _TOKEN, sleep=sleeps.append)
+    with pytest.raises(RemoteD1Error):
+        client.query("SELECT 1")
+    assert sleeps == []  # genuine SQL error -> surfaced immediately, never retried
+
+
+def test_retry_delay_honors_retry_after_else_backoff() -> None:
+    client = HttpD1Client("acct", "db", _TOKEN, backoff_base=0.5, sleep=lambda _: None)
+    assert client._retry_delay(0, "5") == 5.0  # honor Retry-After seconds
+    assert client._retry_delay(99, "100") == 30.0  # capped at 30s
+    assert client._retry_delay(2, None) == 2.0  # 0.5 * 2**2 exponential backoff
+    assert client._retry_delay(0, "garbage") == 0.5  # non-numeric Retry-After -> backoff

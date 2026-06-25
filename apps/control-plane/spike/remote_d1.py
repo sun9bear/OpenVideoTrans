@@ -25,9 +25,11 @@ import json
 import os
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -80,16 +82,45 @@ def _extract_rows(payload: dict[str, object]) -> list[dict[str, object]]:
     return list(rows) if isinstance(rows, list) else []
 
 
-class HttpD1Client:
-    """Talks to the D1 REST API. Token stays in the Authorization header — never logged."""
+# Transient REST conditions worth retrying (rate limit + gateway/5xx). A 4xx other than 429 is a
+# real client error and is NOT retried; nor is a success:false SQL error.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
-    def __init__(self, account_id: str, database_id: str, token: str, *, timeout: float = 30.0):
+
+class HttpD1Client:
+    """Talks to the D1 REST API. Token stays in the Authorization header — never logged.
+
+    Transient REST weather (HTTP 429/5xx, dropped connections) is retried with bounded exponential
+    backoff (honoring ``Retry-After``) so the hard gate's PASS/FAIL reflects D1's claim semantics,
+    not a network blip — the remote equivalent of the local half's ``busy_timeout`` contention
+    hardening. A genuine SQL error (``success:false``) is surfaced immediately.
+    """
+
+    def __init__(
+        self,
+        account_id: str,
+        database_id: str,
+        token: str,
+        *,
+        timeout: float = 30.0,
+        max_retries: int = 4,
+        backoff_base: float = 0.5,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
         self._url = (
             f"https://api.cloudflare.com/client/v4/accounts/{account_id}"
             f"/d1/database/{database_id}/query"
         )
         self._token = token
         self._timeout = timeout
+        self._max_retries = max_retries
+        self._backoff_base = backoff_base
+        self._sleep = sleep
+
+    def _retry_delay(self, attempt: int, retry_after: str | None) -> float:
+        if retry_after and retry_after.strip().isdigit():
+            return min(float(retry_after), 30.0)  # honor server's Retry-After (seconds), capped
+        return min(self._backoff_base * (2.0**attempt), 30.0)  # else exponential backoff, capped
 
     def query(self, sql: str, params: list[object] | None = None) -> list[dict[str, object]]:
         body = json.dumps({"sql": sql, "params": list(params or [])}).encode("utf-8")
@@ -102,17 +133,26 @@ class HttpD1Client:
                 "Content-Type": "application/json",
             },
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310 (https)
-                payload = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            # The response body carries D1's error detail and never the token; surface it, but drop
-            # the original exception chain so the request URL/headers can't leak into a traceback.
-            detail = exc.read().decode("utf-8", "replace")[:500]
-            raise RemoteD1Error(f"D1 HTTP {exc.code}: {detail}") from None
-        except urllib.error.URLError as exc:
-            raise RemoteD1Error(f"D1 request failed: {exc.reason}") from None
-        return _extract_rows(payload)
+        for attempt in range(self._max_retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
+                    payload = json.loads(resp.read().decode("utf-8"))
+                return _extract_rows(payload)  # success:false -> RemoteD1Error, unretried
+            except urllib.error.HTTPError as exc:
+                if exc.code in _RETRYABLE_STATUS and attempt < self._max_retries:
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    self._sleep(self._retry_delay(attempt, retry_after))
+                    continue
+                # body carries D1's error detail and never the token; drop the chain so the request
+                # URL/headers can't leak into a traceback.
+                detail = exc.read().decode("utf-8", "replace")[:500]
+                raise RemoteD1Error(f"D1 HTTP {exc.code}: {detail}") from None
+            except urllib.error.URLError as exc:  # HTTPError's parent: a dropped/refused connection
+                if attempt < self._max_retries:
+                    self._sleep(self._retry_delay(attempt, None))
+                    continue
+                raise RemoteD1Error(f"D1 request failed: {exc.reason}") from None
+        raise RemoteD1Error("D1 request failed after retries")  # unreachable; for the type checker
 
 
 @dataclass
@@ -120,6 +160,7 @@ class RemoteSpikeResult:
     n_jobs: int
     n_consumers: int
     claims: list[tuple[str, str, int, int]]  # (job_id, consumer, claim_version, attempt)
+    max_attempt: int = 5
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -143,8 +184,19 @@ class RemoteSpikeResult:
         return self.distinct_claimed == self.n_jobs
 
     @property
+    def attempt_within_cap(self) -> bool:
+        """No claim ever reports attempt past the cap (defensive; the race itself stays at attempt=1
+        — the cap is actually *exercised* by run_remote_reclaim_check)."""
+        return all(attempt <= self.max_attempt for *_, attempt in self.claims)
+
+    @property
     def ok(self) -> bool:
-        return self.no_double_claim and self.all_claimed and not self.errors
+        return (
+            self.no_double_claim
+            and self.all_claimed
+            and self.attempt_within_cap
+            and not self.errors
+        )
 
 
 def _seed(client: D1Client, n_jobs: int, table: str, *, chunk: int = 25) -> None:
@@ -220,7 +272,56 @@ def run_remote_spike(
     except RemoteD1Error as exc:
         errors.append(f"cleanup: {exc}")
 
-    return RemoteSpikeResult(n_jobs=n_jobs, n_consumers=n_consumers, claims=claims, errors=errors)
+    return RemoteSpikeResult(
+        n_jobs=n_jobs,
+        n_consumers=n_consumers,
+        claims=claims,
+        max_attempt=max_attempt,
+        errors=errors,
+    )
+
+
+@dataclass
+class ReclaimResult:
+    """Outcome of the single-job reclaim scenario: the ``attempt`` reported on each successive claim
+    as the lease expires and the job is re-claimed, until the attempt cap halts it."""
+
+    attempts: list[int]
+    max_attempt: int
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        # Expired leases ARE reclaimable (attempt strictly increments 1,2,...) AND the cap halts it
+        # exactly at max_attempt (poison-job guard) — never exceeding, never short.
+        return self.error is None and self.attempts == list(range(1, self.max_attempt + 1))
+
+
+def run_remote_reclaim_check(
+    client: D1Client, *, max_attempt: int = 3, lease_ms: int = 1_000, base_now_ms: int = 2_000_000
+) -> ReclaimResult:
+    """Prove the OTHER two spec invariants on real D1 (the race only proves no-double-claim): seed a
+    single job and reclaim it with an advancing clock so each lease expires, until ``attempt`` hits
+    the cap. ``attempts`` must come back ``[1, 2, ..., max_attempt]`` — expired leases reclaim with
+    a bumped attempt, and the ``attempt < ?`` guard stops reclaim dead at the cap."""
+    try:
+        client.query(_DROP_TABLE)
+        client.query(_CREATE_TABLE)
+        client.query(_CREATE_INDEX)
+        _seed(client, 1, _TABLE)
+
+        attempts: list[int] = []
+        now = base_now_ms
+        for _ in range(max_attempt + 5):  # loop past the cap; the guard must stop it on its own
+            rows = client.query(_CLAIM, claim_params(now, lease_ms, "reclaimer", max_attempt))
+            if not rows:
+                break  # attempt == max_attempt -> `attempt < ?` fails -> no longer claimable
+            attempts.append(int(rows[0]["attempt"]))  # type: ignore[arg-type]
+            now += lease_ms + 1  # advance past lease expiry so the next reclaim is allowed
+        client.query(_DROP_TABLE)
+        return ReclaimResult(attempts=attempts, max_attempt=max_attempt)
+    except RemoteD1Error as exc:
+        return ReclaimResult(attempts=[], max_attempt=max_attempt, error=str(exc))
 
 
 def main() -> int:
@@ -244,14 +345,25 @@ def main() -> int:
 
     # db id is non-secret; print only a short prefix anyway. token is never printed.
     print(f"remote D1 spike: {n_consumers} consumers x {n_jobs} jobs (db {database[:8]}...)")
-    res = run_remote_spike(client, n_jobs=n_jobs, n_consumers=n_consumers)
-    print(f"  claimed distinct {res.distinct_claimed}/{res.n_jobs}, total claims {len(res.claims)}")
-    if res.double_claimed:
-        print(f"  DOUBLE-CLAIMED: {res.double_claimed}")
-    if res.errors:
-        print(f"  consumer/cleanup errors: {res.errors}")
-    print("RESULT:", "PASS" if res.ok else "FAIL")
-    return 0 if res.ok else 1
+
+    race = run_remote_spike(client, n_jobs=n_jobs, n_consumers=n_consumers)
+    print(
+        f"  race: claimed distinct {race.distinct_claimed}/{race.n_jobs}, "
+        f"total claims {len(race.claims)}, no-double={race.no_double_claim}"
+    )
+    if race.double_claimed:
+        print(f"  DOUBLE-CLAIMED: {race.double_claimed}")
+    if race.errors:
+        print(f"  consumer/cleanup errors: {race.errors}")
+
+    reclaim = run_remote_reclaim_check(client)
+    print(f"  reclaim+cap: attempts {reclaim.attempts} (cap {reclaim.max_attempt}) ok={reclaim.ok}")
+    if reclaim.error:
+        print(f"  reclaim error: {reclaim.error}")
+
+    ok = race.ok and reclaim.ok
+    print("RESULT:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
