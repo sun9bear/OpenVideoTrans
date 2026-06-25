@@ -51,6 +51,19 @@ def test_subtitle_only_completes_with_srt_key(tmp_path: Path) -> None:
     assert cp.completed == [("job_s", 2, {"srt_key": artifact_key("job_s", 2, "output.srt")})]
 
 
+def test_both_mode_completes_with_both_artifacts(tmp_path: Path) -> None:
+    # `both` must produce a video AND an SRT, else the download API 404s on /srt for the job.
+    job = make_job(job_id="job_b", upload_session_id="us_b", output_mode="both")
+    cp = FakeControlPlane(config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)])
+    storage = FakeStorage({"uploads/us_b": b"SRC"})
+    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG)
+    vkey = artifact_key("job_b", 1, "output.mp4")
+    skey = artifact_key("job_b", 1, "output.srt")
+    assert cp.completed == [("job_b", 1, {"video_key": vkey, "srt_key": skey})]
+    assert storage.objects[vkey] == b"SRC"
+    assert storage.objects[skey] == b"SRC"
+
+
 def test_no_job_returns_none_without_touching_storage(tmp_path: Path) -> None:
     cp = FakeControlPlane(config=TEST_CONFIG, claims=[])
     storage = FakeStorage({})
@@ -70,6 +83,20 @@ def test_failure_reports_fail_and_cleans_workdir(tmp_path: Path) -> None:
     assert (fjid, fcv, code) == ("job_f", 1, "internal_error")
     assert detail is None  # never leak exception text (it may carry a path/URL)
     assert not (tmp_path / "job_f").exists()
+
+
+def test_completion_transport_error_does_not_fail_job(tmp_path: Path) -> None:
+    # A transient error reporting /complete must NOT mark a successful job failed (CodeX P2): the
+    # artifact uploaded fine, so leave the job for lease recovery instead of failing it.
+    job = make_job(job_id="job_c", upload_session_id="us_c", output_mode="dub_only")
+    cp = FakeControlPlane(
+        config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)], complete_error=True
+    )
+    storage = FakeStorage({"uploads/us_c": b"X"})
+    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG)
+    assert cp.failed == []  # NOT failed despite the /complete transport error
+    assert storage.objects[artifact_key("job_c", 1, "output.mp4")] == b"X"  # work succeeded
+    assert not (tmp_path / "job_c").exists()  # workdir still cleaned
 
 
 def test_heartbeat_renews_during_a_long_single_stage(tmp_path: Path) -> None:

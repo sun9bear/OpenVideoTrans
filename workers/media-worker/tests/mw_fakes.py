@@ -10,7 +10,7 @@ import threading
 from collections.abc import Mapping
 
 from media_worker.config import WorkerConfig
-from media_worker.control_plane import Claim, StaleClaimError
+from media_worker.control_plane import Claim, ControlPlaneError, StaleClaimError
 from ovt_schemas import AigcMarking, Job, JobArtifacts, JobPlan
 
 # Production-shaped knobs (30s heartbeat / 180s lease), mirroring the control-plane defaults.
@@ -70,10 +70,12 @@ class FakeControlPlane:
         config: WorkerConfig = TEST_CONFIG,
         claims: list[Claim] | None = None,
         stale: bool = False,
+        complete_error: bool = False,
     ) -> None:
         self._config = config
         self._claims = list(claims or [])
         self._stale = stale
+        self._complete_error = complete_error
         self._lock = threading.Lock()
         self.heartbeats: list[tuple[str, int, str | None]] = []
         self.completed: list[tuple[str, int, dict[str, str]]] = []
@@ -93,6 +95,8 @@ class FakeControlPlane:
             raise StaleClaimError(f"job {job_id} claim {claim_version} superseded")
 
     def complete(self, job_id: str, claim_version: int, *, artifacts: Mapping[str, str]) -> None:
+        if self._complete_error:
+            raise ControlPlaneError(f"transient error completing {job_id}")
         with self._lock:
             self.completed.append((job_id, claim_version, dict(artifacts)))
 

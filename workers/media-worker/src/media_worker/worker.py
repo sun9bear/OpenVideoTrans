@@ -24,12 +24,16 @@ from .storage import Storage
 
 logger = logging.getLogger("media_worker")
 
-# Per output_mode: (Job.artifacts field, output filename, content-type). The stub copies the source
-# bytes into this single artifact; the control plane's complete() requires the claim_version prefix.
-_ARTIFACT_BY_MODE: dict[str, tuple[str, str, str]] = {
-    "subtitle_only": ("srt_key", "output.srt", "application/x-subrip"),
-    "dub_only": ("video_key", "output.mp4", "video/mp4"),
-    "both": ("video_key", "output.mp4", "video/mp4"),
+# Per output_mode: the artifact(s) to produce, each (Job.artifacts field, output filename,
+# content-type). The stub copies the source bytes into each; `both` emits a video AND an SRT so
+# the download API exposes both. The control plane's complete() requires the claim_version prefix.
+_ARTIFACTS_BY_MODE: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "subtitle_only": (("srt_key", "output.srt", "application/x-subrip"),),
+    "dub_only": (("video_key", "output.mp4", "video/mp4"),),
+    "both": (
+        ("video_key", "output.mp4", "video/mp4"),
+        ("srt_key", "output.srt", "application/x-subrip"),
+    ),
 }
 
 
@@ -141,7 +145,7 @@ def process_job(
     workdir_base: Path | str,
     config: WorkerConfig,
 ) -> None:
-    """Run one claimed job through the stub: copy source -> artifact -> complete (or fail)."""
+    """Run one claimed job through the stub: copy source -> artifact(s) -> complete (or fail)."""
     job = claim.job
     claim_version = claim.claim_version
     job_id = job.job_id
@@ -150,28 +154,45 @@ def process_job(
     heartbeat = Heartbeat(cp, job_id, claim_version, interval_sec=config.heartbeat_interval_sec)
     heartbeat.start()
     try:
-        field, name, content_type = _ARTIFACT_BY_MODE.get(
-            job.output_mode, _ARTIFACT_BY_MODE["dub_only"]
-        )
-        source = storage.download(source_key_for(job))
-        in_path = workdir / "input"
-        in_path.write_bytes(source)
-        # STUB: the output IS the input, copied straight through (no transcode/translate/tts).
-        out_path = workdir / name
-        shutil.copyfile(in_path, out_path)
-        key = artifact_key(job_id, claim_version, name)
-        storage.upload(key, out_path.read_bytes(), content_type=content_type)
-        cp.complete(job_id, claim_version, artifacts={field: key})
-        # Log the job id only — not the (job_id, claim_version) pair the artifact key encodes.
-        logger.info("job %s completed (stub copy)", job_id)
-    except Exception:
-        # Fail closed. error_detail is omitted on purpose: exception text can carry a path/URL,
-        # so it must never reach the control plane / user (the stable error_code is enough).
-        cp.fail(job_id, claim_version, error_code="internal_error")
-        logger.warning("job %s failed (stub)", job_id)
+        try:
+            artifacts = _produce_artifacts(storage, job, claim_version, workdir)
+        except Exception:
+            # Genuine processing failure (fetch/copy/upload) -> terminal fail. error_detail is
+            # omitted on purpose: exception text can carry a path/URL and must never reach the
+            # control plane / user (the stable error_code is enough).
+            cp.fail(job_id, claim_version, error_code="internal_error")
+            logger.warning("job %s failed (stub)", job_id)
+            return
+        # Processing succeeded. Reporting completion is a separate concern: a transient transport
+        # error on /complete must NOT fail a successful job. Leave it running for lease recovery
+        # (the sweeper re-queues it after the lease expires; the idempotent copy + complete re-run).
+        try:
+            cp.complete(job_id, claim_version, artifacts=artifacts)
+            logger.info("job %s completed (stub copy)", job_id)  # job id only (key encodes cv)
+        except Exception:
+            logger.warning("job %s completion report failed; left for lease recovery", job_id)
     finally:
         heartbeat.stop()
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _produce_artifacts(
+    storage: Storage, job: Job, claim_version: int, workdir: Path
+) -> dict[str, str]:
+    """STUB: copy the source straight to each output artifact for the job's output_mode."""
+    source = storage.download(source_key_for(job))
+    in_path = workdir / "input"
+    in_path.write_bytes(source)
+    artifacts: dict[str, str] = {}
+    for field, name, content_type in _ARTIFACTS_BY_MODE.get(
+        job.output_mode, _ARTIFACTS_BY_MODE["dub_only"]
+    ):
+        out_path = workdir / name
+        shutil.copyfile(in_path, out_path)  # no transcode/translate/tts — that is M2-CLOSE
+        key = artifact_key(job.job_id, claim_version, name)
+        storage.upload(key, out_path.read_bytes(), content_type=content_type)
+        artifacts[field] = key
+    return artifacts
 
 
 def run_once(
