@@ -23,6 +23,7 @@ from spike.claim import CLAIM_SQL
 from spike.remote_d1 import (
     HttpD1Client,
     RemoteD1Error,
+    _d1_param,
     _extract_rows,
     main,
     retarget,
@@ -181,7 +182,8 @@ def test_http_client_builds_post_with_bearer_and_json_body(
     assert client.query("SELECT 1", ["a", 2]) == [{"job_id": "job_0001"}]
     assert captured["method"] == "POST"
     assert captured["auth"] == f"Bearer {_TOKEN}"
-    assert captured["body"] == {"sql": "SELECT 1", "params": ["a", 2]}
+    # numeric binds are stringified at the HTTP boundary (D1 REST documents params as strings)
+    assert captured["body"] == {"sql": "SELECT 1", "params": ["a", "2"]}
     assert _TOKEN not in str(captured["url"])  # token is header-only, never in the URL
 
 
@@ -243,6 +245,13 @@ def test_http_client_success_false_not_retried(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(RemoteD1Error):
         client.query("SELECT 1")
     assert sleeps == []  # genuine SQL error -> surfaced immediately, never retried
+
+
+def test_d1_param_stringifies_numbers_keeps_none() -> None:
+    assert _d1_param(5) == "5"  # ints/floats -> strings for the D1 REST contract
+    assert _d1_param(0) == "0"
+    assert _d1_param("job_0001") == "job_0001"  # strings pass through unchanged
+    assert _d1_param(None) is None  # None stays NULL, never "None"
 
 
 def test_retry_delay_honors_retry_after_else_backoff() -> None:

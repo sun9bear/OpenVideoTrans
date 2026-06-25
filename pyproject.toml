@@ -30,6 +30,10 @@ ignore = []
 # optional, not a hard, dependency — see its pyproject note). Resolving its types from
 # bundled stubs without the installed source is expected here, not a problem.
 reportMissingModuleSource = "none"
+# The T2.0 spike package imports `spike.*`; make `apps/control-plane` an explicit import root so
+# resolution doesn't rely on Pyright auto-detecting the package root (pytest's conftest and the D1
+# workflow's working-directory put it on sys.path; this pins it for the typecheck step too).
+extraPaths = ["apps/control-plane"]
 
 [tool.pytest.ini_options]
 testpaths = [

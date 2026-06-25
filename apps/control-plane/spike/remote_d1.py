@@ -89,6 +89,14 @@ def _extract_rows(payload: dict[str, object]) -> list[dict[str, object]]:
     return list(rows) if isinstance(rows, list) else []
 
 
+def _d1_param(value: object) -> object:
+    """D1's ``/query`` REST API documents ``params`` as an array of strings. Stringify numeric binds
+    (the sqlite fake accepts ints, but real D1 can reject them at request validation, before the
+    claim logic ever runs); column affinity coerces the numeric strings back for INTEGER columns,
+    arithmetic, and comparisons, so the SQL semantics are unchanged. ``None`` stays NULL."""
+    return value if value is None else str(value)
+
+
 # Transient REST conditions worth retrying (rate limit + gateway/5xx). A 4xx other than 429 is a
 # real client error and is NOT retried; nor is a success:false SQL error.
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
@@ -130,7 +138,8 @@ class HttpD1Client:
         return min(self._backoff_base * (2.0**attempt), 30.0)  # else exponential backoff, capped
 
     def query(self, sql: str, params: list[object] | None = None) -> list[dict[str, object]]:
-        body = json.dumps({"sql": sql, "params": list(params or [])}).encode("utf-8")
+        d1_params = [_d1_param(p) for p in (params or [])]  # D1 REST wants string-typed binds
+        body = json.dumps({"sql": sql, "params": d1_params}).encode("utf-8")
         req = urllib.request.Request(
             self._url,
             data=body,
