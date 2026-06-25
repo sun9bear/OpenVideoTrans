@@ -2,7 +2,7 @@
 
 > 实时进度真源（workflow §11）。每批次一行：日期 / 单元 / 分支 / PR / 外审 / 结论 / 下一步。
 > 状态另见：GitHub issue `status:*` 标签 + EPIC #30 checklist。重启/压缩后按 workflow §11 resumption 协议据此 + EPIC + 标签重建状态再续跑。
-> **授权范围（2026-06-23）：** i18n 闸由项目主开启，授权自主推进**至 M1**；M1→M2 边界待 sign-off。
+> **授权范围：** i18n 闸由项目主 2026-06-23 开启，授权自主推进至 M1（已达成、待验收）。**M2 由项目主 2026-06-25「开 M2」授权**；M2→后续里程碑边界仍待 sign-off。
 
 ## M1 — 本地管线打通
 
@@ -17,6 +17,14 @@
 | 2026-06-24 | **T1.3 Batch B**（provider-adapters 硬化 e/f/g）：T1.3e 云 ASR compress-first + 超限切块 offset 合并 + provider 格式协商（单次编码）· T1.3f `language_capabilities` registry（按 output_mode 分层 + BCP-47 + DeepL 逐语 vet + commercial-safe dub gate + 源语回填）· T1.3g 供应链 sha256 pin + 非商用模型禁入默认镜像 | feat/t1.3-provider-hardening（9 commit：e/f/g + R2–R9） | #37（squash `7967e7a`） | 对抗多透镜审 workflow（2 P2）+ CodeX CLI/​@CodeX bot **9 轮**（红线 P1 付费 ASR 不自动批量切块 + 8 P2 全修：双 encode/变体折叠/segment-only/OpenAI 编码/edge_tts 许可/text-only×2/ffmpeg avail/en-GB 地区码）→ 收敛；**剩 4 项运行期接线归 T1.4**（语言 gate 接准入 · 供应链 pin 接 doctor · commercial-safe 运行期 TTS 选择 · CF 源语解析）——按内核↔provider-adapters 硬边界，当前优雅降级 | ✅ 合并 #37（squash `7967e7a`）；本地全绿（全仓 296 过；redline 25 过；ruff/pyright(0/0/0)/codegen 净）| T1.4（= M1）|
 | 2026-06-24 | **T1.4 = M1**（`cli/local-runner` 端到端）：薄 CLI `ovt run/doctor`——准入（`assert_language_pair` fail-closed + commercial-safe TTS 运行期选择，接 Batch B 4 项 deferral 的前 3）+ doctor preflight（`verify_piper_model` + 许可 gate，接第 4 供应链）+ URL/yt-dlp ingest（SSRF：非 http(s) 拒 + --no-playlist + T1.3c 格式 allowlist，仅此开）+ `run_pipeline`+`Resolver` → 带标识 mp4+srt；marking 默认开 | feat/t1.4-local-runner（off `7967e7a`，R1–R3） | #38（squash `8891ea2`） | 对抗多透镜 workflow（2 P2）+ CodeX CLI/​@CodeX bot **3 轮**（R1 5 项 / R2 3 CLI + 2 bot / R3 **CI pyright 红修**(漏测 tests/) + doctor 强制 ffmpeg pin；2 P1 红线-邻近 + 多 P2 全修）→ **bot R3 clean + CI 全绿**；2 更深限制按 scope 归延后单元（显式 --out 缓存键控=T1.1/M2 · piper per-language voice catalog=T1.3b/f） | CI 全绿（TS/Py/redline/codegen）；本地全仓 **322 过** 含 e2e 真出带标识 mp4+srt；redline 25 过；ruff/pyright(0/0/0，含 tests)/codegen 净 | ✅ 合并 #38（squash `8891ea2`）= **🎯 M1 达成、待项目主验收** |
 
+## M2 — 云闭环（控制面 + worker 认领）
+
+> 授权：项目主 **2026-06-25「开 M2」**。T2.0 = M2 硬门槛，先于 T2.1 建任何控制面（backlog DAG）。
+
+| 日期 | 单元 | 分支 | PR | 外审 | 结论 | 下一步 |
+|---|---|---|---|---|---|---|
+| 2026-06-25 | **T2.0（M2 硬门槛 · 强校验，§3 我亲做）**（D1-claim 并发 spike：乐观锁 job claim 在并发下 exactly-once；本地 SQLite + 真实 Cloudflare D1 remote **两半都过才算硬门**）：可移植 `CLAIM_SQL`（claimable guard 外层 WHERE 重复 → 写串行下第二抢者 0 行）；本地 20×100 race + 重复 8 轮 + 过期可重领 + attempt 撞顶；远端同 SQL（仅 retarget 表名到隔离表 `_ovt_spike_jobs`，不碰 T2.1 的 `jobs`）经 D1 REST 跑 race + reclaim/cap 双场景；token 仅 Authorization header（GH log `***` 脱敏）、纯 stdlib urllib、429/5xx/URLError 退避、param 串化合 D1 REST 契约；workflow 仅手动 `workflow_dispatch` + concurrency 串行 | feat/t2.0-d1-claim-spike（本地半 `ef990a0` + 远端半 `0b2378e` + 审修 `62f9038`/`fc021ff`/`3c2d751`/`175c6c9`） | #40（squash `ec09b6e`） | 对抗多透镜审 workflow（4 镜 19 raw → 验真 3：**P1 远端补齐三不变量**〔reclaim+cap 真在 D1 跑〕+ P2 HttpD1Client 离线全覆盖 + P2 瞬态重试）+ CodeX CLI（2 P2：本地线程异常不再被吞 + statement 级 `success:false` 不再读成空）+ @CodeX bot **3 轮**（R1 P2 param 串化 + P1 pyright extraPaths〔CI 实测已绿属误报、仍按建议显式加固〕；R2 P3 远端 spike 串行化）→ 收敛 | 本地全绿（全仓 **342 过**；ruff/pyright(0)；spike 纳入 CI pyright）+ **真实 D1 remote PASS**（race 100/100 no-double=True · reclaim+cap [1,2,3] ok=True · RESULT: PASS，run 28142927440） | ✅ 合并 #40（squash `ec09b6e`）；**M2 硬门槛两半皆绿** → 解锁 T2.1 |
+
 ## 续跑点（resumption）
 - **已完成（全部并 main、state 同步）：** STEP0-A（#1，`214bd09`）+ STEP0-B（#2，`8f2c613`）+ STEP0-C（#3，`29e64b6`）+ **T1.1**（#4，`1adb87b`，PR #34）+ **T1.2**（#5，`9c42c4c`，PR #35）+ **T1.3 Batch A**（a/c/d/b，#6–#9，PR #36 squash `d093ec9`）+ **T1.3 Batch B**（e/f/g，#10–#12，PR #37 squash `7967e7a`）。i18n 闸 2026-06-23 开；#1–#12 = status:done、EPIC #30 #1–#12 已勾。
 - **🎯 M1（本地管线打通）已完成（2026-06-24）、待项目主验收。** 已并：STEP0-A/B/C + T1.1 + T1.2 + T1.3a–g + **T1.4**（#38 squash `8891ea2`）。T1.4 并入点 `8891ea2`（main HEAD 含后续 docs/收尾 commit，以 `git log` 为准）；#1–#13 全 closed + `status:done`、EPIC #30 M1 段全勾。一条命令本地端到端可跑：`ovt run <file|url> -t <locale>` / `ovt doctor`，真出带标识 mp4+srt。
@@ -24,6 +32,7 @@
 - **Batch B 收敛后 4 项运行期接线（T1.4 处理状态）：** ① 语言 gate 接准入＝`local_runner/admission.py`（done）· ② commercial-safe 运行期 TTS 选择＝`admission.py`（done）· ③ 供应链 pin 接 preflight＝`local_runner/doctor.py`（done）· ④ CF 源语解析：CF 不回检测语言→admission 用 `resolve_source_language(hint)`，无 hint 时当前 CF MT 步 clean-fail（明确报错，非静默）；完整检测 pass 属后续。
 - **T1.1 resumability 边界（备查）：** 已把文件契约硬化到「每个 `.exists()` 缓存产物经 `atomic_output` 原子写 + 元数据持久化早于 skip-gate」。**更深的 worker 崩溃恢复 / 并发认领 / 租约语义属 M2-CLOSE §12 DoD**（lost-worker/幂等/TTL），非 T1.1 范围；worker 集成时复核。
 - **T1.1 关键设计（备查）：** ① 契约复用 `ovt_schemas`（STEP0-B 真源），不再移植 dataclass；`from_dict/to_dict` → `model_validate/model_dump`。② provider seam = 依赖注入（core 定义结构化 `Protocol` + `Resolver`，不 import `provider-adapters`，保 T1.1 ∥ T1.2）；`select()`/ladder/`PAID_PROVIDERS` 仍归 T1.2。③ `assign_timing` 抽为纯函数（golden 守、免 ffmpeg）。④ `ingest` 仅本地文件，URL/yt-dlp 推迟 T1.4（backlog「URL/yt-dlp 仅此开」+ SSRF T1.3c），核保持无网。⑤ 已按 [[sanitization-needs-semantic-pass]] 语义脱敏（去 `[fvd]`/上游商业线引用）。
-- **下一步：** T1.4 收口（对抗审→CodeX CLI→PR→@bot→合并）= **M1 达成，待项目主验收**。M1 后 = M2 轨（T2.0 起，里程碑边界待项目主 sign-off，workflow §8）。
-- **DAG 提示：** STEP0-B/C → T1.1 ∥ T1.2 → T1.3a–g（∥）→ T1.4（= M1 达成）。
+- **M2 进度（2026-06-25 起）：** **T2.0（#20，PR #40 squash `ec09b6e`）已完成**——M2 硬门槛两半皆绿：本地 342 测 + 真实 D1 remote PASS（run 28142927440）。#20 = status:done、EPIC #30 T2.0 已勾。**T2.0 硬门过 → T2.1 解锁**（但未自动起；M1 待验收 + 阶段汇报优先）。
+- **下一步：** 报 M1 验收（已达成、待项目主 sign-off）；M2 续跑从 **T2.1** 起（控制面 Worker，复用 T2.0 已证 `CLAIM_SQL`）。其余 M2 单元：T2.1–T2.6、SECRETS、CFG-GUARD、FREE-POOL、OBS、DEVLOOP、M2-CLOSE（#15–#26）。
+- **DAG 提示：** STEP0-B/C → T1.1 ∥ T1.2 → T1.3a–g（∥）→ T1.4（= M1）→ **T2.0（M2 硬门，先于 T2.1）** → T2.1 …。
 - **schemas 真源摘要：** 17 实体（Job/Transcript/Word/TranscriptLine/DubbingSegment/TranslationResult/Cue/UploadSession/AigcMarking/JobPlan/JobArtifacts/ModelRef/WorkerMeta/Manifest/LanguageCapability/LanguageCapabilities + ErrorCode 枚举）。待复审解读点：`settings_version`=int、`counted_*`=幂等 bool、`Cue`（双语 source/target）、`worker_meta`（ffprobe blob + 模型 sha）、`Manifest.job`=完整 Job（非子集投影）。
