@@ -57,17 +57,17 @@ describe("/internal complete + fail idempotency (first terminal wins)", () => {
     const cv = claim.json.claim_version;
     const done = await call(env, clock.deps, "POST", "/internal/jobs/j1/complete", {
       worker: WORKER,
-      body: { claim_version: cv, artifacts: { video_key: "artifacts/j1/v.mp4" } },
+      body: { claim_version: cv, artifacts: { video_key: `artifacts/j1/${cv}/v.mp4` } },
     });
     expect(done.json.job.status).toBe("done");
-    expect(done.json.job.artifacts.video_key).toBe("artifacts/j1/v.mp4");
+    expect(done.json.job.artifacts.video_key).toBe(`artifacts/j1/${cv}/v.mp4`);
     // duplicate complete with different artifacts -> no-op, original artifacts retained
     const dup = await call(env, clock.deps, "POST", "/internal/jobs/j1/complete", {
       worker: WORKER,
-      body: { claim_version: cv, artifacts: { video_key: "artifacts/j1/OTHER.mp4" } },
+      body: { claim_version: cv, artifacts: { video_key: `artifacts/j1/${cv}/OTHER.mp4` } },
     });
     expect(dup.json.job.status).toBe("done");
-    expect(dup.json.job.artifacts.video_key).toBe("artifacts/j1/v.mp4");
+    expect(dup.json.job.artifacts.video_key).toBe(`artifacts/j1/${cv}/v.mp4`);
     // late fail after done -> no-op, stays done
     const lateFail = await call(env, clock.deps, "POST", "/internal/jobs/j1/fail", {
       worker: WORKER,
@@ -93,6 +93,20 @@ describe("/internal complete + fail idempotency (first terminal wins)", () => {
       body: { claim_version: cv, artifacts: {} },
     });
     expect(lateDone.json.job.status).toBe("failed");
+  });
+
+  it("rejects an artifact key not namespaced by job + claim_version (400)", async () => {
+    const { env, raw } = makeEnv({ internalToken: WORKER });
+    insertJob(raw, { job_id: "j4", enqueue_at: 1000 });
+    const clock = makeClock(2000);
+    const claim = await call(env, clock.deps, "POST", "/internal/jobs/claim", { worker: WORKER, body: {} });
+    const cv = claim.json.claim_version;
+    const r = await call(env, clock.deps, "POST", "/internal/jobs/j4/complete", {
+      worker: WORKER,
+      body: { claim_version: cv, artifacts: { video_key: "artifacts/j4/v.mp4" } }, // missing /<cv>/
+    });
+    expect(r.status).toBe(400);
+    expect(r.json.error.code).toBe("invalid_artifact_key");
   });
 
   it("rejects an unknown error_code (400)", async () => {

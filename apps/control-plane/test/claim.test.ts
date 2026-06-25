@@ -22,10 +22,12 @@ describe("§8 comparator (pure total order)", () => {
     expect(modeTier("both")).toBe(0);
   });
 
-  it("agingBucket floors elapsed/bucket", () => {
+  it("agingBucket floors elapsed/bucket and clamps a future enqueue to 0", () => {
     expect(agingBucket(1000, 0, 1000)).toBe(1);
     expect(agingBucket(1999, 0, 1000)).toBe(1);
     expect(agingBucket(2000, 0, 1000)).toBe(2);
+    expect(agingBucket(2000, 2001, 1000)).toBe(0); // future enqueue (clock skew) -> bucket 0
+    expect(agingBucket(2000, 5000, 1000)).toBe(0);
   });
 
   it("NULL advisory sorts last within its key", () => {
@@ -59,6 +61,24 @@ describe("CLAIM_SQL on a real SQLite engine", () => {
     }
     expect(claimed).toEqual(["A", "C", "B", "D"]);
     expect(await claimOne(env.DB, opts)).toBeNull();
+  });
+
+  it("same aging bucket -> advisory (SPT) tiebreak, matching the pure comparator (float-div regression)", async () => {
+    const { env, raw } = makeEnv();
+    const now = 2000;
+    const opts = { now, leaseMs: 100_000, maxAttempt: 5, agingBucketMs: 1000 };
+    // Both floor to aging bucket 0: (2000-1100)/1000 -> 0.9 -> 0, (2000-1900)/1000 -> 0.1 -> 0. Tie,
+    // so the shorter advisory (J2) must win. A float-division SQL would wrongly pick J1 (0.9 > 0.1).
+    insertJob(raw, { job_id: "J1", output_mode: "dub_only", enqueue_at: 1100, advisory_duration_ms: 500 });
+    insertJob(raw, { job_id: "J2", output_mode: "dub_only", enqueue_at: 1900, advisory_duration_ms: 100 });
+    const first = await claimOne(env.DB, opts);
+    const second = await claimOne(env.DB, opts);
+    expect([first!.job_id, second!.job_id]).toEqual(["J2", "J1"]);
+    const pureHead = [
+      { job_id: "J1", output_mode: "dub_only", enqueue_at: 1100, advisory_duration_ms: 500 },
+      { job_id: "J2", output_mode: "dub_only", enqueue_at: 1900, advisory_duration_ms: 100 },
+    ].sort((a, b) => compareClaimable(a, b, now, 1000))[0]!.job_id;
+    expect(pureHead).toBe("J2"); // DB claim head and pure comparator head agree
   });
 
   it("no double-claim: N jobs -> N distinct claims then null", async () => {

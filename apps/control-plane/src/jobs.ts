@@ -107,6 +107,15 @@ async function getJobRow(ctx: Ctx, jobId: string): Promise<JobRow | null> {
   return ctx.env.DB.prepare(`SELECT * FROM jobs WHERE job_id = ?`).bind(jobId).first<JobRow>();
 }
 
+// Public projection for user-facing responses: drop server-only `error_detail` (which can carry raw
+// upstream/ffmpeg output) — users see only the stable `error_code`. Internal (worker) responses use
+// the full rowToJob.
+function publicJob(job: Job): Omit<Job, "error_detail"> {
+  const { error_detail, ...rest } = job;
+  void error_detail;
+  return rest;
+}
+
 // Provider selection is FREE-POOL / SECRETS' job; "auto" means resolved at claim by the worker /
 // free-pool router. tts is null for subtitle-only (contract).
 function defaultPlan(outputMode: string): { asr: string; mt: string; tts: string | null } {
@@ -179,7 +188,7 @@ export async function createJob(ctx: Ctx): Promise<Response> {
     .run();
 
   const created = await getJobRow(ctx, jobId);
-  return json({ job: rowToJob(created!) }, 201);
+  return json({ job: publicJob(rowToJob(created!)) }, 201);
 }
 
 // GET /jobs/:id — owner-scoped read (404 on missing OR not-owned, so existence is not leaked).
@@ -189,7 +198,7 @@ export async function getJob(ctx: Ctx): Promise<Response> {
   if (!row || row.anon_or_user_id !== actor) {
     throw new HttpError(404, "not_found", "job not found");
   }
-  return json({ job: rowToJob(row) });
+  return json({ job: publicJob(rowToJob(row)) });
 }
 
 // POST /internal/jobs/claim — worker pulls the next claimable job per the §8 comparator.
@@ -240,10 +249,20 @@ export async function complete(ctx: Ctx): Promise<Response> {
   const body = asObject(await readJson(ctx.request));
   const claimVersion = reqInt(body, "claim_version");
   const artifactsIn = asObject(body["artifacts"] ?? {});
-  const artifacts = JSON.stringify({
-    video_key: optString(artifactsIn, "video_key") ?? null,
-    srt_key: optString(artifactsIn, "srt_key") ?? null,
-  });
+  const videoKey = optString(artifactsIn, "video_key");
+  const srtKey = optString(artifactsIn, "srt_key");
+  // Artifact keys MUST be namespaced by job + winning claim_version so a reclaimed stale worker (a
+  // different claim_version) cannot write the same R2 path and overwrite the object /download signs.
+  const prefix = `artifacts/${jobId}/${claimVersion}/`;
+  for (const [name, key] of [
+    ["video_key", videoKey],
+    ["srt_key", srtKey],
+  ] as const) {
+    if (key !== undefined && !key.startsWith(prefix)) {
+      throw new HttpError(400, "invalid_artifact_key", `${name} must be under ${prefix}`);
+    }
+  }
+  const artifacts = JSON.stringify({ video_key: videoKey ?? null, srt_key: srtKey ?? null });
   const existing = await getJobRow(ctx, jobId);
   if (!existing) throw new HttpError(404, "not_found", "job not found");
   await ctx.env.DB.prepare(

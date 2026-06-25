@@ -23,8 +23,11 @@ export function modeTier(outputMode: string): number {
   return outputMode === "subtitle_only" ? 1 : 0;
 }
 
+// Clamp the wait to >= 0 then floor: a not-yet-aged job contributes bucket 0. The clamp + integer
+// floor here are mirrored exactly by the CLAIM_SQL aging key (MAX(0, ...) + integer division), so the
+// pure sort and the DB claim agree on EVERY input — including a future-dated enqueue_at (clock skew).
 export function agingBucket(now: number, enqueueAt: number, agingBucketMs: number): number {
-  return Math.floor((now - enqueueAt) / agingBucketMs);
+  return Math.floor(Math.max(0, now - enqueueAt) / agingBucketMs);
 }
 
 // Total-order comparator: negative if `a` should be claimed before `b`. Mirrors the claim SQL's
@@ -66,7 +69,11 @@ WHERE job_id = (
       AND attempt < ?
     ORDER BY
       CASE WHEN output_mode = 'subtitle_only' THEN 1 ELSE 0 END DESC,
-      (? - enqueue_at) / ? DESC,
+      -- aging bucket: MAX(0, ...) + CAST forces integer floor division so the key matches
+      -- agingBucket()/Math.floor exactly on BOTH D1 (INTEGER binding) and better-sqlite3 (REAL
+      -- binding). Without the CAST a REAL-bound param makes the division float-divide and silences
+      -- the advisory_duration_ms tiebreak for jobs sharing a floored bucket.
+      (MAX(0, CAST(? AS INTEGER) - enqueue_at) / CAST(? AS INTEGER)) DESC,
       COALESCE(advisory_duration_ms, ${ADVISORY_NULL_SENTINEL}) ASC,
       enqueue_at ASC,
       job_id ASC

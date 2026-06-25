@@ -56,6 +56,20 @@ describe("GET /jobs/:id owner scoping", () => {
     expect((await call(env, deps, "GET", "/jobs/g1", { actor: "intruder" })).status).toBe(404);
     expect((await call(env, deps, "GET", "/jobs/missing", { actor: "owner" })).status).toBe(404);
   });
+
+  it("public GET omits the server-only error_detail but keeps error_code", async () => {
+    const { env, raw } = makeEnv({ internalToken: WORKER });
+    insertJob(raw, { job_id: "f1", anon: "owner", enqueue_at: 1000 });
+    const clock = makeClock(2000);
+    const claim = await call(env, clock.deps, "POST", "/internal/jobs/claim", { worker: WORKER, body: {} });
+    await call(env, clock.deps, "POST", "/internal/jobs/f1/fail", {
+      worker: WORKER,
+      body: { claim_version: claim.json.claim_version, error_code: "internal_error", error_detail: "raw upstream stack trace" },
+    });
+    const pub = await call(env, clock.deps, "GET", "/jobs/f1", { actor: "owner" });
+    expect(pub.json.job.error_code).toBe("internal_error");
+    expect("error_detail" in pub.json.job).toBe(false);
+  });
 });
 
 describe("internal config + credentials + auth", () => {

@@ -120,8 +120,16 @@ export async function verifyUpload(
     throw new HttpError(413, "upload_too_large", "uploaded object exceeds the size cap");
   }
 
-  await ctx.env.DB.prepare(`UPDATE upload_sessions SET status = 'consumed' WHERE upload_session_id = ?`)
+  // Atomic single-consumer: the conditional UPDATE serializes on D1's single primary, so of two
+  // concurrent POST /jobs for the same session exactly one flips pending->consumed (changes=1) and
+  // the loser (changes=0) is rejected here BEFORE inserting a second job for the one source object.
+  const consumed = await ctx.env.DB.prepare(
+    `UPDATE upload_sessions SET status = 'consumed' WHERE upload_session_id = ? AND status = 'pending'`,
+  )
     .bind(uploadSessionId)
     .run();
+  if (consumed.meta.changes === 0) {
+    throw new HttpError(409, "upload_already_consumed", "upload session already used");
+  }
   return { sourceKey: row.source_key, declaredBytes: row.declared_bytes, verifiedBytes: obj.size };
 }
