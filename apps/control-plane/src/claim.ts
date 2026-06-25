@@ -7,8 +7,9 @@ import type { D1Database } from "@cloudflare/workers-types";
 //   4. enqueue_at ascending (FIFO tiebreak)
 //   5. job_id ascending (final deterministic tiebreak)
 // advisory_duration_ms is a browser hint used ONLY for ordering; the hard duration cap is enforced
-// by the worker's ffprobe admission. deadline_at is a separate anti-starvation backstop enforced by
-// the sweeper (T2.3), not a sort key here.
+// by the worker's ffprobe admission. deadline_at is a separate cross-mode-tier anti-starvation
+// backstop; enforcing it needs a comparator/error-code change and is routed to M2-CLOSE (§12
+// scheduling DoD) — it is neither a sort key here nor enforced by the T2.3 sweeper.
 
 export const ADVISORY_NULL_SENTINEL = Number.MAX_SAFE_INTEGER;
 

@@ -139,6 +139,37 @@ export function insertJob(raw: RawDb, o: JobSeed): void {
     );
 }
 
+export interface UploadSessionSeed {
+  upload_session_id: string;
+  created_at: number;
+  expires_at: number;
+  status?: string;
+  source_key?: string;
+  anon?: string;
+  declared_bytes?: number;
+  declared_type?: string;
+}
+
+// Seed an upload_sessions row directly for orphan-sweep tests (bypasses the presign flow).
+export function insertUploadSession(raw: RawDb, o: UploadSessionSeed): void {
+  raw
+    .prepare(
+      `INSERT INTO upload_sessions
+         (upload_session_id, anon_or_user_id, source_key, declared_bytes, declared_type, status, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      o.upload_session_id,
+      o.anon ?? "anon_seed",
+      o.source_key ?? `uploads/${o.upload_session_id}`,
+      o.declared_bytes ?? 1024,
+      o.declared_type ?? "video/mp4",
+      o.status ?? "pending",
+      o.created_at,
+      o.expires_at,
+    );
+}
+
 export interface CallOpts {
   actor?: string;
   worker?: string;
