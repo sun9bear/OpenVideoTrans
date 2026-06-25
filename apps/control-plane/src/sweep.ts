@@ -36,7 +36,21 @@ export interface SweepSummary {
 interface ArtifactRow {
   job_id: string;
   upload_session_id: string;
-  artifacts: string;
+}
+
+// Delete every object under an R2 prefix (paginated). Idempotent: a re-run deletes a smaller/empty
+// set. Used to reap ALL of a job's attempt artifacts, not just the keys recorded on the job row.
+async function deletePrefix(r2: R2Bucket, prefix: string): Promise<void> {
+  let cursor: string | undefined;
+  do {
+    const opts: { prefix: string; limit: number; cursor?: string } = { prefix, limit: 1000 };
+    if (cursor !== undefined) opts.cursor = cursor;
+    const listed = await r2.list(opts);
+    if (listed.objects.length > 0) {
+      await r2.delete(listed.objects.map((o) => o.key));
+    }
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
 }
 
 // Duty 1 — purge artifacts + source for TERMINAL jobs past their 24h TTL (plan §263: "status 仍
@@ -54,7 +68,7 @@ export async function purgeExpired(
 ): Promise<number> {
   const rows = await db
     .prepare(
-      `SELECT job_id, upload_session_id, artifacts FROM jobs
+      `SELECT job_id, upload_session_id FROM jobs
          WHERE expires_at <= ? AND data_purged_at IS NULL AND status IN ('done', 'failed')
          ORDER BY expires_at ASC LIMIT ?`,
     )
@@ -63,13 +77,13 @@ export async function purgeExpired(
 
   let purged = 0;
   for (const row of rows.results) {
-    const artifacts = JSON.parse(row.artifacts) as { video_key?: string | null; srt_key?: string | null };
-    // Delete the produced artifacts AND the source object (the intermediate "成片后尽早删源", §263).
-    const keys = [artifacts.video_key, artifacts.srt_key, `uploads/${row.upload_session_id}`];
-    for (const key of keys) {
-      if (key) await r2.delete(key);
-    }
-    // Stamp under the same null guard so a racing tick can't double-count this job.
+    // Delete EVERY attempt's artifacts under the job prefix, not just the keys on the job row: a
+    // reclaimed job can leave artifacts/<job>/<stale_cv>/... from a superseded worker whose /complete
+    // 409'd, and those keys are never recorded in jobs.artifacts. Plus the source object (the
+    // intermediate "成片后尽早删源", §263). List+delete is idempotent, so a tick that crashes mid-purge
+    // retries cleanly — data_purged_at is stamped only after the deletes.
+    await deletePrefix(r2, `artifacts/${row.job_id}/`);
+    await r2.delete(`uploads/${row.upload_session_id}`);
     const res = await db
       .prepare(`UPDATE jobs SET data_purged_at = ? WHERE job_id = ? AND data_purged_at IS NULL`)
       .bind(now, row.job_id)
@@ -89,25 +103,37 @@ export async function purgeExpired(
 // heartbeat) never matches — that is the claim_version/ownership guard: only the dead claim's row is
 // eligible, and once re-queued the slow worker's next heartbeat 409s on the status/cv change. The two
 // updates are disjoint by attempt, so order is irrelevant and nothing is double-handled.
+// Both updates are batch-bounded (IN (SELECT ... LIMIT)) so a fleet-wide outage that expires
+// thousands of leases can't make one UPDATE exceed the D1/Worker time budget and starve the other
+// duties — the backlog drains over successive ticks like every other sweep duty.
 export async function recoverLeases(
   db: D1Database,
   now: number,
   maxAttempts: number,
+  limit: number = SWEEP_BATCH_LIMIT,
 ): Promise<{ requeued: number; workerLost: number }> {
   const requeue = await db
     .prepare(
       `UPDATE jobs SET status = 'queued', lease_expires_at = NULL, current_stage = 'requeued'
-         WHERE status = 'running' AND lease_expires_at <= ? AND attempt < ?`,
+         WHERE job_id IN (
+           SELECT job_id FROM jobs
+             WHERE status = 'running' AND lease_expires_at <= ? AND attempt < ?
+             ORDER BY lease_expires_at ASC LIMIT ?
+         )`,
     )
-    .bind(now, maxAttempts)
+    .bind(now, maxAttempts, limit)
     .run();
   const lost = await db
     .prepare(
       `UPDATE jobs SET status = 'failed', error_code = 'worker_lost', finished_at = ?,
                        lease_expires_at = NULL, current_stage = 'failed'
-         WHERE status = 'running' AND lease_expires_at <= ? AND attempt >= ?`,
+         WHERE job_id IN (
+           SELECT job_id FROM jobs
+             WHERE status = 'running' AND lease_expires_at <= ? AND attempt >= ?
+             ORDER BY lease_expires_at ASC LIMIT ?
+         )`,
     )
-    .bind(now, now, maxAttempts)
+    .bind(now, now, maxAttempts, limit)
     .run();
   return { requeued: requeue.meta.changes, workerLost: lost.meta.changes };
 }
@@ -115,15 +141,21 @@ export async function recoverLeases(
 interface OrphanRow {
   upload_session_id: string;
   source_key: string;
+  status: string;
 }
 
-// Duty 3 — delete the R2 source for `pending` upload sessions past their 1h TTL and mark them
-// expired. CLAIM-THEN-DELETE: flip pending->expired with a guarded UPDATE FIRST, and delete the
-// source ONLY if that win (changes===1). This serializes against verifyUpload's pending->consumed on
-// D1's single primary (uploads.ts), so a session being consumed by a concurrent POST /jobs between
-// the SELECT and here cannot have its source deleted out from under the just-created job: exactly one
-// of {sweeper expires, job consumes} wins the pending transition. Only `pending` is touched (a
-// `consumed` session's source is owned by its job, purged by duty 1). Returns the count cleaned.
+// Duty 3 — delete the R2 source for `pending` upload sessions past their 1h TTL. TWO-PHASE so it is
+// both race-safe AND crash-idempotent:
+//   1. claim: guarded UPDATE pending -> 'expiring'. This serializes against verifyUpload's
+//      pending -> consumed on D1's single primary (uploads.ts): exactly one of {sweeper claims,
+//      job consumes} wins, so a session being consumed by a concurrent POST /jobs can't have its
+//      source deleted out from under the just-created job.
+//   2. delete the source, then finalize 'expiring' -> 'expired'.
+// The SELECT also re-picks 'expiring' rows — a tick that crashed (or whose r2.delete threw) AFTER the
+// claim but before finalize left the row 'expiring' with a live source; the next tick re-deletes
+// (idempotent: deleting a gone key is a no-op) and finalizes. So a post-claim interruption never
+// leaks the source. 'expiring' is a sweeper-internal transient marker; verifyUpload treats any
+// non-'pending' session as unusable, and the session is past TTL anyway. Returns the count finalized.
 export async function cleanUploadOrphans(
   db: D1Database,
   r2: R2Bucket,
@@ -132,8 +164,8 @@ export async function cleanUploadOrphans(
 ): Promise<number> {
   const rows = await db
     .prepare(
-      `SELECT upload_session_id, source_key FROM upload_sessions
-         WHERE status = 'pending' AND expires_at <= ?
+      `SELECT upload_session_id, source_key, status FROM upload_sessions
+         WHERE (status = 'pending' AND expires_at <= ?) OR status = 'expiring'
          ORDER BY expires_at ASC LIMIT ?`,
     )
     .bind(now, limit)
@@ -142,28 +174,27 @@ export async function cleanUploadOrphans(
   let cleaned = 0;
   let firstError: unknown;
   for (const row of rows.results) {
-    const claimed = await db
-      .prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ? AND status = 'pending'`)
-      .bind(row.upload_session_id)
-      .run();
-    if (claimed.meta.changes !== 1) continue; // lost the race to a concurrent consume; the job owns the source
-    try {
-      // We own the pending->expired transition; the source is now ours to delete (no job claimed it).
-      await r2.delete(row.source_key);
-      cleaned += 1;
-    } catch (e) {
-      // R2 delete failed: roll the claim back to 'pending' so a later tick re-selects and retries —
-      // otherwise an 'expired' row with a live source is never re-scanned and leaks forever. This is
-      // safe: the session is past its TTL, so verifyUpload rejects any consume (410 upload_expired);
-      // 'pending' here is purely the sweeper's retry marker, not a re-openable upload.
-      await db
-        .prepare(`UPDATE upload_sessions SET status = 'pending' WHERE upload_session_id = ? AND status = 'expired'`)
+    if (row.status === "pending") {
+      const claimed = await db
+        .prepare(`UPDATE upload_sessions SET status = 'expiring' WHERE upload_session_id = ? AND status = 'pending'`)
         .bind(row.upload_session_id)
         .run();
+      if (claimed.meta.changes !== 1) continue; // lost the race to a concurrent consume; the job owns the source
+    }
+    try {
+      await r2.delete(row.source_key); // idempotent — a re-run after a crash/throw deletes a gone key as a no-op
+      await db
+        .prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ? AND status = 'expiring'`)
+        .bind(row.upload_session_id)
+        .run();
+      cleaned += 1;
+    } catch (e) {
+      // Leave the row 'expiring' so the next tick re-selects and retries — no rollback needed; the
+      // 'expiring' marker IS the retryable state. Surface the error after draining the rest.
       if (firstError === undefined) firstError = e;
     }
   }
-  if (firstError !== undefined) throw firstError; // surface the failure (next tick retries the rolled-back rows)
+  if (firstError !== undefined) throw firstError;
   return cleaned;
 }
 
@@ -212,7 +243,7 @@ export async function runSweep(env: Env, deps: Deps, config: RuntimeConfig): Pro
   };
 
   await duty(async () => {
-    const r = await recoverLeases(env.DB, now, config.maxAttempts);
+    const r = await recoverLeases(env.DB, now, config.maxAttempts, SWEEP_BATCH_LIMIT);
     summary.requeued = r.requeued;
     summary.workerLost = r.workerLost;
   });

@@ -82,6 +82,25 @@ describe("recoverLeases — kill-worker re-queue (H1)", () => {
     expect(row.lease_expires_at).toBeNull();
   });
 
+  it("bounds lease recovery to the batch limit (drains the backlog over ticks)", async () => {
+    // CodeX P2: a fleet-wide outage must not make recovery touch every expired lease in one UPDATE.
+    const { env, raw } = makeEnv();
+    for (const id of ["a", "b", "c"]) {
+      insertJob(raw, {
+        job_id: id,
+        enqueue_at: 0,
+        status: "running",
+        attempt: 1,
+        claim_version: 1,
+        lease_expires_at: 1000,
+      });
+    }
+    const now = 10_000;
+    expect((await recoverLeases(env.DB, now, MAX, 2)).requeued).toBe(2); // capped at the limit
+    expect((await recoverLeases(env.DB, now, MAX, 2)).requeued).toBe(1); // next tick drains the rest
+    for (const id of ["a", "b", "c"]) expect(jobRow(raw, id).status).toBe("queued");
+  });
+
   it("a live (unexpired) lease is left untouched", async () => {
     const { env, raw } = makeEnv();
     insertJob(raw, {
@@ -215,6 +234,26 @@ describe("purgeExpired — 24h artifact/source TTL", () => {
     expect(jobRow(raw, "fresh").data_purged_at).toBeNull();
   });
 
+  it("purges ALL attempt artifacts under the job prefix, including stale-cv ones not on the job row", async () => {
+    // CodeX P2: a reclaimed job can leave artifacts/<job>/<stale_cv>/... from a superseded worker
+    // whose /complete 409'd — never recorded in jobs.artifacts. Prefix purge reaps every attempt.
+    const { env, r2, raw } = makeEnv();
+    insertJob(raw, {
+      job_id: "multi",
+      enqueue_at: 0,
+      status: "done",
+      expires_at: 1000,
+      artifacts: JSON.stringify({ video_key: "artifacts/multi/2/output.mp4", srt_key: null }), // only cv2 recorded
+    });
+    r2.putSized("artifacts/multi/1/output.mp4", 10); // stale cv1 attempt — NOT in jobs.artifacts
+    r2.putSized("artifacts/multi/2/output.mp4", 10); // winning cv2
+    r2.putSized("uploads/us_seed", 10); // the source
+    expect(await purgeExpired(env.DB, env.MEDIA, 10_000, 200)).toBe(1);
+    expect(r2.has("artifacts/multi/1/output.mp4")).toBe(false); // stale attempt reaped by prefix
+    expect(r2.has("artifacts/multi/2/output.mp4")).toBe(false);
+    expect(r2.has("uploads/us_seed")).toBe(false);
+  });
+
   it("never purges a non-terminal job past expires_at (its source must survive for a late claim)", async () => {
     // CodeX P2: a queued/running job that lingered past 24h (e.g. all workers were down) must keep
     // its source — purge is terminal-only, else the next claim downloads a deleted source.
@@ -274,8 +313,8 @@ describe("cleanUploadOrphans — pending upload-session TTL", () => {
     expect(r2.has("uploads/us_live")).toBe(true);
   });
 
-  it("claims the session (pending->expired) BEFORE deleting its source (CodeX P2 race guard)", async () => {
-    // The delete must happen only after we win the pending->expired transition, so a concurrent
+  it("claims the session (pending->expiring) BEFORE deleting its source (CodeX P2 race guard)", async () => {
+    // The delete must happen only after we win the pending->expiring transition, so a concurrent
     // POST /jobs that consumes the session cannot have its source deleted out from under it.
     const { env, r2, raw } = makeEnv();
     insertUploadSession(raw, {
@@ -287,18 +326,19 @@ describe("cleanUploadOrphans — pending upload-session TTL", () => {
     r2.putSized("uploads/us_race", 1);
     const origDelete = (env.MEDIA as any).delete.bind(env.MEDIA);
     let statusAtDelete: string | undefined;
-    (env.MEDIA as any).delete = async (key: string) => {
+    (env.MEDIA as any).delete = async (keys: string | string[]) => {
       statusAtDelete = sessionRow(raw, "us_race")?.status; // observe the row at delete time
-      return origDelete(key);
+      return origDelete(keys);
     };
     expect(await cleanUploadOrphans(env.DB, env.MEDIA, 10_000, 200)).toBe(1);
-    expect(statusAtDelete).toBe("expired"); // the guarded UPDATE won before the delete ran
+    expect(statusAtDelete).toBe("expiring"); // claimed before the delete ran
+    expect(sessionRow(raw, "us_race").status).toBe("expired"); // finalized after the delete
     expect(r2.has("uploads/us_race")).toBe(false);
   });
 
-  it("rolls a failed delete back to pending so a later sweep retries (no permanent orphan)", async () => {
-    // CodeX P2: if r2.delete fails AFTER the claim flipped the row to expired, the source would be
-    // orphaned forever (next SELECT only scans pending). The rollback keeps it retryable.
+  it("a failed/interrupted delete leaves the row 'expiring' so a later sweep retries (no orphan)", async () => {
+    // CodeX P2: if the delete throws (or the isolate crashes) AFTER the claim, the row stays
+    // 'expiring' and the next sweep re-selects + retries it — the source is never permanently leaked.
     const { env, r2, raw } = makeEnv();
     insertUploadSession(raw, {
       upload_session_id: "us_flaky",
@@ -309,17 +349,17 @@ describe("cleanUploadOrphans — pending upload-session TTL", () => {
     r2.putSized("uploads/us_flaky", 1);
     const origDelete = (env.MEDIA as any).delete.bind(env.MEDIA);
     let fail = true;
-    (env.MEDIA as any).delete = async (key: string) => {
+    (env.MEDIA as any).delete = async (keys: string | string[]) => {
       if (fail) throw new Error("R2 transient");
-      return origDelete(key);
+      return origDelete(keys);
     };
 
-    // first sweep: the delete throws -> the row is rolled back to pending and the error surfaces.
+    // first sweep: the delete throws -> the row is left 'expiring' (retryable) and the error surfaces.
     await expect(cleanUploadOrphans(env.DB, env.MEDIA, 10_000, 200)).rejects.toThrow();
-    expect(sessionRow(raw, "us_flaky").status).toBe("pending"); // retryable, not wedged expired
+    expect(sessionRow(raw, "us_flaky").status).toBe("expiring");
     expect(r2.has("uploads/us_flaky")).toBe(true); // source still present (delete failed)
 
-    // R2 recovers; the next sweep cleans it for good.
+    // R2 recovers; the next sweep re-picks the 'expiring' row (no re-claim needed) and finalizes it.
     fail = false;
     expect(await cleanUploadOrphans(env.DB, env.MEDIA, 10_000, 200)).toBe(1);
     expect(sessionRow(raw, "us_flaky").status).toBe("expired");

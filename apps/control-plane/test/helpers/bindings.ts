@@ -17,8 +17,15 @@ export class FakeR2 {
     if (obj === undefined) return null;
     return { key, size: obj.size, httpMetadata: { contentType: obj.contentType } } as unknown as R2Object;
   }
-  async delete(key: string): Promise<void> {
-    this.store.delete(key);
+  // R2Bucket.delete accepts a single key or an array of keys (used by the sweeper's prefix purge).
+  async delete(keys: string | string[]): Promise<void> {
+    for (const k of Array.isArray(keys) ? keys : [keys]) this.store.delete(k);
+  }
+  // Minimal R2Bucket.list: prefix filter, never truncated (test object counts are tiny).
+  async list(opts?: { prefix?: string }): Promise<{ objects: { key: string }[]; truncated: false }> {
+    const prefix = opts?.prefix ?? "";
+    const objects = [...this.store.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key }));
+    return { objects, truncated: false };
   }
   has(key: string): boolean {
     return this.store.has(key);
