@@ -79,6 +79,12 @@ def size_head_before_download(worker: str) -> bool:
     return h != -1 and d != -1 and h < d and ".head(" in worker
 
 
+def download_bounded(worker: str) -> bool:
+    """True iff the source download is byte-capped (max_bytes), so a swap to an oversized object
+    AFTER the HEAD precheck (the HEAD->GET TOCTOU race) still can't buffer unbounded."""
+    return "max_bytes=" in worker
+
+
 # An accept rule is only sanctioned if it is destination-constrained to an allowlisted target:
 # the named egress sets, conntrack return traffic, loopback, or the pinned DNS resolver. Anything
 # else (a bare `tcp dport 443 accept`, `ct state new accept`, a negated daddr) re-opens egress.
@@ -156,6 +162,8 @@ def find_violations(root: Path) -> list[str]:
             "worker must HEAD-precheck the source size before downloading the body "
             "(post-HEAD-swap OOM/DoS)"
         )
+    if not download_bounded(worker):
+        v.append("worker source download must be byte-capped (max_bytes) — HEAD->GET swap race")
 
     # 3. egress ruleset (host nftables prototype).
     nft_path = root / "workers/media-worker/deploy/nftables-egress.nft"

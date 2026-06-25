@@ -112,8 +112,8 @@ def test_heartbeat_renews_during_a_long_single_stage(tmp_path: Path) -> None:
     release = threading.Event()
 
     class _BlockingStorage(FakeStorage):
-        def download(self, key: str) -> bytes:
-            data = super().download(key)
+        def download(self, key: str, *, max_bytes: int | None = None) -> bytes:
+            data = super().download(key, max_bytes=max_bytes)
             entered.set()
             assert release.wait(3.0)
             return data
@@ -278,6 +278,27 @@ def test_process_job_rejects_swapped_oversize_source_and_deletes_it(
     assert cp.completed == []
     assert storage.deleted == ["uploads/us_o"]
     assert storage.downloads == []  # rejected at the HEAD pre-check — body never buffered (no OOM)
+
+
+def test_reject_path_swap_after_head_is_bounded_by_download_cap(tmp_path: Path) -> None:
+    # TOCTOU: the object is swapped oversized AFTER the HEAD precheck (head under-reports). The
+    # body read must still be capped at max_upload_bytes and reject upload_too_large.
+    tiny_cap = WorkerConfig(
+        heartbeat_interval_sec=30.0, lease_ttl_sec=180.0, job_hard_timeout_sec=2700.0,
+        max_attempts=2, max_upload_bytes=8,
+    )
+
+    class _SwapStorage(FakeStorage):
+        def head(self, key: str) -> int | None:
+            return 4  # claims small (passes the precheck) — then the real body is large
+
+    job = make_job(job_id="job_w", upload_session_id="us_w", output_mode="dub_only")
+    cp = FakeControlPlane(config=tiny_cap, claims=[Claim(job=job, claim_version=1, attempt=1)])
+    storage = _SwapStorage({"uploads/us_w": b"\x00" * 64})  # 64 bytes > the 8-byte cap
+    run_once(cp, storage, workdir_base=tmp_path, config=tiny_cap)  # DEFAULT admit
+    assert cp.failed == [("job_w", 1, "upload_too_large", None)]  # bounded read caught the swap
+    assert cp.completed == []
+    assert storage.deleted == ["uploads/us_w"]
 
 
 def test_reject_path_transient_fail_keeps_source_for_reclaim(

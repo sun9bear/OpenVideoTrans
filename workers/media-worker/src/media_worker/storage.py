@@ -22,9 +22,14 @@ class StorageError(RuntimeError):
     """An object-storage operation failed or storage is misconfigured."""
 
 
+class SourceTooLargeError(StorageError):
+    """A bounded download read more than the byte cap — the object exceeds max_upload_bytes (e.g. a
+    post-HEAD swap to an oversized object). Surfaced so the caller rejects upload_too_large."""
+
+
 class Storage(Protocol):
     def head(self, key: str) -> int | None: ...
-    def download(self, key: str) -> bytes: ...
+    def download(self, key: str, *, max_bytes: int | None = None) -> bytes: ...
     def upload(self, key: str, data: bytes, *, content_type: str) -> None: ...
     def delete(self, key: str) -> None: ...
 
@@ -107,13 +112,20 @@ class S3Storage:
             raise StorageError(f"HEAD {key} -> {e.code}") from None
         return int(length) if length is not None else None
 
-    def download(self, key: str) -> bytes:
+    def download(self, key: str, *, max_bytes: int | None = None) -> bytes:
+        # With max_bytes set, read at most max_bytes+1 and reject if it overflows: this CAPS the
+        # buffered body even if the object was swapped to an oversized one AFTER the HEAD precheck
+        # (the TOCTOU race the HEAD alone can't close), so memory/disk stays bounded by the cap.
         url, headers = self._sign("GET", key, b"")
         req = urllib.request.Request(url, method="GET")
         for name, value in headers.items():
             req.add_header(name, value)
         with self._opener.open(req, timeout=self._timeout) as resp:
-            data: bytes = resp.read()
+            if max_bytes is None:
+                return resp.read()
+            data: bytes = resp.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise SourceTooLargeError(f"source exceeds the {max_bytes}-byte cap")
         return data
 
     def upload(self, key: str, data: bytes, *, content_type: str) -> None:

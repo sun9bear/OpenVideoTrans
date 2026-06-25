@@ -11,6 +11,7 @@ from collections.abc import Mapping
 
 from media_worker.config import WorkerConfig
 from media_worker.control_plane import Claim, ControlPlaneError, StaleClaimError
+from media_worker.storage import SourceTooLargeError
 from ovt_schemas import AigcMarking, Job, JobArtifacts, JobPlan
 
 # Production-shaped knobs (30s heartbeat / 180s lease), mirroring the control-plane defaults.
@@ -138,12 +139,15 @@ class FakeStorage:
         obj = self.objects.get(key)
         return len(obj) if obj is not None else None
 
-    def download(self, key: str) -> bytes:
+    def download(self, key: str, *, max_bytes: int | None = None) -> bytes:
         self.downloads.append(key)
         try:
-            return self.objects[key]
+            data = self.objects[key]
         except KeyError as e:
             raise FileNotFoundError(key) from e
+        if max_bytes is not None and len(data) > max_bytes:
+            raise SourceTooLargeError(f"source exceeds the {max_bytes}-byte cap")
+        return data
 
     def upload(self, key: str, data: bytes, *, content_type: str) -> None:
         self.objects[key] = data

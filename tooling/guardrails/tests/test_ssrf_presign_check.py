@@ -89,6 +89,11 @@ def test_size_head_before_download() -> None:
     assert not g.size_head_before_download(missing)  # no precheck at all
 
 
+def test_download_bounded() -> None:
+    assert g.download_bounded("storage.download(key, max_bytes=config.max_upload_bytes)")
+    assert not g.download_bounded("storage.download(key)")  # unbounded read
+
+
 def test_real_repo_tree_passes_the_guardrail() -> None:
     violations = g.find_violations(g.REPO_ROOT)
     assert violations == [], "SSRF/presign guardrail violations:\n" + "\n".join(violations)

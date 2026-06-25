@@ -21,7 +21,7 @@ from ovt_schemas import Job
 from .admission import SourceRejected, admit_source
 from .config import DEFAULT_CONFIG, WorkerConfig
 from .control_plane import Claim, ControlPlane, StaleClaimError
-from .storage import Storage
+from .storage import SourceTooLargeError, Storage
 
 logger = logging.getLogger("media_worker")
 
@@ -200,7 +200,7 @@ def process_job(
         # internal_error. error_detail is always omitted (exception text can carry a path/URL).
         try:
             _precheck_source_size(storage, job, config)
-            in_path = _download_source(storage, job, workdir)
+            in_path = _download_source(storage, job, workdir, config)
             admit(in_path, job, config)
         except SourceRejected as rej:
             # Record the rejection FIRST, then delete the source — and only if the report landed. A
@@ -253,9 +253,13 @@ def _precheck_source_size(storage: Storage, job: Job, config: WorkerConfig) -> N
         raise SourceRejected("upload_too_large")
 
 
-def _download_source(storage: Storage, job: Job, workdir: Path) -> Path:
-    """Fetch the (size-prechecked) source object into the job workdir and return the local path."""
-    source = storage.download(source_key_for(job))
+def _download_source(storage: Storage, job: Job, workdir: Path, config: WorkerConfig) -> Path:
+    """Fetch the source into the job workdir, capping the buffered body at max_upload_bytes so a
+    swap to an oversized object AFTER the HEAD precheck (the TOCTOU race) can't OOM the box."""
+    try:
+        source = storage.download(source_key_for(job), max_bytes=config.max_upload_bytes)
+    except SourceTooLargeError as exc:
+        raise SourceRejected("upload_too_large") from exc
     in_path = workdir / "input"
     in_path.write_bytes(source)
     return in_path
