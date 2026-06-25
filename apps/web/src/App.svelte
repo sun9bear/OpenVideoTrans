@@ -9,6 +9,11 @@
   import { COPY } from "./lib/copy";
   import type { CreateJobBody, JobView, OutputMode, SubtitleLang } from "./lib/types";
 
+  // SAME-ORIGIN by default (""): the Worker serves both this SPA and /api, so the X-OVT-Anon-Id +
+  // JSON requests are not cross-origin and need no CORS. Setting VITE_API_BASE to a DIFFERENT origin
+  // makes the browser preflight (custom header + json content-type) and the control-plane router has
+  // no Access-Control-Allow-* yet — so cross-origin deployment needs CORS added there first. That
+  // server-side CORS support is routed to the control-plane / DEPLOY, out of this frontend unit.
   const API_BASE: string = import.meta.env.VITE_API_BASE ?? "";
   const TARGET_LANGS = [
     { value: "zh-Hans", label: "简体中文" },
@@ -31,8 +36,6 @@
   let statusText = $state("");
   let job = $state<JobView | null>(null);
   let errorMsg = $state("");
-  let srtUrl = $state("");
-  let videoUrl = $state("");
 
   // Turnstile (T2.4 abuse gate). Only active when a site key is configured; otherwise inert.
   let turnstileEl = $state<HTMLDivElement | undefined>(undefined);
@@ -142,12 +145,9 @@
     }
     errorMsg = "";
     job = null;
-    srtUrl = "";
-    videoUrl = "";
     pendingBody = null;
-    // Bump the poll generation NOW (not just at startPolling): a previous job's onDone link fetch may
-    // still be in flight during this submit's upload/create gap; invalidating it here stops a stale
-    // download URL from repopulating srtUrl/videoUrl after we just cleared them.
+    // Invalidate any prior polling session up front: a stale getJob from a previous job could still be
+    // in flight during this submit's upload/create gap; bumping the generation drops its late resolution.
     pollGen++;
     phase = "working";
     statusText = "上传中…";
@@ -232,7 +232,8 @@
         else if (j.status === "queued") statusText = "排队中…";
         if (j.status === "done") {
           stopPolling();
-          await onDone(j, gen);
+          phase = "done";
+          statusText = "完成";
         } else if (j.status === "failed") {
           stopPolling();
           phase = "failed";
@@ -253,17 +254,16 @@
     }
   }
 
-  async function onDone(j: JobView, gen: number) {
-    phase = "done";
-    statusText = "完成";
+  // Mint the presigned download URL ON CLICK (not at completion): the server caps download presigns to
+  // ~1h while artifacts live 24h, so a link minted at `done` would expire if the page stays open. A
+  // fresh per-click presign is always within TTL. Opens in a new tab; no stale URL is ever stored.
+  async function downloadArtifact(which: "video" | "srt") {
+    if (!api || !job) return;
     try {
-      const srt = api && j.artifacts.srt_key ? (await api.downloadUrl(j.job_id, "srt")).url : "";
-      const vid = api && j.artifacts.video_key ? (await api.downloadUrl(j.job_id, "video")).url : "";
-      if (gen !== pollGen) return; // a newer submit started during the link fetch — drop stale links
-      srtUrl = srt;
-      videoUrl = vid;
-    } catch {
-      // download links are best-effort; the job is done regardless
+      const { url } = await api.downloadUrl(job.job_id, which);
+      window.open(url, "_blank", "noopener");
+    } catch (e) {
+      errorMsg = e instanceof ApiError ? `${e.message}（${e.code}）` : "下载链接获取失败，请重试。";
     }
   }
 
@@ -348,11 +348,15 @@
     {/if}
     {#if errorMsg}<p class="warn" role="alert">{errorMsg}</p>{/if}
 
-    {#if phase === "done"}
+    {#if phase === "done" && job}
       <div class="downloads">
-        <p>处理完成（成片与源文件 24 小时后自动删除）：</p>
-        {#if srtUrl}<a href={srtUrl} rel="noopener">下载字幕（SRT）</a>{/if}
-        {#if videoUrl}<a href={videoUrl} rel="noopener">下载配音视频</a>{/if}
+        <p>处理完成（成片与源文件 24 小时后自动删除，请尽快下载）：</p>
+        {#if job.artifacts.srt_key}
+          <button onclick={() => downloadArtifact("srt")}>下载字幕（SRT）</button>
+        {/if}
+        {#if job.artifacts.video_key}
+          <button onclick={() => downloadArtifact("video")}>下载配音视频</button>
+        {/if}
       </div>
     {/if}
   </section>

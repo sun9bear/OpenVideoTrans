@@ -29,6 +29,13 @@ describe("session — anon id", () => {
     expect(readAnonId("")).toBeNull();
   });
 
+  it("treats a malformed percent-escape cookie as absent instead of throwing", () => {
+    // a bad escape would make decodeURIComponent throw -> must NOT brick onMount/ensureAnonId
+    expect(readAnonId(`${ANON_COOKIE}=%E0%A4%A`)).toBeNull();
+    const jar = { cookie: `${ANON_COOKIE}=%E0%A4%A` };
+    expect(ensureAnonId(jar, true)).toMatch(/^anon_[0-9a-f]{32}$/); // mints a fresh id, no throw
+  });
+
   it("builds a Strict cookie, Secure only when asked", () => {
     const secure = anonCookie("anon_abc", { secure: true });
     expect(secure).toContain("SameSite=Strict");

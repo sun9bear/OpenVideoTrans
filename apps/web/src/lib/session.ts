@@ -29,8 +29,12 @@ export function readAnonId(cookieString: string): string | null {
     if (eq === -1) continue;
     const key = part.slice(0, eq).trim();
     if (key === ANON_COOKIE) {
-      const val = decodeURIComponent(part.slice(eq + 1).trim());
-      return val !== "" ? val : null;
+      try {
+        const val = decodeURIComponent(part.slice(eq + 1).trim());
+        return val !== "" ? val : null;
+      } catch {
+        return null; // malformed percent-escape -> treat as absent so a fresh id is minted (don't throw)
+      }
     }
   }
   return null;
