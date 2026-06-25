@@ -21,4 +21,7 @@ export interface CreateJobBody {
   subtitle_lang: SubtitleLang;
   source_lang_hint?: string;
   advisory_duration_ms?: number;
+  // Cloudflare Turnstile token for the T2.4 abuse gate. Required by the server (admitJob) only when
+  // TURNSTILE_SECRET_KEY is configured; omitted when the gate is inert (dev / self-host without it).
+  turnstile_token?: string;
 }

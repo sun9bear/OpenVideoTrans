@@ -6,9 +6,20 @@
 export const ANON_COOKIE = "ovt_anon";
 const ONE_YEAR_SEC = 365 * 24 * 60 * 60;
 
-// A v4-UUID-backed id. crypto.randomUUID exists in all target browsers + the jsdom/node test env.
-export function newAnonId(): string {
-  return `anon_${crypto.randomUUID().replace(/-/g, "")}`;
+// A 128-bit random id. Prefer crypto.randomUUID (secure contexts), but fall back to
+// crypto.getRandomValues — which IS available on non-secure HTTP origins — so a self-hosted HTTP
+// deployment (non-localhost) doesn't throw on first mount. The crypto source is injectable for tests.
+interface RandomSource {
+  randomUUID?: () => string;
+  getRandomValues: (a: Uint8Array) => Uint8Array;
+}
+export function newAnonId(source: RandomSource = globalThis.crypto): string {
+  if (typeof source.randomUUID === "function") {
+    return `anon_${source.randomUUID().replace(/-/g, "")}`;
+  }
+  const bytes = new Uint8Array(16);
+  source.getRandomValues(bytes);
+  return `anon_${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
 // Parse the anon id out of a document.cookie string. Returns null if absent/empty.

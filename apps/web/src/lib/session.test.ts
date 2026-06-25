@@ -9,6 +9,18 @@ describe("session — anon id", () => {
     expect(a).not.toBe(b);
   });
 
+  it("falls back to getRandomValues when randomUUID is unavailable (non-secure HTTP origin)", () => {
+    // a crypto source WITHOUT randomUUID — models http:// non-localhost where it is not exposed
+    const source = {
+      getRandomValues: (arr: Uint8Array) => {
+        for (let i = 0; i < arr.length; i++) arr[i] = (i * 7 + 1) & 0xff;
+        return arr;
+      },
+    };
+    const id = newAnonId(source);
+    expect(id).toMatch(/^anon_[0-9a-f]{32}$/); // still a valid 128-bit id, no throw
+  });
+
   it("reads the anon cookie out of a cookie string (null if absent/empty)", () => {
     expect(readAnonId(`${ANON_COOKIE}=anon_abc`)).toBe("anon_abc");
     expect(readAnonId(`other=1; ${ANON_COOKIE}=anon_xyz; more=2`)).toBe("anon_xyz");

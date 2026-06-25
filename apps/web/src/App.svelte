@@ -5,6 +5,7 @@
   import { longVideoWarning, oversizeWarning } from "./lib/caps";
   import { resolveUploadType, unsupportedTypeWarning } from "./lib/mime";
   import { OUTPUT_MODE_OPTIONS, SUBTITLE_DELIVERY_OPTIONS } from "./lib/modes";
+  import { renderTurnstile, turnstileEnabled, type TurnstileHandle } from "./lib/turnstile";
   import { COPY } from "./lib/copy";
   import type { CreateJobBody, JobView, OutputMode, SubtitleLang } from "./lib/types";
 
@@ -33,6 +34,11 @@
   let srtUrl = $state("");
   let videoUrl = $state("");
 
+  // Turnstile (T2.4 abuse gate). Only active when a site key is configured; otherwise inert.
+  let turnstileEl = $state<HTMLDivElement | undefined>(undefined);
+  let turnstileToken = $state("");
+  let turnstileHandle: TurnstileHandle | null = null;
+
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   // A monotonically-increasing token identifying the current polling session. A slow getJob whose
   // response outlives the interval (or a poll from a superseded submit) is dropped when its captured
@@ -42,14 +48,31 @@
   onMount(() => {
     const anonId = ensureAnonId(document, location.protocol === "https:");
     api = new ApiClient(API_BASE, anonId);
+    if (turnstileEnabled() && turnstileEl) {
+      renderTurnstile(
+        turnstileEl,
+        (t) => (turnstileToken = t),
+        () => (turnstileToken = ""),
+      )
+        .then((h) => (turnstileHandle = h))
+        .catch(() => {
+          // script load failed -> leave the token empty so submit stays gated (fail closed)
+        });
+    }
     return () => stopPolling();
   });
+
+  function resetTurnstile() {
+    turnstileToken = "";
+    turnstileHandle?.reset(); // the token is single-use; force a fresh challenge for the next job
+  }
 
   const sizeWarn = $derived(file ? oversizeWarning(file.size) : null);
   const typeWarn = $derived(file ? unsupportedTypeWarning(file) : null);
   const durationWarn = $derived(file && durationSec ? longVideoWarning(durationSec, outputMode) : null);
   const busy = $derived(phase === "working" || phase === "polling");
-  const canSubmit = $derived(!!file && !sizeWarn && !typeWarn && !busy);
+  const needsChallenge = $derived(turnstileEnabled() && !turnstileToken);
+  const canSubmit = $derived(!!file && !sizeWarn && !typeWarn && !busy && !needsChallenge);
 
   async function onFile(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
@@ -106,11 +129,14 @@
         subtitle_lang: subtitleLang,
       };
       if (durationSec) body.advisory_duration_ms = Math.round(durationSec * 1000);
+      if (turnstileToken) body.turnstile_token = turnstileToken;
       job = await api.createJob(body);
+      resetTurnstile(); // the token was consumed by the server's abuse gate; force a fresh one next time
       phase = "polling";
       statusText = "排队中…";
       startPolling(job.job_id);
     } catch (e) {
+      resetTurnstile();
       fail(e);
     }
   }
@@ -224,6 +250,14 @@
     </label>
 
     {#if durationWarn}<p class="warn" role="alert">{durationWarn}</p>{/if}
+
+    {#if turnstileEnabled()}
+      <div class="field">
+        <span>人机验证</span>
+        <div bind:this={turnstileEl}></div>
+        {#if needsChallenge}<small>请完成上方人机验证后再提交。</small>{/if}
+      </div>
+    {/if}
 
     <button onclick={submit} disabled={!canSubmit}>
       {busy ? "处理中…" : "开始翻译"}
