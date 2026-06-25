@@ -199,6 +199,7 @@ def process_job(
         # user-facing error_code (+ delete the offending source); a genuine fetch failure is
         # internal_error. error_detail is always omitted (exception text can carry a path/URL).
         try:
+            _precheck_source_size(storage, job, config)
             in_path = _download_source(storage, job, workdir)
             admit(in_path, job, config)
         except SourceRejected as rej:
@@ -241,8 +242,19 @@ def process_job(
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _precheck_source_size(storage: Storage, job: Job, config: WorkerConfig) -> None:
+    """HEAD the source and reject an oversized object BEFORE buffering its body, so a post-HEAD swap
+    to a huge object can't exhaust the worker's memory/disk (admit_source's in_path.stat() size
+    check runs only AFTER the full download). A missing object (head None) falls through to the
+    download, which fails internal_error as before — R2 always returns Content-Length for an
+    existing object, so the only None case is a 404 of an already-gone source."""
+    size = storage.head(source_key_for(job))
+    if size is not None and size > config.max_upload_bytes:
+        raise SourceRejected("upload_too_large")
+
+
 def _download_source(storage: Storage, job: Job, workdir: Path) -> Path:
-    """Fetch the source object into the job's workdir and return the local path."""
+    """Fetch the (size-prechecked) source object into the job workdir and return the local path."""
     source = storage.download(source_key_for(job))
     in_path = workdir / "input"
     in_path.write_bytes(source)

@@ -132,8 +132,14 @@ class FakeStorage:
         self.objects: dict[str, bytes] = dict(objects or {})
         self.uploads: list[tuple[str, str]] = []
         self.deleted: list[str] = []
+        self.downloads: list[str] = []
+
+    def head(self, key: str) -> int | None:
+        obj = self.objects.get(key)
+        return len(obj) if obj is not None else None
 
     def download(self, key: str) -> bytes:
+        self.downloads.append(key)
         try:
             return self.objects[key]
         except KeyError as e:

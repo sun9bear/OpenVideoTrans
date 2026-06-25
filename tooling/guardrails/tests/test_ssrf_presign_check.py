@@ -80,6 +80,15 @@ def test_admit_before_produce() -> None:
     assert not g.admit_before_produce(neutered)  # only the import/default, no real call
 
 
+def test_size_head_before_download() -> None:
+    good = "_precheck_source_size(s)\n_download_source(s)\nstorage.head("
+    after = "_download_source(s)\n_precheck_source_size(s)\n.head("
+    missing = "_download_source(s)\nadmit(in_path, job, config)"
+    assert g.size_head_before_download(good)
+    assert not g.size_head_before_download(after)  # precheck after download
+    assert not g.size_head_before_download(missing)  # no precheck at all
+
+
 def test_real_repo_tree_passes_the_guardrail() -> None:
     violations = g.find_violations(g.REPO_ROOT)
     assert violations == [], "SSRF/presign guardrail violations:\n" + "\n".join(violations)

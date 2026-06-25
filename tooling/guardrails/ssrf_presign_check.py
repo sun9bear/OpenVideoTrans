@@ -71,6 +71,14 @@ def admit_before_produce(worker: str) -> bool:
     return a != -1 and p != -1 and a < p and handled
 
 
+def size_head_before_download(worker: str) -> bool:
+    """True iff the worker HEAD-prechecks the source size BEFORE downloading the body, so an
+    oversized post-HEAD swap is rejected before buffering (the OOM the size stat alone misses)."""
+    h = worker.find("_precheck_source_size(")
+    d = worker.find("_download_source(")
+    return h != -1 and d != -1 and h < d and ".head(" in worker
+
+
 # An accept rule is only sanctioned if it is destination-constrained to an allowlisted target:
 # the named egress sets, conntrack return traffic, loopback, or the pinned DNS resolver. Anything
 # else (a bare `tcp dport 443 accept`, `ct state new accept`, a negated daddr) re-opens egress.
@@ -142,6 +150,11 @@ def find_violations(root: Path) -> list[str]:
         v.append(
             "worker claim loop must CALL re-admission (admit) before producing artifacts, with a "
             "SourceRejected -> delete+fail handler — not just import it (dead gate)"
+        )
+    if not size_head_before_download(worker):
+        v.append(
+            "worker must HEAD-precheck the source size before downloading the body "
+            "(post-HEAD-swap OOM/DoS)"
         )
 
     # 3. egress ruleset (host nftables prototype).

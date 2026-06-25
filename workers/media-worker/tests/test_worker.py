@@ -277,6 +277,7 @@ def test_process_job_rejects_swapped_oversize_source_and_deletes_it(
     assert cp.failed == [("job_o", 1, "upload_too_large", None)]
     assert cp.completed == []
     assert storage.deleted == ["uploads/us_o"]
+    assert storage.downloads == []  # rejected at the HEAD pre-check — body never buffered (no OOM)
 
 
 def test_reject_path_transient_fail_keeps_source_for_reclaim(
