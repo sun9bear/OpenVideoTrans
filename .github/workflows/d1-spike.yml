@@ -11,6 +11,13 @@ name: D1 claim spike (M2 remote hard gate)
 on:
   workflow_dispatch:
 
+# Serialize manual runs: the spike DROPs/reseeds a fixed-name table on the shared D1 database, so two
+# overlapping dispatches could clobber each other's table and yield a false hard-gate failure. Queue
+# (don't cancel) so each dispatch still completes.
+concurrency:
+  group: d1-spike
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
