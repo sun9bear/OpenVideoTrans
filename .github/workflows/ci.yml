@@ -93,7 +93,7 @@ jobs:
       - name: Install dependencies (frozen)
         run: uv sync --all-packages --frozen
 
-      # Paid-safety invariants are xfail until T1.2 (keeps main green, CodeX P1.1);
-      # the autodub-core boundary lint must pass from here on.
+      # Paid-safety invariants (§5) + the autodub-core boundary lint — both HARD-PASS since T1.2
+      # (the early xfail scaffolding is gone; redline must stay 25 passed / 0 xfail).
       - name: Red-line invariants (paid-safety §5 + autodub-core boundary)
         run: uv run pytest -m redline

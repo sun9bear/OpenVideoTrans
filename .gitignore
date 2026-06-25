@@ -35,6 +35,10 @@ node_modules/
 /artifacts/
 /tmp/
 **/_scratch/
+# local-runner CLI job output (default ovt_job/<timestamp>) + ad-hoc test media
+/ovt_job/
+/fake_paid.mp4
+/tmp_paid_job/
 
 # OS / editor
 .DS_Store

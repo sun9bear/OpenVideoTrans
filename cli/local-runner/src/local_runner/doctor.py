@@ -29,7 +29,7 @@ def run_doctor(out: Callable[[str], None] = print) -> int:
     """Print provider availability + supply-chain pin/license status. Returns 0 (always — doctor
     reports, it does not fail the shell), 1 if a configured piper model fails its pin."""
     ok = True
-    out("OpenVideoTrans doctor — providers")
+    out("OpenVideoTrans doctor - providers")
     for kind in ("asr", "mt", "tts"):
         out(f"  [{kind}]")
         for name, available, info in probe(kind):
@@ -42,12 +42,12 @@ def run_doctor(out: Callable[[str], None] = print) -> int:
     if model:
         try:
             ref = verify_piper_model(model)
-            out(f"  piper model pin: OK ({(ref.sha256 or '')[:12]}…)")
+            out(f"  piper model pin: OK ({(ref.sha256 or '')[:12]})")
         except (SupplyChainError, OSError) as exc:
             # OSError/FileNotFoundError: a stale FVD_PIPER_MODEL pointing at a moved/deleted file
             # must be REPORTED as a failed pin, not crash doctor (@CodeX CLI).
             ok = False
-            out(f"  piper model pin: FAIL — {exc}")
+            out(f"  piper model pin: FAIL - {exc}")
     else:
         out("  piper model pin: skipped (FVD_PIPER_MODEL unset)")
 
@@ -56,10 +56,10 @@ def run_doctor(out: Callable[[str], None] = print) -> int:
     if os.getenv("FVD_FFMPEG_SHA256"):
         try:
             ref = verify_ffmpeg()
-            out(f"  ffmpeg pin: OK ({(ref.sha256 or '')[:12]}…)")
+            out(f"  ffmpeg pin: OK ({(ref.sha256 or '')[:12]})")
         except (SupplyChainError, OSError) as exc:
             ok = False
-            out(f"  ffmpeg pin: FAIL — {exc}")
+            out(f"  ffmpeg pin: FAIL - {exc}")
     else:
         out("  ffmpeg pin: skipped (FVD_FFMPEG_SHA256 unset)")
 
