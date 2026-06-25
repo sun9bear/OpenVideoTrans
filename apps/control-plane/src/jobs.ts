@@ -310,6 +310,8 @@ export async function download(ctx: Ctx): Promise<Response> {
   if (row.status !== "done") throw new HttpError(409, "not_ready", "job is not complete");
   const now = ctx.deps.now();
   if (row.expires_at <= now) throw new HttpError(410, "expired", "artifacts expired");
+  // Artifacts purged early (retention sweeper / takedown sets data_purged_at) -> do not sign a GET.
+  if (row.data_purged_at !== null) throw new HttpError(410, "purged", "artifacts purged");
   const artifacts = JSON.parse(row.artifacts) as { video_key?: string | null; srt_key?: string | null };
   const key = which === "srt" ? artifacts.srt_key : artifacts.video_key;
   if (!key) throw new HttpError(404, "not_found", "requested artifact not available");

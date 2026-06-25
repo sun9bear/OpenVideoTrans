@@ -63,6 +63,21 @@ describe("GET /jobs/:id/download presign", () => {
     expect(r.json.expires_at).toBe(expiresAt); // capped to remaining TTL, not now + presignTtl(1h)
     expect(r.json.url).toContain("X-Amz-Expires=30");
   });
+
+  it("refuses download after the artifacts are purged (410)", async () => {
+    const { env, raw } = makeEnv({ r2Creds: true });
+    insertJob(raw, {
+      job_id: "d5",
+      status: "done",
+      anon: "owner",
+      enqueue_at: 1000,
+      expires_at: 9_000_000_000_000,
+      data_purged_at: 5000,
+      artifacts: JSON.stringify({ video_key: "artifacts/d5/v.mp4", srt_key: null }),
+    });
+    const r = await call(env, makeClock(2000).deps, "GET", "/api/jobs/d5/download/video", { actor: "owner" });
+    expect(r.status).toBe(410);
+  });
 });
 
 describe("GET /jobs/:id owner scoping", () => {

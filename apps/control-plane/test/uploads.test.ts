@@ -127,6 +127,19 @@ describe("POST /jobs — HEAD-after-PUT verification", () => {
     expect(r2.has(s.source_key)).toBe(false);
   });
 
+  it("upload with no verified content type -> deleted + source_verify_failed (422, fail-closed)", async () => {
+    const { env, r2 } = makeEnv({ r2Creds: true });
+    const { deps } = makeClock(1_000_000);
+    const s = await sign(env, deps, "u1");
+    r2.putSized(s.source_key, 2048, null); // PUT omitted Content-Type
+    const create = await call(env, deps, "POST", "/api/jobs", {
+      actor: "u1",
+      body: { upload_session_id: s.upload_session_id, ...SUB },
+    });
+    expect(create.status).toBe(422);
+    expect(r2.has(s.source_key)).toBe(false);
+  });
+
   it("another actor cannot consume someone else's upload session (404)", async () => {
     const { env, r2 } = makeEnv({ r2Creds: true });
     const { deps } = makeClock(1_000_000);

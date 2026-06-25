@@ -121,11 +121,12 @@ export async function verifyUpload(
     throw new HttpError(413, "upload_too_large", "uploaded object exceeds the size cap");
   }
   // Verify the actual object type matches what was declared (the type half of the post-PUT HEAD
-  // check, plan §endpoints). Mismatch -> delete + reject. Note: R2's content-type is client-set, so
+  // check, plan §endpoints). Fail CLOSED: a missing OR mismatched content-type is rejected (a client
+  // that omits Content-Type cannot bypass the type gate). Note: R2's content-type is client-set, so
   // the authoritative format gate remains the worker's ffprobe admission (T2.4); this rejects the
-  // honest-mismatch / wrong-extension case cheaply at admission.
+  // honest-mismatch / wrong-extension / no-type case cheaply at admission.
   const actualType = obj.httpMetadata?.contentType;
-  if (actualType !== undefined && actualType !== row.declared_type) {
+  if (actualType === undefined || actualType !== row.declared_type) {
     await ctx.env.MEDIA.delete(row.source_key);
     await ctx.env.DB.prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ?`)
       .bind(uploadSessionId)

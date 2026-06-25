@@ -6,10 +6,11 @@ import { makeD1, type RawDb } from "./d1";
 // In-memory R2 modelling only head/put/delete (+ a size-only seed so tests can simulate a browser
 // PUT of a given size without allocating the bytes).
 export class FakeR2 {
-  private readonly store = new Map<string, { size: number; contentType: string }>();
-  // Simulate a browser PUT of a given size + content-type (defaults to a valid declared type).
-  putSized(key: string, size: number, contentType = "video/mp4"): void {
-    this.store.set(key, { size, contentType });
+  private readonly store = new Map<string, { size: number; contentType: string | undefined }>();
+  // Simulate a browser PUT of a given size + content-type. Pass null to simulate a PUT that omitted
+  // Content-Type (so head() returns no httpMetadata.contentType).
+  putSized(key: string, size: number, contentType: string | null = "video/mp4"): void {
+    this.store.set(key, { size, contentType: contentType ?? undefined });
   }
   async head(key: string): Promise<R2Object | null> {
     const obj = this.store.get(key);
@@ -101,6 +102,7 @@ export interface JobSeed {
   attempt?: number;
   claim_version?: number;
   lease_expires_at?: number | null;
+  data_purged_at?: number | null;
   anon?: string;
   artifacts?: string;
   expires_at?: number;
@@ -114,9 +116,9 @@ export function insertJob(raw: RawDb, o: JobSeed): void {
          job_id, anon_or_user_id, status, source_type, upload_session_id, target_lang,
          output_mode, subtitle_delivery, subtitle_lang, plan, settings_version, aigc_marking,
          priority, advisory_duration_ms, enqueue_at, deadline_at, created_at, expires_at,
-         lease_expires_at, artifacts, attempt, claim_version
+         lease_expires_at, data_purged_at, artifacts, attempt, claim_version
        ) VALUES (?, ?, ?, 'upload', 'us_seed', 'zh-Hans', ?, 'srt', 'target',
-         '{"asr":"auto","mt":"auto","tts":null}', 1, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         '{"asr":"auto","mt":"auto","tts":null}', 1, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       o.job_id,
@@ -130,6 +132,7 @@ export function insertJob(raw: RawDb, o: JobSeed): void {
       o.enqueue_at,
       o.expires_at ?? o.enqueue_at + 24 * 60 * 60 * 1000,
       o.lease_expires_at ?? null,
+      o.data_purged_at ?? null,
       o.artifacts ?? "{}",
       o.attempt ?? 0,
       o.claim_version ?? 0,
