@@ -1,0 +1,105 @@
+import type { D1Database } from "@cloudflare/workers-types";
+
+// Frozen v4 priority comparator (plan §8 / line 210) — a TOTAL order over the claimable set:
+//   1. output_mode tier: subtitle_only outranks any dub mode (字幕 > 配音)
+//   2. aging bucket: floor((now - enqueue_at) / agingBucketMs) — larger (older) wins, anti-starvation
+//   3. advisory_duration_ms ascending (shorter first); a NULL hint sorts last (unknown = lowest)
+//   4. enqueue_at ascending (FIFO tiebreak)
+//   5. job_id ascending (final deterministic tiebreak)
+// advisory_duration_ms is a browser hint used ONLY for ordering; the hard duration cap is enforced
+// by the worker's ffprobe admission. deadline_at is a separate anti-starvation backstop enforced by
+// the sweeper (T2.3), not a sort key here.
+
+export const ADVISORY_NULL_SENTINEL = Number.MAX_SAFE_INTEGER;
+
+export interface ComparatorJob {
+  job_id: string;
+  output_mode: string;
+  enqueue_at: number;
+  advisory_duration_ms: number | null;
+}
+
+export function modeTier(outputMode: string): number {
+  return outputMode === "subtitle_only" ? 1 : 0;
+}
+
+export function agingBucket(now: number, enqueueAt: number, agingBucketMs: number): number {
+  return Math.floor((now - enqueueAt) / agingBucketMs);
+}
+
+// Total-order comparator: negative if `a` should be claimed before `b`. Mirrors the claim SQL's
+// ORDER BY exactly, so the pure sort and the DB claim agree on the head of the queue.
+export function compareClaimable(
+  a: ComparatorJob,
+  b: ComparatorJob,
+  now: number,
+  agingBucketMs: number,
+): number {
+  const tier = modeTier(b.output_mode) - modeTier(a.output_mode);
+  if (tier !== 0) return tier;
+  const aging =
+    agingBucket(now, b.enqueue_at, agingBucketMs) - agingBucket(now, a.enqueue_at, agingBucketMs);
+  if (aging !== 0) return aging;
+  const advA = a.advisory_duration_ms ?? ADVISORY_NULL_SENTINEL;
+  const advB = b.advisory_duration_ms ?? ADVISORY_NULL_SENTINEL;
+  if (advA !== advB) return advA - advB;
+  if (a.enqueue_at !== b.enqueue_at) return a.enqueue_at - b.enqueue_at;
+  return a.job_id < b.job_id ? -1 : a.job_id > b.job_id ? 1 : 0;
+}
+
+// The exactly-once optimistic-lock claim — the SAME atomic UPDATE structure proven on real D1 in the
+// T2.0 hard gate, now ordering the claimable set by the §8 comparator instead of plain FIFO. Two
+// racers running this UPDATE serialize (D1 single primary); the first flips status->running so the
+// loser's repeated outer guard no longer matches -> 0 rows -> it claims nothing. A running job with
+// an expired lease is claimable again (lost-worker recovery); attempt < maxAttempt caps reclaims.
+export const CLAIM_SQL = `
+UPDATE jobs
+SET status = 'running',
+    claim_version = claim_version + 1,
+    attempt = attempt + 1,
+    lease_expires_at = ? + ?,
+    started_at = COALESCE(started_at, ?),
+    current_stage = 'claimed'
+WHERE job_id = (
+    SELECT job_id FROM jobs
+    WHERE (status = 'queued' OR (status = 'running' AND lease_expires_at <= ?))
+      AND attempt < ?
+    ORDER BY
+      CASE WHEN output_mode = 'subtitle_only' THEN 1 ELSE 0 END DESC,
+      (? - enqueue_at) / ? DESC,
+      COALESCE(advisory_duration_ms, ${ADVISORY_NULL_SENTINEL}) ASC,
+      enqueue_at ASC,
+      job_id ASC
+    LIMIT 1
+)
+  AND (status = 'queued' OR (status = 'running' AND lease_expires_at <= ?))
+  AND attempt < ?
+RETURNING job_id, claim_version, attempt
+`.trim();
+
+export interface ClaimRow {
+  job_id: string;
+  claim_version: number;
+  attempt: number;
+}
+
+export interface ClaimOpts {
+  now: number;
+  leaseMs: number;
+  maxAttempt: number;
+  agingBucketMs: number;
+}
+
+// Positional params in CLAIM_SQL `?` order:
+// lease(now, leaseMs) · started_at(now) · innerWHERE(now, maxAttempt) · aging(now, bucket) · outerWHERE(now, maxAttempt)
+export function claimParams(o: ClaimOpts): number[] {
+  return [o.now, o.leaseMs, o.now, o.now, o.maxAttempt, o.now, o.agingBucketMs, o.now, o.maxAttempt];
+}
+
+export async function claimOne(db: D1Database, o: ClaimOpts): Promise<ClaimRow | null> {
+  const row = await db
+    .prepare(CLAIM_SQL)
+    .bind(...claimParams(o))
+    .first<ClaimRow>();
+  return row ?? null;
+}
