@@ -163,12 +163,14 @@ def process_job(
     job_id = job.job_id
     workdir = job_workdir(workdir_base, job_id)
     workdir.mkdir(parents=True, exist_ok=True)
+    lease_lost = threading.Event()
     heartbeat = Heartbeat(
         cp,
         job_id,
         claim_version,
         interval_sec=config.heartbeat_interval_sec,
         max_total_sec=config.job_hard_timeout_sec,
+        on_lost=lease_lost.set,
     )
     heartbeat.start()
     try:
@@ -180,6 +182,13 @@ def process_job(
             # control plane / user (the stable error_code is enough).
             cp.fail(job_id, claim_version, error_code="internal_error")
             logger.warning("job %s failed (stub)", job_id)
+            return
+        if lease_lost.is_set():
+            # The hard timeout tripped (or the lease was reclaimed) during processing: do NOT mark
+            # the job done. Report processing_timeout — a no-op server-side if the lease was already
+            # reclaimed (claim_version-gated), terminal if we still hold it.
+            cp.fail(job_id, claim_version, error_code="processing_timeout")
+            logger.warning("job %s exceeded the hard timeout; reported processing_timeout", job_id)
             return
         # Processing succeeded. Reporting completion is a separate concern: a transient transport
         # error on /complete must NOT fail a successful job. Leave it running for lease recovery
@@ -247,27 +256,34 @@ def run_forever(
         logger.info(
             "cleared %d orphan workdir(s) at startup: %s", len(cleared), ", ".join(sorted(cleared))
         )
-    if config is not None:
-        cfg = config
-    else:
-        try:
-            cfg = cp.get_config()
-        except Exception:
-            # A boot-time config hiccup must not exit the worker (the claim loop below is already
-            # resilient). Fall back to the built-in defaults, which mirror the control plane.
-            logger.warning("startup config fetch failed; using built-in defaults")
-            cfg = DEFAULT_CONFIG
+    # A fixed `config` pins the knobs (test injection). Otherwise pull /internal/config at startup
+    # AND refresh it per claim (plan §14: worker pulls config at startup + claim time) so runtime
+    # lease-knob changes take effect without a restart; fall back to the last-known config on error.
+    cfg = config if config is not None else _fetch_config(cp, DEFAULT_CONFIG)
     while stop_event is None or not stop_event.is_set():
+        claim = None
         try:
-            job_id = run_once(cp, storage, workdir_base=base, config=cfg)
+            claim = cp.claim()
+            if claim is not None:
+                if config is None:
+                    cfg = _fetch_config(cp, cfg)
+                process_job(cp, storage, claim, workdir_base=base, config=cfg)
         except Exception:
-            # A single iteration's unexpected error (e.g. a control-plane blip on claim) must not
-            # kill the long-running worker. Log generically — no exception text (secret hygiene).
+            # A single iteration's unexpected error (e.g. a control-plane blip) must not kill the
+            # long-running worker. Log generically — no exception text (secret hygiene).
             logger.warning("worker iteration failed; continuing")
-            job_id = None
-        if job_id is None:
+        if claim is None:
             if stop_event is not None:
                 if stop_event.wait(poll_idle_sec):
                     break
             else:
                 time.sleep(poll_idle_sec)
+
+
+def _fetch_config(cp: ControlPlane, fallback: WorkerConfig) -> WorkerConfig:
+    """Fetch runtime config, falling back to the last-known/default on any control-plane error."""
+    try:
+        return cp.get_config()
+    except Exception:
+        logger.warning("config fetch failed; using the last-known/default config")
+        return fallback

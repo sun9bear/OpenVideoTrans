@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from autodub_core.isolation import PathEscapeError
+from media_worker.config import WorkerConfig
 from media_worker.worker import (
     artifact_key,
     clean_orphan_workdirs,
@@ -132,6 +133,71 @@ def test_heartbeat_renews_during_a_long_single_stage(tmp_path: Path) -> None:
     worker.join(5.0)
     assert not worker.is_alive()
     assert cp.completed and not (tmp_path / "job_l").exists()
+
+
+def test_exceeding_hard_timeout_reports_processing_timeout(tmp_path: Path) -> None:
+    # A job finishing AFTER the hard cap must NOT be marked done — it is failed processing_timeout
+    # (CodeX P2). A zero hard-cap trips the heartbeat watchdog on its first tick mid-stage.
+    cfg = WorkerConfig(
+        heartbeat_interval_sec=0.01, lease_ttl_sec=1.0, job_hard_timeout_sec=0.0, max_attempts=2
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _BlockingStorage(FakeStorage):
+        def download(self, key: str) -> bytes:
+            data = super().download(key)
+            entered.set()
+            assert release.wait(3.0)
+            return data
+
+    job = make_job(job_id="job_t", upload_session_id="us_t", output_mode="dub_only")
+    cp = FakeControlPlane(config=cfg, claims=[Claim(job=job, claim_version=1, attempt=1)])
+    storage = _BlockingStorage({"uploads/us_t": b"X"})
+    worker = threading.Thread(
+        target=run_once, args=(cp, storage),
+        kwargs={"workdir_base": tmp_path, "config": cfg},
+    )
+    worker.start()
+    assert entered.wait(3.0)
+    time.sleep(0.1)  # let the zero hard-cap watchdog trip while the stage is still blocked
+    release.set()
+    worker.join(5.0)
+    assert not worker.is_alive()
+    assert cp.completed == []  # NOT marked done
+    assert cp.failed == [("job_t", 1, "processing_timeout", None)]
+    assert not (tmp_path / "job_t").exists()
+
+
+def test_run_forever_refreshes_config_per_claim(tmp_path: Path) -> None:
+    # plan §14: the worker re-pulls /internal/config at claim time so lease-knob changes take effect
+    # without a restart (CodeX P2) — not just once at startup.
+    job = make_job(job_id="job_r", upload_session_id="us_r", output_mode="dub_only")
+
+    class _OneJobThenStop(FakeControlPlane):
+        def __init__(self, stop: threading.Event) -> None:
+            super().__init__(
+                config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)]
+            )
+            self._stop_after = stop
+            self.config_calls = 0
+
+        def get_config(self) -> WorkerConfig:
+            self.config_calls += 1
+            return super().get_config()
+
+        def claim(self) -> Claim | None:
+            claimed = super().claim()
+            if claimed is None:
+                self._stop_after.set()  # work drained -> end the loop
+            return claimed
+
+    stop = threading.Event()
+    cp = _OneJobThenStop(stop)
+    storage = FakeStorage({"uploads/us_r": b"X"})
+    run_forever(cp, storage, workdir_base=tmp_path, stop_event=stop)  # config=None -> refresh path
+    assert cp.config_calls == 2  # 1 at startup + 1 at the claim
+    assert cp.completed == [("job_r", 1, {"video_key": artifact_key("job_r", 1, "output.mp4")})]
 
 
 def test_job_workdir_rejects_traversal_and_reserved_names(tmp_path: Path) -> None:
