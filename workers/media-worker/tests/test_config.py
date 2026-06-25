@@ -21,6 +21,18 @@ def test_parse_config_converts_ms_to_seconds() -> None:
     assert cfg.max_attempts == 2
 
 
+def test_parse_config_honors_each_per_mode_duration_cap() -> None:
+    # the control plane advertises maxVideoDurationMs per output_mode; the worker must honor `both`
+    # INDEPENDENTLY, not collapse it onto the dub cap (CodeX bot P2).
+    cfg = parse_config(
+        {"maxVideoDurationMs": {"subtitle_only": 1_800_000, "dub_only": 300_000, "both": 600_000}}
+    )
+    assert cfg.duration_cap_sec("subtitle_only") == 1800
+    assert cfg.duration_cap_sec("dub_only") == 300
+    assert cfg.duration_cap_sec("both") == 600  # honored, not forced to the 300s dub cap
+    assert cfg.duration_cap_sec("nonsense") == 300  # unknown -> tightest configured (fail-safe)
+
+
 def test_parse_config_falls_back_to_defaults_when_missing() -> None:
     assert parse_config({}) == DEFAULT_CONFIG
 
