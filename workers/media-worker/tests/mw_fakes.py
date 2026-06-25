@@ -71,17 +71,21 @@ class FakeControlPlane:
         claims: list[Claim] | None = None,
         stale: bool = False,
         complete_error: bool = False,
+        config_error: bool = False,
     ) -> None:
         self._config = config
         self._claims = list(claims or [])
         self._stale = stale
         self._complete_error = complete_error
+        self._config_error = config_error
         self._lock = threading.Lock()
         self.heartbeats: list[tuple[str, int, str | None]] = []
         self.completed: list[tuple[str, int, dict[str, str]]] = []
         self.failed: list[tuple[str, int, str, str | None]] = []
 
     def get_config(self) -> WorkerConfig:
+        if self._config_error:
+            raise ControlPlaneError("config endpoint unavailable")
         return self._config
 
     def claim(self) -> Claim | None:

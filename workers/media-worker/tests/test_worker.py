@@ -159,3 +159,12 @@ def test_run_forever_cleans_orphans_at_startup(tmp_path: Path) -> None:
     cp = FakeControlPlane(config=TEST_CONFIG, claims=[])
     run_forever(cp, FakeStorage({}), workdir_base=tmp_path, config=TEST_CONFIG, stop_event=stop)
     assert not orphan.exists()
+
+
+def test_run_forever_falls_back_to_defaults_on_config_error(tmp_path: Path) -> None:
+    # A boot-time /internal/config failure must NOT exit the worker (CodeX P2): use defaults.
+    stop = threading.Event()
+    stop.set()
+    cp = FakeControlPlane(claims=[], config_error=True)
+    # config=None forces the startup fetch; it raises -> must be caught + defaulted, not propagated.
+    run_forever(cp, FakeStorage({}), workdir_base=tmp_path, stop_event=stop)

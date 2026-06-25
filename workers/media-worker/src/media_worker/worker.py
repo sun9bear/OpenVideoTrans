@@ -18,7 +18,7 @@ from pathlib import Path
 from autodub_core.isolation import ensure_within, safe_component
 from ovt_schemas import Job
 
-from .config import WorkerConfig
+from .config import DEFAULT_CONFIG, WorkerConfig
 from .control_plane import Claim, ControlPlane, StaleClaimError
 from .storage import Storage
 
@@ -93,15 +93,19 @@ class Heartbeat:
         claim_version: int,
         *,
         interval_sec: float,
+        max_total_sec: float | None = None,
         stage: str = "processing",
         on_lost: Callable[[], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._cp = cp
         self._job_id = job_id
         self._claim_version = claim_version
         self._interval = interval_sec
+        self._max_total_sec = max_total_sec
         self._stage = stage
         self._on_lost = on_lost
+        self._clock = clock
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -114,7 +118,15 @@ class Heartbeat:
     def _run(self) -> None:
         # wait() returns True only when stop() is set, so the loop ticks once per interval and exits
         # promptly on stop. Renewal is driven purely by this timer, never by stage edges (plan §6).
+        started = self._clock()
         while not self._stop.wait(self._interval):
+            if self._max_total_sec is not None and self._clock() - started >= self._max_total_sec:
+                # Hard cap reached (plan §6 job_hard_timeout_sec): stop renewing so the lease
+                # lapses and the sweeper requeues/fails it (a wedged stage can't hold it forever).
+                logger.warning("job %s hit the hard timeout; stopping lease renewal", self._job_id)
+                if self._on_lost is not None:
+                    self._on_lost()
+                return
             try:
                 self._cp.heartbeat(self._job_id, self._claim_version, stage=self._stage)
             except StaleClaimError:
@@ -151,7 +163,13 @@ def process_job(
     job_id = job.job_id
     workdir = job_workdir(workdir_base, job_id)
     workdir.mkdir(parents=True, exist_ok=True)
-    heartbeat = Heartbeat(cp, job_id, claim_version, interval_sec=config.heartbeat_interval_sec)
+    heartbeat = Heartbeat(
+        cp,
+        job_id,
+        claim_version,
+        interval_sec=config.heartbeat_interval_sec,
+        max_total_sec=config.job_hard_timeout_sec,
+    )
     heartbeat.start()
     try:
         try:
@@ -229,7 +247,16 @@ def run_forever(
         logger.info(
             "cleared %d orphan workdir(s) at startup: %s", len(cleared), ", ".join(sorted(cleared))
         )
-    cfg = config if config is not None else cp.get_config()
+    if config is not None:
+        cfg = config
+    else:
+        try:
+            cfg = cp.get_config()
+        except Exception:
+            # A boot-time config hiccup must not exit the worker (the claim loop below is already
+            # resilient). Fall back to the built-in defaults, which mirror the control plane.
+            logger.warning("startup config fetch failed; using built-in defaults")
+            cfg = DEFAULT_CONFIG
     while stop_event is None or not stop_event.is_set():
         try:
             job_id = run_once(cp, storage, workdir_base=base, config=cfg)
