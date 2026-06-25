@@ -11,6 +11,7 @@ from collections.abc import Mapping
 
 from media_worker.config import WorkerConfig
 from media_worker.control_plane import Claim, ControlPlaneError, StaleClaimError
+from media_worker.storage import SourceTooLargeError
 from ovt_schemas import AigcMarking, Job, JobArtifacts, JobPlan
 
 # Production-shaped knobs (30s heartbeat / 180s lease), mirroring the control-plane defaults.
@@ -72,12 +73,14 @@ class FakeControlPlane:
         stale: bool = False,
         complete_error: bool = False,
         config_error: bool = False,
+        fail_error: bool = False,
     ) -> None:
         self._config = config
         self._claims = list(claims or [])
         self._stale = stale
         self._complete_error = complete_error
         self._config_error = config_error
+        self._fail_error = fail_error
         self._lock = threading.Lock()
         self.heartbeats: list[tuple[str, int, str | None]] = []
         self.completed: list[tuple[str, int, dict[str, str]]] = []
@@ -112,6 +115,8 @@ class FakeControlPlane:
         error_code: str,
         error_detail: str | None = None,
     ) -> None:
+        if self._fail_error:
+            raise ControlPlaneError(f"transient error failing {job_id}")
         with self._lock:
             self.failed.append((job_id, claim_version, error_code, error_detail))
 
@@ -127,13 +132,34 @@ class FakeStorage:
     def __init__(self, objects: dict[str, bytes] | None = None) -> None:
         self.objects: dict[str, bytes] = dict(objects or {})
         self.uploads: list[tuple[str, str]] = []
+        self.deleted: list[str] = []
+        self.downloads: list[str] = []
 
-    def download(self, key: str) -> bytes:
+    def head(self, key: str) -> int | None:
+        obj = self.objects.get(key)
+        return len(obj) if obj is not None else None
+
+    def download(self, key: str, *, max_bytes: int | None = None) -> bytes:
+        self.downloads.append(key)
         try:
-            return self.objects[key]
+            data = self.objects[key]
         except KeyError as e:
             raise FileNotFoundError(key) from e
+        if max_bytes is not None and len(data) > max_bytes:
+            raise SourceTooLargeError(f"source exceeds the {max_bytes}-byte cap")
+        return data
 
     def upload(self, key: str, data: bytes, *, content_type: str) -> None:
         self.objects[key] = data
         self.uploads.append((key, content_type))
+
+    def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self.objects.pop(key, None)
+
+
+# A pass-through admitter for the stub copy-loop tests, which exercise the heartbeat / cleanup /
+# completion paths on synthetic (non-media) bytes — the real ffprobe re-admission is covered
+# separately in test_admission.py + the disguised-playlist integration test in test_worker.py.
+def ALLOW_ADMIT(path: object, job: object, config: object) -> None:  # noqa: N802, ARG001
+    return None

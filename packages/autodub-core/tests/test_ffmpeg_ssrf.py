@@ -146,6 +146,21 @@ def test_probe_duration_restricts_protocols(monkeypatch: pytest.MonkeyPatch) -> 
     _assert_no_network_protocol(captured[0])
 
 
+def test_probe_duration_demuxer_whitelisted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # the duration probe (called by the worker's ffprobe re-admission on untrusted source) also
+    # constrains the demuxer, so it is safe-by-default even without a prior format gate.
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        ff, "_run",
+        lambda cmd: captured.append(list(cmd)) or '{"format": {"duration": "1.5"}}',
+    )
+    ff.probe_duration_ms("in.mp4")
+    cmd = captured[0]
+    assert "-format_whitelist" in cmd
+    wl = cmd[cmd.index("-format_whitelist") + 1].split(",")
+    assert "mp4" in wl and "concat" not in wl and "hls" not in wl
+
+
 def test_probe_format_name_restricts_protocols(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[list[str]] = []
     monkeypatch.setattr(ff, "_run", lambda cmd: captured.append(list(cmd)) or "mov,mp4\n")

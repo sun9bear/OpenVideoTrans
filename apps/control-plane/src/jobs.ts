@@ -1,6 +1,7 @@
 import type { ErrorCode, Job } from "../../../packages/schemas/generated/ts/contracts";
 import type { Ctx } from "./core";
 import { HttpError, asObject, json, optInt, optString, readJson, reqEnum, reqInt, reqString } from "./core";
+import { admitJob } from "./abuse";
 import { claimOne } from "./claim";
 import { presignR2Url } from "./sigv4";
 import { requireR2, verifyUpload } from "./uploads";
@@ -147,6 +148,10 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   if (subtitleDelivery !== "srt") {
     throw new HttpError(400, "unsupported_subtitle_delivery", "burned subtitles are not available yet");
   }
+
+  // Abuse gate (T2.4) BEFORE verifyUpload: a failed bot challenge must not consume the upload
+  // session. The dual-pool reserve keyed by the returned ticket is filled by M2-CLOSE.
+  await admitJob(ctx, body);
 
   const verified = await verifyUpload(ctx, actor, uploadSessionId);
   const now = ctx.deps.now();

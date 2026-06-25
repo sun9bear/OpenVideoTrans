@@ -55,7 +55,7 @@ jobs:
         run: uv run pytest
 
       - name: Pyright typecheck
-        run: uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner packages/schemas apps/control-plane/spike
+        run: uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner packages/schemas apps/control-plane/spike tooling/guardrails
 
   # ── Schema codegen-diff job ────────────────────────────────────────────────
   schema:
@@ -97,3 +97,20 @@ jobs:
       # (the early xfail scaffolding is gone; redline must stay 25 passed / 0 xfail).
       - name: Red-line invariants (paid-safety §5 + autodub-core boundary)
         run: uv run pytest -m redline
+
+  # ── SSRF / presign guardrail job (T2.4: no yt-dlp / ffmpeg+egress allowlist / presign binding) ─
+  guardrails:
+    name: SSRF / presign guardrails
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.8"
+
+      # Stdlib-only structural scan of the hosted source: no URL-ingest tool, ffmpeg protocol/format
+      # allowlist + worker ffprobe re-admission wiring, default-drop egress (IMDS/RFC1918 blocked),
+      # and the presign binding (HEAD-before-create / short-lived PUT / derived key / guarded GET).
+      - name: SSRF + presign invariants
+        run: uv run python tooling/guardrails/ssrf_presign_check.py

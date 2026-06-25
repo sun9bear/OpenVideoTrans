@@ -18,6 +18,10 @@ export interface RuntimeConfig {
   uploadPresignTtlSec: number;
   downloadPresignTtlSec: number;
   allowedUploadTypes: readonly string[];
+  // Per-output_mode hard duration caps (plan §13), enforced authoritatively by the worker's ffprobe
+  // re-admission (T2.4). Surfaced via /internal/config so the cap is config-driven end-to-end;
+  // CFG-GUARD owns the real settings table + validation.
+  maxVideoDurationMs: { subtitle_only: number; dub_only: number; both: number };
 }
 
 export const DEFAULT_CONFIG: RuntimeConfig = {
@@ -45,6 +49,13 @@ export const DEFAULT_CONFIG: RuntimeConfig = {
     "audio/wav",
     "audio/x-wav",
   ],
+  // subtitle-only 30min (cloud ASR/MT bound) · dub/both 5min (TTS wall-time bound). The browser's
+  // advisory_duration_ms is sort-only; THIS is the cap the worker's ffprobe re-admission enforces.
+  maxVideoDurationMs: {
+    subtitle_only: 1800 * 1000,
+    dub_only: 300 * 1000,
+    both: 300 * 1000,
+  },
 };
 
 export async function getConfig(env: Env): Promise<RuntimeConfig> {

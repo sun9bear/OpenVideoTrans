@@ -1,5 +1,6 @@
-import type { Ctx, Deps, Env } from "./core";
+import type { Ctx, Deps, Env, TurnstileVerifier } from "./core";
 import { HttpError, apiError, json, realDeps } from "./core";
+import { realTurnstileVerifier } from "./abuse";
 import { getConfig } from "./config";
 import { signUpload } from "./uploads";
 import { claimNext, complete, createJob, download, fail, getJob, heartbeat } from "./jobs";
@@ -71,7 +72,12 @@ function requireWorker(request: Request, env: Env): void {
   }
 }
 
-export async function handle(request: Request, env: Env, deps: Deps = realDeps): Promise<Response> {
+export async function handle(
+  request: Request,
+  env: Env,
+  deps: Deps = realDeps,
+  verifyTurnstile: TurnstileVerifier = realTurnstileVerifier,
+): Promise<Response> {
   const url = new URL(request.url);
   try {
     for (const r of ROUTES) {
@@ -86,7 +92,7 @@ export async function handle(request: Request, env: Env, deps: Deps = realDeps):
       if (r.auth === "worker") requireWorker(request, env);
       else if (r.auth === "actor") actor = getActor(request);
       const config = await getConfig(env);
-      const ctx: Ctx = { request, env, deps, config, url, params, actor };
+      const ctx: Ctx = { request, env, deps, config, url, params, actor, verifyTurnstile };
       return await r.handler(ctx);
     }
     return apiError(404, "not_found", "no such route");

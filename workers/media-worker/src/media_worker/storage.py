@@ -5,6 +5,7 @@ as the control plane) and are used ONLY to sign — never logged, never placed i
 """
 from __future__ import annotations
 
+import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -21,9 +22,16 @@ class StorageError(RuntimeError):
     """An object-storage operation failed or storage is misconfigured."""
 
 
+class SourceTooLargeError(StorageError):
+    """A bounded download read more than the byte cap — the object exceeds max_upload_bytes (e.g. a
+    post-HEAD swap to an oversized object). Surfaced so the caller rejects upload_too_large."""
+
+
 class Storage(Protocol):
-    def download(self, key: str) -> bytes: ...
+    def head(self, key: str) -> int | None: ...
+    def download(self, key: str, *, max_bytes: int | None = None) -> bytes: ...
     def upload(self, key: str, data: bytes, *, content_type: str) -> None: ...
+    def delete(self, key: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -87,19 +95,52 @@ class S3Storage:
         )
         return url, headers
 
-    def download(self, key: str) -> bytes:
+    def head(self, key: str) -> int | None:
+        # Signed HEAD -> the object's Content-Length, so the worker can reject an oversized source
+        # BEFORE buffering its body (the post-HEAD-swap DoS). None for a missing object (404); R2
+        # always returns Content-Length for an existing object. Transport errors propagate.
+        url, headers = self._sign("HEAD", key, b"")
+        req = urllib.request.Request(url, method="HEAD")
+        for name, value in headers.items():
+            req.add_header(name, value)
+        try:
+            with self._opener.open(req, timeout=self._timeout) as resp:
+                length = resp.headers.get("Content-Length")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise StorageError(f"HEAD {key} -> {e.code}") from None
+        return int(length) if length is not None else None
+
+    def download(self, key: str, *, max_bytes: int | None = None) -> bytes:
+        # With max_bytes set, read at most max_bytes+1 and reject if it overflows: this CAPS the
+        # buffered body even if the object was swapped to an oversized one AFTER the HEAD precheck
+        # (the TOCTOU race the HEAD alone can't close), so memory/disk stays bounded by the cap.
         url, headers = self._sign("GET", key, b"")
         req = urllib.request.Request(url, method="GET")
         for name, value in headers.items():
             req.add_header(name, value)
         with self._opener.open(req, timeout=self._timeout) as resp:
-            data: bytes = resp.read()
+            if max_bytes is None:
+                return resp.read()
+            data: bytes = resp.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise SourceTooLargeError(f"source exceeds the {max_bytes}-byte cap")
         return data
 
     def upload(self, key: str, data: bytes, *, content_type: str) -> None:
         # Content-Type joins the signed header set (its integrity is covered by the signature).
         url, headers = self._sign("PUT", key, data, {"Content-Type": content_type})
         req = urllib.request.Request(url, data=data, method="PUT")
+        for name, value in headers.items():
+            req.add_header(name, value)
+        with self._opener.open(req, timeout=self._timeout) as resp:
+            resp.read()
+
+    def delete(self, key: str) -> None:
+        # Signed DELETE of an object (the worker removes a source rejected by ffprobe re-admission).
+        url, headers = self._sign("DELETE", key, b"")
+        req = urllib.request.Request(url, method="DELETE")
         for name, value in headers.items():
             req.add_header(name, value)
         with self._opener.open(req, timeout=self._timeout) as resp:

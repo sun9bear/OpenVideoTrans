@@ -33,7 +33,9 @@ reportMissingModuleSource = "none"
 # The T2.0 spike package imports `spike.*`; make `apps/control-plane` an explicit import root so
 # resolution doesn't rely on Pyright auto-detecting the package root (pytest's conftest and the D1
 # workflow's working-directory put it on sys.path; this pins it for the typecheck step too).
-extraPaths = ["apps/control-plane"]
+# `tooling/guardrails` is a non-package script dir; its tests import it via a conftest sys.path
+# insert, so pin it as an import root for the typecheck step too.
+extraPaths = ["apps/control-plane", "tooling/guardrails"]
 
 [tool.pytest.ini_options]
 testpaths = [
@@ -43,6 +45,7 @@ testpaths = [
     "workers/media-worker/tests",
     "cli/local-runner/tests",
     "apps/control-plane/spike/tests",
+    "tooling/guardrails/tests",
 ]
 addopts = "-v --import-mode=importlib"
 markers = [
