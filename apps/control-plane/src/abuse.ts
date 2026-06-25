@@ -66,14 +66,14 @@ export interface AbuseTicket {
 }
 
 // The admission seam, called by createJob BEFORE verifyUpload so a failed challenge does not consume
-// the upload session. LAYER 1 (bot friction): Turnstile — enforced only when TURNSTILE_SECRET is
-// configured (inert/skeleton until SECRETS/deploy injects it, mirroring the credentials stub).
+// the upload session. LAYER 1 (bot friction): Turnstile — enforced only when TURNSTILE_SECRET_KEY
+// is configured (inert/skeleton until SECRETS/deploy injects it, mirroring the credentials stub).
 // LAYER 2 (dual-pool hard cap): the keys (ipKey + ctx.actor) are computed here; the atomic
 // per-IP/anon/user + global job/minutes reserve — and the refund on our-fault failures — is filled
 // by M2-CLOSE (no counters table yet; acceptance: "双池 cap 计数原子（M2-CLOSE 补全）"). A failed
 // admission is designed to COUNT (anti create-fail farming); that decrement lands with the reserve.
 export async function admitJob(ctx: Ctx, body: Record<string, unknown>): Promise<AbuseTicket> {
-  const secret = ctx.env.TURNSTILE_SECRET;
+  const secret = ctx.env.TURNSTILE_SECRET_KEY;
   if (secret) {
     const token = optString(body, "turnstile_token");
     if (!token) throw new HttpError(403, "challenge_required", "a Turnstile token is required");

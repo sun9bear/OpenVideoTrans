@@ -45,7 +45,7 @@ describe("abuse gate — Turnstile (POST /api/jobs)", () => {
     return r.json as { upload_session_id: string; source_key: string };
   }
 
-  it("inert when no TURNSTILE_SECRET: creates a job without a token (skeleton mode)", async () => {
+  it("inert when no TURNSTILE_SECRET_KEY: creates a job without a token (skeleton mode)", async () => {
     const { env, r2 } = makeEnv({ r2Creds: true });
     const { deps } = makeClock(1_000_000);
     const s = await sign(env, deps);

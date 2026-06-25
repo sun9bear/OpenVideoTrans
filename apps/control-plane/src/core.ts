@@ -15,9 +15,10 @@ export interface Env {
   // Shared secret the media-worker presents to /internal/*. The SECRETS unit owns bootstrap +
   // zero-downtime rotation; here it is a single fail-closed bearer.
   INTERNAL_TOKEN?: string;
-  // Cloudflare Turnstile secret for the abuse gate's bot-friction layer (T2.4). A wrangler secret
-  // injected by SECRETS/deploy — absent here, so the gate is inert until then. Never in the repo.
-  TURNSTILE_SECRET?: string;
+  // Cloudflare Turnstile secret for the abuse gate's bot-friction layer (T2.4). The binding name
+  // MUST match the deployment secret (docs prep-checklist: TURNSTILE_SECRET_KEY) or the gate stays
+  // silently inert in production. A wrangler secret injected by SECRETS/deploy — never in the repo.
+  TURNSTILE_SECRET_KEY?: string;
 }
 
 // Verifies a Turnstile token. (secret, token, remoteip) -> true iff valid. Injected via the router

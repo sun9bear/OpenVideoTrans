@@ -65,7 +65,7 @@ export function makeEnv(opts: TestEnvOptions = {}): {
     MEDIA: r2 as unknown as R2Bucket,
     CONFIG: kv as unknown as KVNamespace,
     ...(opts.internalToken !== undefined ? { INTERNAL_TOKEN: opts.internalToken } : {}),
-    ...(opts.turnstileSecret !== undefined ? { TURNSTILE_SECRET: opts.turnstileSecret } : {}),
+    ...(opts.turnstileSecret !== undefined ? { TURNSTILE_SECRET_KEY: opts.turnstileSecret } : {}),
     ...(opts.r2Creds
       ? {
           R2_ACCOUNT_ID: "acct-test",
