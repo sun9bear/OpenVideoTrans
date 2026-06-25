@@ -197,17 +197,19 @@
     } catch (e) {
       // A Turnstile 403 (token expired/rejected) fires in admitJob BEFORE verifyUpload, so the upload
       // session is still valid — keep the uploaded body pending and ask for a fresh token instead of
-      // forcing a full re-upload. If the widget is now broken, fail (no token can arrive).
+      // forcing a full re-upload. ONLY park when a working widget can actually produce a new token:
+      // if Turnstile isn't configured in this bundle (server/client mismatch) or the widget is broken,
+      // no callback can resume — fail with a config error instead of parking forever.
       if (e instanceof ApiError && (e.code === "challenge_required" || e.code === "challenge_failed")) {
         resetTurnstile();
-        if (turnstileFailed) {
-          phase = "failed";
-          errorMsg = "人机验证加载失败，请刷新页面后重试。";
+        if (turnstileEnabled() && !turnstileFailed) {
+          pendingBody = body;
+          phase = "working";
+          statusText = "验证已过期，请重新完成人机验证…";
           return;
         }
-        pendingBody = body;
-        phase = "working";
-        statusText = "验证已过期，请重新完成人机验证…";
+        phase = "failed";
+        errorMsg = "人机验证不可用，请刷新页面或联系站点管理员。";
         return;
       }
       resetTurnstile();

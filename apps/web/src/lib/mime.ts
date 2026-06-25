@@ -47,8 +47,15 @@ const INDETERMINATE = new Set(["", "application/octet-stream", "application/x-oc
 // BOTH declared_type and the PUT Content-Type (verifyUpload requires them to match; the upload reuses
 // one value for both).
 export function resolveUploadType(file: { name: string; type: string }): string | null {
-  if (!INDETERMINATE.has(file.type)) return file.type; // OS-provided concrete type -> trust the server
-  return EXT_TO_TYPE[extOf(file.name)] ?? null; // indeterminate -> infer by extension, else give up
+  // Extension first for the formats we advertise: the OS may report a non-canonical alias (e.g. .avi
+  // as "video/avi", .m4a as "audio/x-m4a") that the server allowlist — which only has the canonical
+  // values — would 415. Mapping the known extension to its canonical MIME avoids that. ffprobe is the
+  // authoritative content gate, so a declared_type derived from a trusted extension is always safe.
+  const byExt = EXT_TO_TYPE[extOf(file.name)];
+  if (byExt) return byExt;
+  // Unknown extension: trust a concrete browser MIME (the server allowlist is runtime-configurable and
+  // may accept more) — only a blank/octet-stream indeterminate type with no known extension gives up.
+  return INDETERMINATE.has(file.type) ? null : file.type;
 }
 
 // zh-Hans warning ONLY when no declared_type can be formed (blank type + unknown extension). This is

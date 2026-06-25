@@ -15,7 +15,14 @@ describe("mime — resolveUploadType", () => {
     expect(resolveUploadType({ name: "clip.mov", type: "application/octet-stream" })).toBe("video/quicktime");
   });
 
-  it("trusts a concrete browser MIME even if not in the local mirror (server is authoritative)", () => {
+  it("normalizes a non-canonical OS MIME alias to the canonical type by extension", () => {
+    // .avi reported as "video/avi" / .m4a as "audio/x-m4a" -> the server allowlist only has the
+    // canonical types, so the extension mapping must win to avoid a 415 for a supported file.
+    expect(resolveUploadType({ name: "clip.avi", type: "video/avi" })).toBe("video/x-msvideo");
+    expect(resolveUploadType({ name: "song.m4a", type: "audio/x-m4a" })).toBe("audio/mp4");
+  });
+
+  it("trusts a concrete browser MIME for an UNKNOWN extension (server is authoritative)", () => {
     // a runtime-expanded server allowlist (CFG-GUARD) may accept this; the client must not hard-block
     expect(resolveUploadType({ name: "x.3gp", type: "video/3gpp" })).toBe("video/3gpp");
   });
