@@ -55,7 +55,7 @@ jobs:
         run: uv run pytest
 
       - name: Pyright typecheck
-        run: uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner packages/schemas
+        run: uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner packages/schemas apps/control-plane/spike
 
   # ── Schema codegen-diff job ────────────────────────────────────────────────
   schema:
