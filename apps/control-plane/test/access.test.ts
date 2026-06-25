@@ -1,0 +1,140 @@
+import { describe, expect, it } from "vitest";
+import { call, insertJob, makeClock, makeEnv } from "./helpers/bindings";
+
+const WORKER = "tok_internal_worker";
+
+describe("GET /jobs/:id/download presign", () => {
+  it("owner gets a presigned GET for a done job's artifact", async () => {
+    const { env, raw } = makeEnv({ r2Creds: true });
+    insertJob(raw, {
+      job_id: "d1",
+      status: "done",
+      anon: "owner",
+      enqueue_at: 1000,
+      expires_at: 9_000_000_000_000,
+      artifacts: JSON.stringify({ video_key: "artifacts/d1/v.mp4", srt_key: null }),
+    });
+    const { deps } = makeClock(2000);
+    const r = await call(env, deps, "GET", "/api/jobs/d1/download/video", { actor: "owner" });
+    expect(r.status).toBe(200);
+    expect(r.json.url).toContain("/ovt-media/artifacts/d1/v.mp4");
+    expect(r.json.url).toContain("X-Amz-Signature=");
+  });
+
+  it("rejects a non-owner (404), a not-done job (409), and an expired job (410)", async () => {
+    const { env, raw } = makeEnv({ r2Creds: true });
+    insertJob(raw, {
+      job_id: "d1",
+      status: "done",
+      anon: "owner",
+      enqueue_at: 1000,
+      expires_at: 9_000_000_000_000,
+      artifacts: JSON.stringify({ video_key: "artifacts/d1/v.mp4", srt_key: null }),
+    });
+    insertJob(raw, { job_id: "d2", status: "running", anon: "owner", enqueue_at: 1000 });
+    insertJob(raw, {
+      job_id: "d3",
+      status: "done",
+      anon: "owner",
+      enqueue_at: 1000,
+      expires_at: 1000,
+      artifacts: JSON.stringify({ video_key: "artifacts/d3/v.mp4", srt_key: null }),
+    });
+    const { deps } = makeClock(2_000_000);
+    expect((await call(env, deps, "GET", "/api/jobs/d1/download/video", { actor: "intruder" })).status).toBe(404);
+    expect((await call(env, deps, "GET", "/api/jobs/d2/download/video", { actor: "owner" })).status).toBe(409);
+    expect((await call(env, deps, "GET", "/api/jobs/d3/download/video", { actor: "owner" })).status).toBe(410);
+  });
+
+  it("caps the presigned lifetime to the artifact's remaining TTL", async () => {
+    const { env, raw } = makeEnv({ r2Creds: true });
+    const now = 2000;
+    const expiresAt = now + 30_000; // only 30s of artifact TTL left (< 1h presign TTL)
+    insertJob(raw, {
+      job_id: "d4",
+      status: "done",
+      anon: "owner",
+      enqueue_at: 1000,
+      expires_at: expiresAt,
+      artifacts: JSON.stringify({ video_key: "artifacts/d4/v.mp4", srt_key: null }),
+    });
+    const r = await call(env, makeClock(now).deps, "GET", "/api/jobs/d4/download/video", { actor: "owner" });
+    expect(r.status).toBe(200);
+    expect(r.json.expires_at).toBe(expiresAt); // capped to remaining TTL, not now + presignTtl(1h)
+    expect(r.json.url).toContain("X-Amz-Expires=30");
+  });
+
+  it("refuses download after the artifacts are purged (410)", async () => {
+    const { env, raw } = makeEnv({ r2Creds: true });
+    insertJob(raw, {
+      job_id: "d5",
+      status: "done",
+      anon: "owner",
+      enqueue_at: 1000,
+      expires_at: 9_000_000_000_000,
+      data_purged_at: 5000,
+      artifacts: JSON.stringify({ video_key: "artifacts/d5/v.mp4", srt_key: null }),
+    });
+    const r = await call(env, makeClock(2000).deps, "GET", "/api/jobs/d5/download/video", { actor: "owner" });
+    expect(r.status).toBe(410);
+  });
+});
+
+describe("GET /jobs/:id owner scoping", () => {
+  it("returns the job to its owner, 404 to anyone else / for missing ids", async () => {
+    const { env, raw } = makeEnv();
+    insertJob(raw, { job_id: "g1", anon: "owner", enqueue_at: 1000 });
+    const { deps } = makeClock(2000);
+    expect((await call(env, deps, "GET", "/api/jobs/g1", { actor: "owner" })).status).toBe(200);
+    expect((await call(env, deps, "GET", "/api/jobs/g1", { actor: "intruder" })).status).toBe(404);
+    expect((await call(env, deps, "GET", "/api/jobs/missing", { actor: "owner" })).status).toBe(404);
+  });
+
+  it("public GET omits the server-only error_detail but keeps error_code", async () => {
+    const { env, raw } = makeEnv({ internalToken: WORKER });
+    insertJob(raw, { job_id: "f1", anon: "owner", enqueue_at: 1000 });
+    const clock = makeClock(2000);
+    const claim = await call(env, clock.deps, "POST", "/internal/jobs/claim", { worker: WORKER, body: {} });
+    await call(env, clock.deps, "POST", "/internal/jobs/f1/fail", {
+      worker: WORKER,
+      body: { claim_version: claim.json.claim_version, error_code: "internal_error", error_detail: "raw upstream stack trace" },
+    });
+    const pub = await call(env, clock.deps, "GET", "/api/jobs/f1", { actor: "owner" });
+    expect(pub.json.job.error_code).toBe("internal_error");
+    expect("error_detail" in pub.json.job).toBe(false);
+  });
+});
+
+describe("internal config + credentials + auth", () => {
+  it("/internal/config returns runtime config and leaks no secret", async () => {
+    const { env } = makeEnv({ internalToken: WORKER });
+    const r = await call(env, makeClock(1).deps, "GET", "/internal/config", { worker: WORKER });
+    expect(r.status).toBe(200);
+    expect(r.json.maxUploadBytes).toBe(500 * 1024 * 1024);
+    expect(r.json.leaseTtlMs).toBe(180_000);
+    expect(JSON.stringify(r.json)).not.toContain(WORKER);
+  });
+
+  it("/internal/credentials is disabled (501) and returns no credentials", async () => {
+    const { env } = makeEnv({ internalToken: WORKER });
+    const r = await call(env, makeClock(1).deps, "GET", "/internal/credentials", { worker: WORKER });
+    expect(r.status).toBe(501);
+    expect(r.json.error.code).toBe("not_implemented");
+  });
+
+  it("internal endpoints reject a bad bearer (401) and fail closed when unconfigured (503)", async () => {
+    const withTok = makeEnv({ internalToken: WORKER });
+    expect(
+      (await call(withTok.env, makeClock(1).deps, "GET", "/internal/config", { worker: "WRONG" })).status,
+    ).toBe(401);
+    const noTok = makeEnv();
+    expect(
+      (await call(noTok.env, makeClock(1).deps, "GET", "/internal/config", { worker: "anything" })).status,
+    ).toBe(503);
+  });
+
+  it("unknown route -> 404", async () => {
+    const { env } = makeEnv();
+    expect((await call(env, makeClock(1).deps, "GET", "/nope", { actor: "x" })).status).toBe(404);
+  });
+});

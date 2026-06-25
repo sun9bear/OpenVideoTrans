@@ -2,3 +2,9 @@ packages:
   - "apps/web"
   - "apps/control-plane"
   - "packages/schemas"
+# Native build scripts are blocked by default (pnpm 10+/11 supply-chain safety). Allowlist only
+# what the control-plane test gate needs: better-sqlite3 (the D1-as-SQLite stand-in that runs the
+# real CLAIM_SQL in tests) and esbuild (vitest's bundler). CI's frozen install runs these too.
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true

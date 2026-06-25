@@ -1,0 +1,27 @@
+{
+  // Control-plane Cloudflare Worker — deploy config (T2.1). NOT used by the vitest gate; the real
+  // resource ids + secrets are wired by the DEPLOY unit. NO SECRETS LIVE HERE: the R2 S3 presign
+  // credentials (R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY) are `wrangler secret put`, and the free
+  // provider keys are gated to the SECRETS unit — this file references binding/var NAMES only.
+  "name": "ovt-control-plane",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ovt-control-plane",
+      "database_id": "0000-set-at-deploy",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "ovt-media" }],
+  "kv_namespaces": [{ "binding": "CONFIG", "id": "0000-set-at-deploy" }],
+  "vars": {
+    // Non-secret defaults; the authoritative runtime values come from the settings table / KV
+    // (CFG-GUARD owns validation). R2 account id + bucket are non-secret deploy vars.
+    "R2_ACCOUNT_ID": "0000-set-at-deploy",
+    "R2_BUCKET": "ovt-media"
+  }
+}
