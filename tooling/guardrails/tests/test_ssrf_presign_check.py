@@ -38,6 +38,22 @@ def test_head_verified_before_insert() -> None:
     assert not g.head_verified_before_insert(missing)
 
 
+def test_function_body_scopes_to_one_function() -> None:
+    src = "function getJob(ctx) {\n  owner-check\n}\nfunction download(ctx) {\n  expires_at\n}\n"
+    assert "owner-check" in g.function_body(src, "function getJob(")
+    assert "owner-check" not in g.function_body(src, "function download(")
+    assert "expires_at" in g.function_body(src, "function download(")
+    assert g.function_body(src, "function absent(") == ""
+
+
+def test_download_owner_guarded_is_scoped() -> None:
+    # an owner check only in getJob must NOT satisfy the download() guard (the R4 false-negative).
+    only_in_getjob = "row.anon_or_user_id !== actor\nexpires_at\ndata_purged_at"
+    missing_owner = "row.expires_at\nrow.data_purged_at"
+    assert g.download_owner_guarded(only_in_getjob)
+    assert not g.download_owner_guarded(missing_owner)
+
+
 def test_egress_ruleset_invariants() -> None:
     good = """
     chain output {

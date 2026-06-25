@@ -54,6 +54,18 @@ def scan_py_source_for_yt_dlp(text: str) -> bool:
     return mentions_yt_dlp(code)
 
 
+def function_body(text: str, decl: str) -> str:
+    """The source from `decl` up to the next top-level declaration (so a guard check is scoped to
+    ONE function/handler, not the whole file — a guard that moved to a sibling fn must not pass)."""
+    start = text.find(decl)
+    if start == -1:
+        return ""
+    rest = text[start + len(decl) :]
+    ends = [rest.find(m) for m in ("\nexport ", "\nfunction ", "\ndef ", "\nclass ")]
+    ends = [e for e in ends if e != -1]
+    return rest if not ends else rest[: min(ends)]
+
+
 def head_verified_before_insert(jobs_ts: str) -> bool:
     """True iff verifyUpload( appears before INSERT INTO jobs (HEAD-before-create), both present."""
     v = jobs_ts.find("verifyUpload(")
@@ -61,28 +73,38 @@ def head_verified_before_insert(jobs_ts: str) -> bool:
     return v != -1 and ins != -1 and v < ins
 
 
-def admit_before_produce(worker: str) -> bool:
-    """True iff the claim loop actually CALLS re-admission before producing artifacts, with a
-    SourceRejected -> delete+fail handler. Checks the call site (admit(in_path...) not the
-    `= admit_source` default), so a neutered gate (import kept but call moved/removed) is caught."""
-    a = worker.find("admit(in_path")
-    p = worker.find("_produce_artifacts(")
-    handled = "SourceRejected" in worker and "_delete_source_quietly(" in worker
+def admit_before_produce(process_job: str) -> bool:
+    """True iff process_job CALLS re-admission before producing artifacts, with a SourceRejected ->
+    delete+fail handler. Pass the process_job body (call sites), not the whole file, so a moved/
+    removed call is caught — the `= admit_source` default lives outside this body."""
+    a = process_job.find("admit(in_path")
+    p = process_job.find("_produce_artifacts(")
+    handled = "SourceRejected" in process_job and "_delete_source_quietly(" in process_job
     return a != -1 and p != -1 and a < p and handled
 
 
-def size_head_before_download(worker: str) -> bool:
-    """True iff the worker HEAD-prechecks the source size BEFORE downloading the body, so an
-    oversized post-HEAD swap is rejected before buffering (the OOM the size stat alone misses)."""
-    h = worker.find("_precheck_source_size(")
-    d = worker.find("_download_source(")
-    return h != -1 and d != -1 and h < d and ".head(" in worker
+def size_head_before_download(process_job: str) -> bool:
+    """True iff process_job CALLS the HEAD size precheck before the source download. Pass the
+    process_job body so removing the call (leaving only the helper def) is caught."""
+    h = process_job.find("_precheck_source_size(")
+    d = process_job.find("_download_source(")
+    return h != -1 and d != -1 and h < d
 
 
 def download_bounded(worker: str) -> bool:
     """True iff the source download is byte-capped (max_bytes), so a swap to an oversized object
     AFTER the HEAD precheck (the HEAD->GET TOCTOU race) still can't buffer unbounded."""
     return "max_bytes=" in worker
+
+
+def download_owner_guarded(download_fn: str) -> bool:
+    """True iff the download HANDLER body keeps the owner + expiry + purge guards. Pass the
+    download() body (not the whole jobs.ts) so an owner check left only in getJob doesn't mask a
+    public presigned-GET regression."""
+    return all(
+        g in download_fn
+        for g in ("anon_or_user_id !== actor", "expires_at", "data_purged_at")
+    )
 
 
 # An accept rule is only sanctioned if it is destination-constrained to an allowlisted target:
@@ -152,14 +174,15 @@ def find_violations(root: Path) -> list[str]:
     if "assert_allowed_input_format" not in admission or "probe_duration_ms" not in admission:
         v.append("worker re-admission must run the format allowlist + duration probe (T2.4)")
     worker = _read(root / "workers/media-worker/src/media_worker/worker.py")
-    if not admit_before_produce(worker):
+    process_job = function_body(worker, "def process_job(")
+    if not admit_before_produce(process_job):
         v.append(
-            "worker claim loop must CALL re-admission (admit) before producing artifacts, with a "
+            "process_job must CALL re-admission (admit) before producing artifacts, with a "
             "SourceRejected -> delete+fail handler — not just import it (dead gate)"
         )
-    if not size_head_before_download(worker):
+    if not size_head_before_download(process_job):
         v.append(
-            "worker must HEAD-precheck the source size before downloading the body "
+            "process_job must HEAD-precheck the source size before downloading the body "
             "(post-HEAD-swap OOM/DoS)"
         )
     if not download_bounded(worker):
@@ -177,9 +200,8 @@ def find_violations(root: Path) -> list[str]:
     jobs_ts = _read(root / "apps/control-plane/src/jobs.ts")
     if not head_verified_before_insert(jobs_ts):
         v.append("POST /api/jobs must call verifyUpload (HEAD) BEFORE INSERT INTO jobs")
-    for guard in ("row.anon_or_user_id !== actor", "row.expires_at", "row.data_purged_at"):
-        if guard not in jobs_ts:
-            v.append(f"download must keep the guard `{guard}` (owner/expiry/purge)")
+    if not download_owner_guarded(function_body(jobs_ts, "function download(")):
+        v.append("download() handler must keep its owner/expiry/purge guards (not only getJob)")
     uploads_ts = _read(root / "apps/control-plane/src/uploads.ts")
     if "uploadPresignTtlSec" not in uploads_ts:
         v.append("uploads/sign PUT must be short-lived (uploadPresignTtlSec)")
