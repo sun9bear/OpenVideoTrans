@@ -295,6 +295,36 @@ describe("cleanUploadOrphans — pending upload-session TTL", () => {
     expect(statusAtDelete).toBe("expired"); // the guarded UPDATE won before the delete ran
     expect(r2.has("uploads/us_race")).toBe(false);
   });
+
+  it("rolls a failed delete back to pending so a later sweep retries (no permanent orphan)", async () => {
+    // CodeX P2: if r2.delete fails AFTER the claim flipped the row to expired, the source would be
+    // orphaned forever (next SELECT only scans pending). The rollback keeps it retryable.
+    const { env, r2, raw } = makeEnv();
+    insertUploadSession(raw, {
+      upload_session_id: "us_flaky",
+      created_at: 0,
+      expires_at: 5000,
+      source_key: "uploads/us_flaky",
+    });
+    r2.putSized("uploads/us_flaky", 1);
+    const origDelete = (env.MEDIA as any).delete.bind(env.MEDIA);
+    let fail = true;
+    (env.MEDIA as any).delete = async (key: string) => {
+      if (fail) throw new Error("R2 transient");
+      return origDelete(key);
+    };
+
+    // first sweep: the delete throws -> the row is rolled back to pending and the error surfaces.
+    await expect(cleanUploadOrphans(env.DB, env.MEDIA, 10_000, 200)).rejects.toThrow();
+    expect(sessionRow(raw, "us_flaky").status).toBe("pending"); // retryable, not wedged expired
+    expect(r2.has("uploads/us_flaky")).toBe(true); // source still present (delete failed)
+
+    // R2 recovers; the next sweep cleans it for good.
+    fail = false;
+    expect(await cleanUploadOrphans(env.DB, env.MEDIA, 10_000, 200)).toBe(1);
+    expect(sessionRow(raw, "us_flaky").status).toBe("expired");
+    expect(r2.has("uploads/us_flaky")).toBe(false);
+  });
 });
 
 // ── queue reconciler: D1 is the authoritative worklist ─────────────────────────

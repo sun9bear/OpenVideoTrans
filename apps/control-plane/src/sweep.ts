@@ -140,17 +140,30 @@ export async function cleanUploadOrphans(
     .all<OrphanRow>();
 
   let cleaned = 0;
+  let firstError: unknown;
   for (const row of rows.results) {
     const claimed = await db
       .prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ? AND status = 'pending'`)
       .bind(row.upload_session_id)
       .run();
-    if (claimed.meta.changes === 1) {
+    if (claimed.meta.changes !== 1) continue; // lost the race to a concurrent consume; the job owns the source
+    try {
       // We own the pending->expired transition; the source is now ours to delete (no job claimed it).
       await r2.delete(row.source_key);
       cleaned += 1;
+    } catch (e) {
+      // R2 delete failed: roll the claim back to 'pending' so a later tick re-selects and retries —
+      // otherwise an 'expired' row with a live source is never re-scanned and leaks forever. This is
+      // safe: the session is past its TTL, so verifyUpload rejects any consume (410 upload_expired);
+      // 'pending' here is purely the sweeper's retry marker, not a re-openable upload.
+      await db
+        .prepare(`UPDATE upload_sessions SET status = 'pending' WHERE upload_session_id = ? AND status = 'expired'`)
+        .bind(row.upload_session_id)
+        .run();
+      if (firstError === undefined) firstError = e;
     }
   }
+  if (firstError !== undefined) throw firstError; // surface the failure (next tick retries the rolled-back rows)
   return cleaned;
 }
 
