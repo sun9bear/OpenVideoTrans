@@ -192,6 +192,12 @@ export async function createJob(ctx: Ctx): Promise<Response> {
     )
     .run();
 
+  // Emit the queue_adapter wake AFTER the authoritative D1 INSERT (T2.5). This is best-effort: the
+  // producer swallows a Queues blip (cf_queues backend) and is a no-op for the d1 backend, so a lost
+  // wake never fails job creation — D1 holds the queued row and the worker's long-poll claim +
+  // sweeper reconcile are the backstop. The job is fully created regardless of the wake's fate.
+  await ctx.producer.wake(jobId);
+
   const created = await getJobRow(ctx, jobId);
   return json({ job: publicJob(rowToJob(created!)) }, 201);
 }
