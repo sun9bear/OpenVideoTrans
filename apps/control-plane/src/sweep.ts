@@ -145,17 +145,18 @@ interface OrphanRow {
 }
 
 // Duty 3 — delete the R2 source for `pending` upload sessions past their 1h TTL. TWO-PHASE so it is
-// both race-safe AND crash-idempotent:
-//   1. claim: guarded UPDATE pending -> 'expiring'. This serializes against verifyUpload's
-//      pending -> consumed on D1's single primary (uploads.ts): exactly one of {sweeper claims,
+// both race-safe AND crash-idempotent, while keeping status inside the UploadSession contract
+// (pending|verified|consumed|expired) — the retry marker is the internal source_purged_at column
+// (mirroring jobs.data_purged_at), not a new status value:
+//   1. claim: guarded UPDATE pending -> 'expired'. This serializes against verifyUpload's
+//      pending -> consumed on D1's single primary (uploads.ts): exactly one of {sweeper expires,
 //      job consumes} wins, so a session being consumed by a concurrent POST /jobs can't have its
 //      source deleted out from under the just-created job.
-//   2. delete the source, then finalize 'expiring' -> 'expired'.
-// The SELECT also re-picks 'expiring' rows — a tick that crashed (or whose r2.delete threw) AFTER the
-// claim but before finalize left the row 'expiring' with a live source; the next tick re-deletes
-// (idempotent: deleting a gone key is a no-op) and finalizes. So a post-claim interruption never
-// leaks the source. 'expiring' is a sweeper-internal transient marker; verifyUpload treats any
-// non-'pending' session as unusable, and the session is past TTL anyway. Returns the count finalized.
+//   2. delete the source, then stamp source_purged_at.
+// The SELECT also re-picks `expired AND source_purged_at IS NULL` rows — a tick that crashed (or
+// whose r2.delete threw) after the claim but before the stamp left such a row with a live source; the
+// next tick re-deletes (idempotent: deleting a gone key is a no-op) and stamps. So a post-claim
+// interruption never leaks the source. Returns the count whose source was purged this pass.
 export async function cleanUploadOrphans(
   db: D1Database,
   r2: R2Bucket,
@@ -165,7 +166,7 @@ export async function cleanUploadOrphans(
   const rows = await db
     .prepare(
       `SELECT upload_session_id, source_key, status FROM upload_sessions
-         WHERE (status = 'pending' AND expires_at <= ?) OR status = 'expiring'
+         WHERE (status = 'pending' AND expires_at <= ?) OR (status = 'expired' AND source_purged_at IS NULL)
          ORDER BY expires_at ASC LIMIT ?`,
     )
     .bind(now, limit)
@@ -176,21 +177,22 @@ export async function cleanUploadOrphans(
   for (const row of rows.results) {
     if (row.status === "pending") {
       const claimed = await db
-        .prepare(`UPDATE upload_sessions SET status = 'expiring' WHERE upload_session_id = ? AND status = 'pending'`)
+        .prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ? AND status = 'pending'`)
         .bind(row.upload_session_id)
         .run();
       if (claimed.meta.changes !== 1) continue; // lost the race to a concurrent consume; the job owns the source
     }
+    // row is now `expired` with source_purged_at still NULL (freshly claimed, or a prior interrupted tick).
     try {
       await r2.delete(row.source_key); // idempotent — a re-run after a crash/throw deletes a gone key as a no-op
       await db
-        .prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ? AND status = 'expiring'`)
-        .bind(row.upload_session_id)
+        .prepare(`UPDATE upload_sessions SET source_purged_at = ? WHERE upload_session_id = ? AND source_purged_at IS NULL`)
+        .bind(now, row.upload_session_id)
         .run();
       cleaned += 1;
     } catch (e) {
-      // Leave the row 'expiring' so the next tick re-selects and retries — no rollback needed; the
-      // 'expiring' marker IS the retryable state. Surface the error after draining the rest.
+      // Leave source_purged_at NULL so the next tick re-selects (expired + unpurged) and retries — no
+      // rollback needed; the NULL marker IS the retryable state. Surface the error after the rest.
       if (firstError === undefined) firstError = e;
     }
   }

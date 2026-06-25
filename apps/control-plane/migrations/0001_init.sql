@@ -59,5 +59,10 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
     declared_type     TEXT    NOT NULL,
     status            TEXT    NOT NULL,                       -- pending | verified | consumed | expired
     created_at        INTEGER NOT NULL,
-    expires_at        INTEGER NOT NULL
+    expires_at        INTEGER NOT NULL,
+    -- Internal sweeper marker (NOT in the UploadSession contract; mirrors jobs.data_purged_at): set
+    -- once the orphan source is deleted. status flips pending->expired first (claims the race vs
+    -- verifyUpload's consume), then the source is deleted + this stamped — so an `expired` row with a
+    -- NULL source_purged_at is a crash/throw mid-cleanup that the sweeper re-scans and retries.
+    source_purged_at  INTEGER
 );

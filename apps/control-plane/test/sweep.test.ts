@@ -313,8 +313,8 @@ describe("cleanUploadOrphans — pending upload-session TTL", () => {
     expect(r2.has("uploads/us_live")).toBe(true);
   });
 
-  it("claims the session (pending->expiring) BEFORE deleting its source (CodeX P2 race guard)", async () => {
-    // The delete must happen only after we win the pending->expiring transition, so a concurrent
+  it("claims the session (pending->expired) BEFORE deleting its source (CodeX P2 race guard)", async () => {
+    // The delete must happen only after we win the pending->expired transition, so a concurrent
     // POST /jobs that consumes the session cannot have its source deleted out from under it.
     const { env, r2, raw } = makeEnv();
     insertUploadSession(raw, {
@@ -331,14 +331,15 @@ describe("cleanUploadOrphans — pending upload-session TTL", () => {
       return origDelete(keys);
     };
     expect(await cleanUploadOrphans(env.DB, env.MEDIA, 10_000, 200)).toBe(1);
-    expect(statusAtDelete).toBe("expiring"); // claimed before the delete ran
-    expect(sessionRow(raw, "us_race").status).toBe("expired"); // finalized after the delete
+    expect(statusAtDelete).toBe("expired"); // claimed (in-contract status) before the delete ran
+    expect(sessionRow(raw, "us_race").source_purged_at).toBe(10_000); // stamped after the delete
     expect(r2.has("uploads/us_race")).toBe(false);
   });
 
-  it("a failed/interrupted delete leaves the row 'expiring' so a later sweep retries (no orphan)", async () => {
+  it("a failed/interrupted delete leaves source_purged_at NULL so a later sweep retries (no orphan)", async () => {
     // CodeX P2: if the delete throws (or the isolate crashes) AFTER the claim, the row stays
-    // 'expiring' and the next sweep re-selects + retries it — the source is never permanently leaked.
+    // expired+unpurged and the next sweep re-selects + retries it — the source is never leaked, and
+    // status never leaves the UploadSession contract.
     const { env, r2, raw } = makeEnv();
     insertUploadSession(raw, {
       upload_session_id: "us_flaky",
@@ -354,15 +355,16 @@ describe("cleanUploadOrphans — pending upload-session TTL", () => {
       return origDelete(keys);
     };
 
-    // first sweep: the delete throws -> the row is left 'expiring' (retryable) and the error surfaces.
+    // first sweep: the delete throws -> the row is left expired + source_purged_at NULL; error surfaces.
     await expect(cleanUploadOrphans(env.DB, env.MEDIA, 10_000, 200)).rejects.toThrow();
-    expect(sessionRow(raw, "us_flaky").status).toBe("expiring");
+    expect(sessionRow(raw, "us_flaky").status).toBe("expired"); // in-contract
+    expect(sessionRow(raw, "us_flaky").source_purged_at).toBeNull(); // retry marker
     expect(r2.has("uploads/us_flaky")).toBe(true); // source still present (delete failed)
 
-    // R2 recovers; the next sweep re-picks the 'expiring' row (no re-claim needed) and finalizes it.
+    // R2 recovers; the next sweep re-picks the expired+unpurged row (no re-claim) and stamps it.
     fail = false;
     expect(await cleanUploadOrphans(env.DB, env.MEDIA, 10_000, 200)).toBe(1);
-    expect(sessionRow(raw, "us_flaky").status).toBe("expired");
+    expect(sessionRow(raw, "us_flaky").source_purged_at).toBe(10_000);
     expect(r2.has("uploads/us_flaky")).toBe(false);
   });
 });
