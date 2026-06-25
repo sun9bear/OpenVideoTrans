@@ -39,9 +39,13 @@ interface ArtifactRow {
   artifacts: string;
 }
 
-// Duty 1 — purge artifacts + source for jobs past their 24h TTL. Status is left unchanged (AD-17: no
-// `expired` state; the UI derives "expired" from expires_at). data_purged_at gates idempotency so a
-// re-run neither re-deletes nor re-stamps. Returns the number of jobs purged this pass.
+// Duty 1 — purge artifacts + source for TERMINAL jobs past their 24h TTL (plan §263: "status 仍
+// done/failed"). Only done/failed are touched: a non-terminal (queued/running) job that lingered past
+// expires_at — e.g. one never claimed because all workers were down — must KEEP its source so a late
+// claim still works; deleting it would hand the next worker a source-less job (source_fetch_failed).
+// Terminalizing such a stuck-live job (it needs an error code / scheduling decision) is M2-CLOSE's
+// TTL+scheduling DoD, not this purge. Status is left unchanged (AD-17: no `expired` state; the UI
+// derives "expired" from expires_at). data_purged_at gates idempotency. Returns the count purged.
 export async function purgeExpired(
   db: D1Database,
   r2: R2Bucket,
@@ -51,7 +55,7 @@ export async function purgeExpired(
   const rows = await db
     .prepare(
       `SELECT job_id, upload_session_id, artifacts FROM jobs
-         WHERE expires_at <= ? AND data_purged_at IS NULL
+         WHERE expires_at <= ? AND data_purged_at IS NULL AND status IN ('done', 'failed')
          ORDER BY expires_at ASC LIMIT ?`,
     )
     .bind(now, limit)
@@ -114,8 +118,12 @@ interface OrphanRow {
 }
 
 // Duty 3 — delete the R2 source for `pending` upload sessions past their 1h TTL and mark them
-// expired. Only `pending` is touched: once a session is `consumed` its job owns the source (purged by
-// duty 1), and `verified`/`expired` are already past. Returns the number of orphan sessions cleaned.
+// expired. CLAIM-THEN-DELETE: flip pending->expired with a guarded UPDATE FIRST, and delete the
+// source ONLY if that win (changes===1). This serializes against verifyUpload's pending->consumed on
+// D1's single primary (uploads.ts), so a session being consumed by a concurrent POST /jobs between
+// the SELECT and here cannot have its source deleted out from under the just-created job: exactly one
+// of {sweeper expires, job consumes} wins the pending transition. Only `pending` is touched (a
+// `consumed` session's source is owned by its job, purged by duty 1). Returns the count cleaned.
 export async function cleanUploadOrphans(
   db: D1Database,
   r2: R2Bucket,
@@ -133,12 +141,15 @@ export async function cleanUploadOrphans(
 
   let cleaned = 0;
   for (const row of rows.results) {
-    await r2.delete(row.source_key);
-    const res = await db
+    const claimed = await db
       .prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ? AND status = 'pending'`)
       .bind(row.upload_session_id)
       .run();
-    cleaned += res.meta.changes;
+    if (claimed.meta.changes === 1) {
+      // We own the pending->expired transition; the source is now ours to delete (no job claimed it).
+      await r2.delete(row.source_key);
+      cleaned += 1;
+    }
   }
   return cleaned;
 }

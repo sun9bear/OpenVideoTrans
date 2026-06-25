@@ -214,6 +214,19 @@ describe("purgeExpired — 24h artifact/source TTL", () => {
     expect(r2.has("artifacts/fresh/1/v.mp4")).toBe(true);
     expect(jobRow(raw, "fresh").data_purged_at).toBeNull();
   });
+
+  it("never purges a non-terminal job past expires_at (its source must survive for a late claim)", async () => {
+    // CodeX P2: a queued/running job that lingered past 24h (e.g. all workers were down) must keep
+    // its source — purge is terminal-only, else the next claim downloads a deleted source.
+    const { env, r2, raw } = makeEnv();
+    insertJob(raw, { job_id: "stuck", enqueue_at: 0, status: "queued", expires_at: 1000 });
+    insertJob(raw, { job_id: "runp", enqueue_at: 0, status: "running", lease_expires_at: 9e15, expires_at: 1000 });
+    r2.putSized("uploads/us_seed", 100); // the shared source (insertJob uses upload_session_id us_seed)
+    expect(await purgeExpired(env.DB, env.MEDIA, 10_000, 200)).toBe(0);
+    expect(r2.has("uploads/us_seed")).toBe(true);
+    expect(jobRow(raw, "stuck").data_purged_at).toBeNull();
+    expect(jobRow(raw, "runp").data_purged_at).toBeNull();
+  });
 });
 
 // ── upload-orphan clean: pending sessions that never became a job ───────────────
@@ -259,6 +272,28 @@ describe("cleanUploadOrphans — pending upload-session TTL", () => {
     r2.putSized("uploads/us_live", 123);
     expect(await cleanUploadOrphans(env.DB, env.MEDIA, 10_000, 200)).toBe(0);
     expect(r2.has("uploads/us_live")).toBe(true);
+  });
+
+  it("claims the session (pending->expired) BEFORE deleting its source (CodeX P2 race guard)", async () => {
+    // The delete must happen only after we win the pending->expired transition, so a concurrent
+    // POST /jobs that consumes the session cannot have its source deleted out from under it.
+    const { env, r2, raw } = makeEnv();
+    insertUploadSession(raw, {
+      upload_session_id: "us_race",
+      created_at: 0,
+      expires_at: 5000,
+      source_key: "uploads/us_race",
+    });
+    r2.putSized("uploads/us_race", 1);
+    const origDelete = (env.MEDIA as any).delete.bind(env.MEDIA);
+    let statusAtDelete: string | undefined;
+    (env.MEDIA as any).delete = async (key: string) => {
+      statusAtDelete = sessionRow(raw, "us_race")?.status; // observe the row at delete time
+      return origDelete(key);
+    };
+    expect(await cleanUploadOrphans(env.DB, env.MEDIA, 10_000, 200)).toBe(1);
+    expect(statusAtDelete).toBe("expired"); // the guarded UPDATE won before the delete ran
+    expect(r2.has("uploads/us_race")).toBe(false);
   });
 });
 
