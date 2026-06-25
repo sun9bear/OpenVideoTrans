@@ -37,6 +37,7 @@
   // Turnstile (T2.4 abuse gate). Only active when a site key is configured; otherwise inert.
   let turnstileEl = $state<HTMLDivElement | undefined>(undefined);
   let turnstileToken = $state("");
+  let turnstileFailed = $state(false); // script blocked / render failed -> no token can ever arrive
   let turnstileHandle: TurnstileHandle | null = null;
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -53,9 +54,13 @@
     api = new ApiClient(API_BASE, anonId);
     if (turnstileEnabled() && turnstileEl) {
       renderTurnstile(turnstileEl, onTurnstileToken, () => (turnstileToken = ""))
-        .then((h) => (turnstileHandle = h))
+        .then((h) => {
+          if (h) turnstileHandle = h;
+          else turnstileFailed = true; // enabled but the widget could not render
+        })
         .catch(() => {
-          // script load failed -> leave the token empty so a gated submit waits (fail closed)
+          // script blocked / load failed -> the gate can never be satisfied; surface it BEFORE upload
+          turnstileFailed = true;
         });
     }
     return () => stopPolling();
@@ -84,8 +89,10 @@
   // client mirror must not hard-block a file the server would accept). typeWarn is the one hard gate
   // because it means no declared_type can be formed at all. The Turnstile token is NOT a submit gate —
   // the upload runs first and the token is required only at createJob (handled post-upload), so a
-  // token solved during the upload stays fresh.
-  const canSubmit = $derived(!!file && !typeWarn && !busy);
+  // token solved during the upload stays fresh. EXCEPT: if the Turnstile widget failed to load, no
+  // token can ever arrive, so block submit BEFORE the user wastes an upload (vs. parking forever).
+  const turnstileBroken = $derived(turnstileEnabled() && turnstileFailed);
+  const canSubmit = $derived(!!file && !typeWarn && !busy && !turnstileBroken);
 
   async function onFile(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
@@ -128,6 +135,10 @@
     srtUrl = "";
     videoUrl = "";
     pendingBody = null;
+    // Bump the poll generation NOW (not just at startPolling): a previous job's onDone link fetch may
+    // still be in flight during this submit's upload/create gap; invalidating it here stops a stale
+    // download URL from repopulating srtUrl/videoUrl after we just cleared them.
+    pollGen++;
     phase = "working";
     statusText = "上传中…";
     try {
@@ -287,7 +298,11 @@
       <div class="field">
         <span>人机验证</span>
         <div bind:this={turnstileEl}></div>
-        <small>可在上传期间完成；验证通过后会自动继续提交。</small>
+        {#if turnstileBroken}
+          <p class="warn" role="alert">人机验证加载失败，请检查网络或刷新页面后重试。</p>
+        {:else}
+          <small>可在上传期间完成；验证通过后会自动继续提交。</small>
+        {/if}
       </div>
     {/if}
 
