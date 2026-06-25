@@ -60,18 +60,29 @@ def artifact_key(job_id: str, claim_version: int, name: str) -> str:
     return f"artifacts/{job_id}/{claim_version}/{name}"
 
 
-def job_workdir(base: Path | str, job_id: str) -> Path:
-    """Namespace-isolated, path-contained on-disk dir for one job: ``base/<job_id>``.
+def job_workdir(base: Path | str, job_id: str, claim_version: int) -> Path:
+    """Namespace-isolated, path-contained scratch dir for one claim: ``base/<job_id>__<cv>``.
 
-    job_id is validated as a single safe component and the result is contained within base (reuses
+    Scoped by claim_version (like the R2 artifact keys) so that if an expired lease is reclaimed on
+    the same host, the stale attempt and the winning attempt (same job_id, different claim_version)
+    never share a scratch dir — neither can overwrite or delete the other's files. job_id is
+    validated as a single safe component and the result is contained within base (reuses
     autodub-core's T1.3a guards) — no traversal / reserved-name / separator escape.
     """
     base_path = Path(base)
-    return ensure_within(base_path, base_path / safe_component(job_id, label="job_id"))
+    name = f"{safe_component(job_id, label='job_id')}__{claim_version}"
+    return ensure_within(base_path, base_path / name)
 
 
 def clean_orphan_workdirs(base: Path | str) -> list[str]:
-    """Remove every child dir under base (orphans from a crashed run). Returns the removed names."""
+    """Remove every child dir under base (scratch left by a crashed run). Returns removed names.
+
+    Assumes ONE worker process owns `base` (the deployed model: one media-worker container per box
+    owning OVT_WORKDIR — plan §6/§deploy). It is therefore safe to remove all leftover scratch dirs
+    at startup. If multiple worker processes ever share one OVT_WORKDIR, give each its own base (or
+    add ownership/lock markers) so this sweep cannot delete another process's in-flight work — that
+    multi-process hardening is a deploy/ops concern (routed), out of the T2.2 stub's scope.
+    """
     base_path = Path(base)
     if not base_path.exists():
         return []
@@ -162,7 +173,7 @@ def process_job(
     job = claim.job
     claim_version = claim.claim_version
     job_id = job.job_id
-    workdir = job_workdir(workdir_base, job_id)
+    workdir = job_workdir(workdir_base, job_id, claim_version)
     workdir.mkdir(parents=True, exist_ok=True)
     lease_lost = threading.Event()
     heartbeat = Heartbeat(

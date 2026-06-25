@@ -42,7 +42,7 @@ def test_closed_loop_copies_source_to_artifact_and_completes(tmp_path: Path) -> 
     assert storage.objects[akey] == b"VIDEOBYTES"  # input copied as-is to output (stub)
     assert cp.completed == [("job_a", 1, {"video_key": akey})]
     assert cp.failed == []
-    assert not (tmp_path / "job_a").exists()  # try/finally cleaned the workdir
+    assert not (tmp_path / "job_a__1").exists()  # try/finally cleaned the cv-scoped workdir
 
 
 def test_subtitle_only_completes_with_srt_key(tmp_path: Path) -> None:
@@ -84,7 +84,7 @@ def test_failure_reports_fail_and_cleans_workdir(tmp_path: Path) -> None:
     fjid, fcv, code, detail = cp.failed[0]
     assert (fjid, fcv, code) == ("job_f", 1, "internal_error")
     assert detail is None  # never leak exception text (it may carry a path/URL)
-    assert not (tmp_path / "job_f").exists()
+    assert not (tmp_path / "job_f__1").exists()
 
 
 def test_completion_transport_error_does_not_fail_job(tmp_path: Path) -> None:
@@ -98,7 +98,7 @@ def test_completion_transport_error_does_not_fail_job(tmp_path: Path) -> None:
     run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG)
     assert cp.failed == []  # NOT failed despite the /complete transport error
     assert storage.objects[artifact_key("job_c", 1, "output.mp4")] == b"X"  # work succeeded
-    assert not (tmp_path / "job_c").exists()  # workdir still cleaned
+    assert not (tmp_path / "job_c__1").exists()  # workdir still cleaned
 
 
 def test_heartbeat_renews_during_a_long_single_stage(tmp_path: Path) -> None:
@@ -133,7 +133,7 @@ def test_heartbeat_renews_during_a_long_single_stage(tmp_path: Path) -> None:
     release.set()
     worker.join(5.0)
     assert not worker.is_alive()
-    assert cp.completed and not (tmp_path / "job_l").exists()
+    assert cp.completed and not (tmp_path / "job_l__1").exists()
 
 
 def test_exceeding_hard_timeout_reports_processing_timeout(tmp_path: Path) -> None:
@@ -156,7 +156,7 @@ def test_exceeding_hard_timeout_reports_processing_timeout(tmp_path: Path) -> No
     )
     assert cp.completed == []  # NOT marked done
     assert cp.failed == [("job_t", 1, "processing_timeout", None)]
-    assert not (tmp_path / "job_t").exists()
+    assert not (tmp_path / "job_t__1").exists()
 
 
 def test_run_forever_refreshes_config_per_claim(tmp_path: Path) -> None:
@@ -191,10 +191,16 @@ def test_run_forever_refreshes_config_per_claim(tmp_path: Path) -> None:
 
 
 def test_job_workdir_rejects_traversal_and_reserved_names(tmp_path: Path) -> None:
-    assert job_workdir(tmp_path, "job_ok") == (tmp_path / "job_ok").resolve()
+    assert job_workdir(tmp_path, "job_ok", 1) == (tmp_path / "job_ok__1").resolve()
     for bad in ("../evil", "a/b", "..", "CON", "x\\y"):
         with pytest.raises(PathEscapeError):
-            job_workdir(tmp_path, bad)
+            job_workdir(tmp_path, bad, 1)
+
+
+def test_job_workdir_isolated_by_claim_version(tmp_path: Path) -> None:
+    # A reclaim (same job_id, new claim_version) gets a distinct scratch dir (CodeX P2), mirroring
+    # the cv-scoped R2 artifact keys so a stale attempt can't clobber the winner's local files.
+    assert job_workdir(tmp_path, "job_z", 1) != job_workdir(tmp_path, "job_z", 2)
 
 
 def test_startup_cleans_orphan_workdirs(tmp_path: Path) -> None:
