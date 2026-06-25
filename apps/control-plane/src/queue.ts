@@ -13,6 +13,15 @@ import type { RuntimeConfig } from "./config";
 // deliberately read-only: it NEVER claims or mutates a job (that is the worker's exactly-once
 // optimistic lock — a second claimer would double-process), so duplicate/at-least-once delivery is
 // harmless. The break-glass production lock to cf_queues lives in CFG-GUARD.
+//
+// SCOPE / routed deferral (CodeX CLI P2-1): this unit owns the control-plane side of the bridge —
+// PRODUCER (createJob + sweeper re-signal) and the thin CONSUMER (D1-reconcile + ack). The Python
+// media-worker (workers/media-worker/, OUT of T2.5's file scope) still pulls via /internal/jobs/claim
+// and does not yet SUBSCRIBE to this queue, so the wake does not yet shorten the worker's claim
+// latency end-to-end — it proves the wire and keeps D1 authoritative. Wiring the worker to consume
+// the wake (the part that realizes the latency win) is a worker change routed to DEPLOY / M2-CLOSE,
+// where the worker is wired to the real pipeline. Until then cf_queues is a correctness-equivalent
+// overlay on D1-claim, never a regression (a lost wake just falls back to the long-poll claim).
 
 // ── Producer seam ───────────────────────────────────────────────────────────────────────────────
 

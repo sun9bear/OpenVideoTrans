@@ -1,6 +1,7 @@
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import type { RuntimeConfig } from "./config";
-import type { Deps, Env } from "./core";
+import type { Deps, Env, QueueProducer } from "./core";
+import { selectProducer } from "./queue";
 
 // T2.3 — the CF Cron sweeper. Four periodic duties keep the worklist + storage consistent without a
 // request in flight (plan §6 / §177 / §261-264 / §92):
@@ -121,7 +122,10 @@ export async function recoverLeases(
   now: number,
   maxAttempts: number,
   limit: number = SWEEP_BATCH_LIMIT,
-): Promise<{ requeued: number; workerLost: number }> {
+): Promise<{ requeued: number; requeuedIds: string[]; workerLost: number }> {
+  // RETURNING the requeued ids so runSweep can re-emit a CF-Queues wake for each (T2.5): a job that
+  // went running->queued is claimable again and, under cf_queues, needs a fresh wake (its original
+  // create-time wake is long gone). worker_lost rows are terminal, so they get no wake.
   const requeue = await db
     .prepare(
       `UPDATE jobs SET status = 'queued', lease_expires_at = NULL, current_stage = 'requeued'
@@ -129,10 +133,12 @@ export async function recoverLeases(
            SELECT job_id FROM jobs
              WHERE status = 'running' AND lease_expires_at <= ? AND attempt < ?
              ORDER BY lease_expires_at ASC LIMIT ?
-         )`,
+         )
+       RETURNING job_id`,
     )
     .bind(now, maxAttempts, limit)
-    .run();
+    .all<{ job_id: string }>();
+  const requeuedIds = requeue.results.map((r) => r.job_id);
   const lost = await db
     .prepare(
       `UPDATE jobs SET status = 'failed', error_code = 'worker_lost', finished_at = ?,
@@ -145,7 +151,7 @@ export async function recoverLeases(
     )
     .bind(now, now, maxAttempts, limit)
     .run();
-  return { requeued: requeue.meta.changes, workerLost: lost.meta.changes };
+  return { requeued: requeuedIds.length, requeuedIds, workerLost: lost.meta.changes };
 }
 
 interface OrphanRow {
@@ -242,10 +248,23 @@ export async function reconcileQueue(
 // Recovery still runs before reconcile, so a just-requeued lost job is counted by reconcile. A
 // stale-queued threshold of one lease TTL flags a job that has sat unclaimed longer than a worker
 // would hold it.
-export async function runSweep(env: Env, deps: Deps, config: RuntimeConfig): Promise<SweepSummary> {
+//
+// T2.5: every job that became (re)claimable this tick — requeued by recoverLeases OR surfaced stale by
+// reconcileQueue — gets a fresh best-effort wake re-emitted through the producer (no-op under the d1
+// backend; a CF-Queues send under cf_queues). This completes the bridge symmetry: createJob is no
+// longer the only wake site, so a recovered/stale job is re-signalled instead of waiting for the next
+// poll. The producer defaults from config+bindings so the scheduled handler need not thread it.
+export async function runSweep(
+  env: Env,
+  deps: Deps,
+  config: RuntimeConfig,
+  producer: QueueProducer = selectProducer(env, config),
+): Promise<SweepSummary> {
   const now = deps.now();
   const summary: SweepSummary = { purged: 0, requeued: 0, workerLost: 0, orphans: 0, reconciled: 0 };
   const errors: unknown[] = [];
+  let requeuedIds: string[] = [];
+  let reconciledIds: string[] = [];
   const duty = async (run: () => Promise<void>): Promise<void> => {
     try {
       await run();
@@ -258,6 +277,7 @@ export async function runSweep(env: Env, deps: Deps, config: RuntimeConfig): Pro
     const r = await recoverLeases(env.DB, now, config.maxAttempts, SWEEP_BATCH_LIMIT);
     summary.requeued = r.requeued;
     summary.workerLost = r.workerLost;
+    requeuedIds = r.requeuedIds;
   });
   await duty(async () => {
     summary.purged = await purgeExpired(env.DB, env.MEDIA, now);
@@ -266,7 +286,16 @@ export async function runSweep(env: Env, deps: Deps, config: RuntimeConfig): Pro
     summary.orphans = await cleanUploadOrphans(env.DB, env.MEDIA, now);
   });
   await duty(async () => {
-    summary.reconciled = (await reconcileQueue(env.DB, now, config.leaseTtlMs)).length;
+    reconciledIds = await reconcileQueue(env.DB, now, config.leaseTtlMs);
+    summary.reconciled = reconciledIds.length;
+  });
+  // Re-signal the (re)claimable set, deduped (a requeued job can also be surfaced by reconcile). Each
+  // wake is best-effort (the producer swallows a send blip) and isolated, so it never fails the sweep
+  // — D1 stays authoritative and the worker's long-poll claim is the backstop regardless.
+  await duty(async () => {
+    for (const id of new Set([...requeuedIds, ...reconciledIds])) {
+      await producer.wake(id);
+    }
   });
 
   if (errors.length > 0) throw errors[0];
