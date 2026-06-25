@@ -318,7 +318,7 @@ export async function download(ctx: Ctx): Promise<Response> {
   const creds = requireR2(ctx.env);
   // Cap to min(presign TTL, remaining artifact TTL).
   const remainingSec = Math.floor((row.expires_at - now) / 1000);
-  const expiresSec = Math.min(ctx.config.presignTtlSec, remainingSec);
+  const expiresSec = Math.min(ctx.config.downloadPresignTtlSec, remainingSec);
   const url = await presignR2Url({
     method: "GET",
     accountId: creds.accountId,

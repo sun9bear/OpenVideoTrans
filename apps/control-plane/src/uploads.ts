@@ -59,7 +59,7 @@ export async function signUpload(ctx: Ctx): Promise<Response> {
     accessKeyId: creds.accessKeyId,
     secretAccessKey: creds.secretAccessKey,
     now,
-    expiresSec: ctx.config.presignTtlSec,
+    expiresSec: ctx.config.uploadPresignTtlSec,
   });
 
   return json({
@@ -87,6 +87,12 @@ interface SessionRow {
 
 // HEAD the uploaded object and enforce the byte cap on the ACTUAL size. Oversized -> delete the
 // object, mark the session expired, and create NO job (raises before job-create proceeds).
+//
+// TOCTOU note: the presigned PUT stays valid until its (short) TTL, so a client could overwrite the
+// object after this HEAD. This HEAD is the FAST admission filter + verified_bytes snapshot; the
+// AUTHORITATIVE size/format gate is the worker's ffprobe re-admission at claim (design §pipeline:
+// "claim -> 取源(R2) -> ffprobe 准入(超 cap fail+删源)"), which re-reads the actual bytes and
+// fails+deletes an over-cap/wrong-format object — that closes a post-verify swap end-to-end (T2.4).
 export async function verifyUpload(
   ctx: Ctx,
   actor: string,

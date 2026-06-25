@@ -15,7 +15,8 @@ export interface RuntimeConfig {
   maxAttempts: number;
   agingBucketMs: number;
   deadlineMaxWaitMs: number;
-  presignTtlSec: number;
+  uploadPresignTtlSec: number;
+  downloadPresignTtlSec: number;
   allowedUploadTypes: readonly string[];
 }
 
@@ -30,7 +31,8 @@ export const DEFAULT_CONFIG: RuntimeConfig = {
   maxAttempts: 2, // initial run + 1 reclaim
   agingBucketMs: 60 * 1000, // 1-min aging buckets
   deadlineMaxWaitMs: 4 * 60 * 60 * 1000, // 4h per-job deadline backstop
-  presignTtlSec: 60 * 60, // 1h presigned-URL expiry
+  uploadPresignTtlSec: 15 * 60, // 15min — short-lived upload PUT bounds the post-verify swap window
+  downloadPresignTtlSec: 60 * 60, // 1h download GET expiry (capped to remaining artifact TTL)
   allowedUploadTypes: [
     "video/mp4",
     "video/quicktime",
