@@ -3,6 +3,7 @@
   import { ApiClient, ApiError } from "./lib/api";
   import { ensureAnonId } from "./lib/session";
   import { longVideoWarning, oversizeWarning } from "./lib/caps";
+  import { resolveUploadType, unsupportedTypeWarning } from "./lib/mime";
   import { OUTPUT_MODE_OPTIONS, SUBTITLE_DELIVERY_OPTIONS } from "./lib/modes";
   import { COPY } from "./lib/copy";
   import type { CreateJobBody, JobView, OutputMode, SubtitleLang } from "./lib/types";
@@ -33,6 +34,10 @@
   let videoUrl = $state("");
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  // A monotonically-increasing token identifying the current polling session. A slow getJob whose
+  // response outlives the interval (or a poll from a superseded submit) is dropped when its captured
+  // gen no longer matches — setInterval can't cancel an in-flight fetch, so this guards the race.
+  let pollGen = 0;
 
   onMount(() => {
     const anonId = ensureAnonId(document, location.protocol === "https:");
@@ -41,9 +46,10 @@
   });
 
   const sizeWarn = $derived(file ? oversizeWarning(file.size) : null);
+  const typeWarn = $derived(file ? unsupportedTypeWarning(file) : null);
   const durationWarn = $derived(file && durationSec ? longVideoWarning(durationSec, outputMode) : null);
   const busy = $derived(phase === "working" || phase === "polling");
-  const canSubmit = $derived(!!file && !sizeWarn && !busy);
+  const canSubmit = $derived(!!file && !sizeWarn && !typeWarn && !busy);
 
   async function onFile(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
@@ -72,6 +78,15 @@
 
   async function submit() {
     if (!api || !file) return;
+    // Resolve an allowlisted MIME up front (browsers report a blank/octet-stream type for valid .mkv
+    // /.avi). The SAME type is used for declared_type AND the PUT Content-Type — the server requires
+    // them to match. An unresolvable format is rejected client-side instead of hitting a server 415.
+    const type = resolveUploadType(file);
+    if (!type) {
+      phase = "failed";
+      errorMsg = unsupportedTypeWarning(file) ?? "暂不支持该文件格式。";
+      return;
+    }
     errorMsg = "";
     job = null;
     srtUrl = "";
@@ -79,7 +94,6 @@
     phase = "working";
     statusText = "上传中…";
     try {
-      const type = file.type || "application/octet-stream";
       const sign = await api.signUpload(file.size, type);
       await api.putSource(sign.put_url, file, type);
       statusText = "创建任务…";
@@ -103,22 +117,27 @@
 
   function startPolling(jobId: string) {
     stopPolling();
+    const gen = ++pollGen;
     pollTimer = setInterval(async () => {
       if (!api) return;
       try {
         const j = await api.getJob(jobId);
+        // Drop a stale resolution: a terminal tick already stopped polling (pollTimer === null), or a
+        // newer submit started a new session (gen !== pollGen). Either way this response is obsolete.
+        if (pollTimer === null || gen !== pollGen) return;
         job = j;
         if (j.status === "running") statusText = "处理中…";
         else if (j.status === "queued") statusText = "排队中…";
         if (j.status === "done") {
           stopPolling();
-          await onDone(j);
+          await onDone(j, gen);
         } else if (j.status === "failed") {
           stopPolling();
           phase = "failed";
           errorMsg = `任务失败：${j.error_code ?? "未知错误"}`;
         }
       } catch (e) {
+        if (pollTimer === null || gen !== pollGen) return; // a terminal/newer tick already handled it
         stopPolling();
         fail(e);
       }
@@ -132,12 +151,15 @@
     }
   }
 
-  async function onDone(j: JobView) {
+  async function onDone(j: JobView, gen: number) {
     phase = "done";
     statusText = "完成";
     try {
-      if (api && j.artifacts.srt_key) srtUrl = (await api.downloadUrl(j.job_id, "srt")).url;
-      if (api && j.artifacts.video_key) videoUrl = (await api.downloadUrl(j.job_id, "video")).url;
+      const srt = api && j.artifacts.srt_key ? (await api.downloadUrl(j.job_id, "srt")).url : "";
+      const vid = api && j.artifacts.video_key ? (await api.downloadUrl(j.job_id, "video")).url : "";
+      if (gen !== pollGen) return; // a newer submit started during the link fetch — drop stale links
+      srtUrl = srt;
+      videoUrl = vid;
     } catch {
       // download links are best-effort; the job is done regardless
     }
@@ -161,6 +183,7 @@
       <input type="file" accept="video/*,audio/*" onchange={onFile} disabled={busy} />
     </label>
     {#if sizeWarn}<p class="warn" role="alert">{sizeWarn}</p>{/if}
+    {#if typeWarn}<p class="warn" role="alert">{typeWarn}</p>{/if}
 
     <fieldset class="field">
       <legend>输出模式</legend>
