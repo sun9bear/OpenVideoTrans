@@ -1,0 +1,59 @@
+#!/usr/sbin/nft -f
+#
+# T2.4 — media-worker host egress allowlist (PROTOTYPE).
+#
+# Default-drop the worker box's OUTPUT so a compromised ffmpeg/ffprobe (or any process) cannot reach
+# the network except to the few destinations the pipeline needs: the control plane, R2, and the
+# enabled free providers (cloud ASR/MT/TTS). This is the host-layer backstop UNDER the in-process
+# SSRF guards (no yt-dlp, ffmpeg -protocol_whitelist file,crypto, the container-format allowlist,
+# and the worker's ffprobe re-admission) — defense in depth, not a replacement.
+#
+# What this prototype pins (asserted by tooling/guardrails/ssrf_presign_check.py):
+#   * the OUTPUT chain is default-drop;
+#   * the cloud metadata endpoint (IMDS 169.254.169.254) is explicitly dropped;
+#   * the RFC1918 private ranges are dropped (no pivot into the box's private network);
+#   * there is no blanket 0.0.0.0/0 accept.
+#
+# What DEPLOY owns (out of T2.4 scope): a DNS-refresh daemon that resolves the control-plane + R2 +
+# enabled-provider hostnames and keeps the @egress_allow set current so a provider's IP rotation is
+# not missed (backlog T2.5/DEPLOY: "DNS 刷新不漏新 IP，与 T2.4 SSRF CI 一致"). The set is empty here.
+
+flush ruleset
+
+table inet ovt_egress {
+	# Allowed egress destinations: the control plane + R2 + enabled provider IPs, written by the
+	# deploy-time DNS-refresh. Empty in the prototype — with the default-drop policy below, that means
+	# the box can reach NOTHING outbound until deploy populates it (fail-closed).
+	set egress_allow {
+		type ipv4_addr
+		flags interval
+	}
+
+	set egress_allow6 {
+		type ipv6_addr
+		flags interval
+	}
+
+	chain output {
+		type filter hook output priority 0; policy drop;
+
+		# return traffic of already-allowed connections + loopback.
+		ct state established,related accept
+		oif "lo" accept
+
+		# block cloud metadata + private ranges BEFORE any allow (new outbound to these is dropped).
+		ip daddr 169.254.169.254 drop
+		ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } drop
+		ip6 daddr { fc00::/7, fe80::/10, ::1/128 } drop
+
+		# DNS to the pinned resolver only (needed to resolve the allowlisted hostnames).
+		ip daddr 1.1.1.1 udp dport 53 accept
+		ip daddr 1.1.1.1 tcp dport 53 accept
+
+		# the allowlisted destinations, HTTPS only (filled at deploy).
+		ip daddr @egress_allow tcp dport 443 accept
+		ip6 daddr @egress_allow6 tcp dport 443 accept
+
+		# everything else falls through to the default-drop policy.
+	}
+}

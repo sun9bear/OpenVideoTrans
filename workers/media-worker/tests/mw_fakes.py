@@ -72,12 +72,14 @@ class FakeControlPlane:
         stale: bool = False,
         complete_error: bool = False,
         config_error: bool = False,
+        fail_error: bool = False,
     ) -> None:
         self._config = config
         self._claims = list(claims or [])
         self._stale = stale
         self._complete_error = complete_error
         self._config_error = config_error
+        self._fail_error = fail_error
         self._lock = threading.Lock()
         self.heartbeats: list[tuple[str, int, str | None]] = []
         self.completed: list[tuple[str, int, dict[str, str]]] = []
@@ -112,6 +114,8 @@ class FakeControlPlane:
         error_code: str,
         error_detail: str | None = None,
     ) -> None:
+        if self._fail_error:
+            raise ControlPlaneError(f"transient error failing {job_id}")
         with self._lock:
             self.failed.append((job_id, claim_version, error_code, error_detail))
 
@@ -127,6 +131,7 @@ class FakeStorage:
     def __init__(self, objects: dict[str, bytes] | None = None) -> None:
         self.objects: dict[str, bytes] = dict(objects or {})
         self.uploads: list[tuple[str, str]] = []
+        self.deleted: list[str] = []
 
     def download(self, key: str) -> bytes:
         try:
@@ -137,3 +142,14 @@ class FakeStorage:
     def upload(self, key: str, data: bytes, *, content_type: str) -> None:
         self.objects[key] = data
         self.uploads.append((key, content_type))
+
+    def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self.objects.pop(key, None)
+
+
+# A pass-through admitter for the stub copy-loop tests, which exercise the heartbeat / cleanup /
+# completion paths on synthetic (non-media) bytes — the real ffprobe re-admission is covered
+# separately in test_admission.py + the disguised-playlist integration test in test_worker.py.
+def ALLOW_ADMIT(path: object, job: object, config: object) -> None:  # noqa: N802, ARG001
+    return None

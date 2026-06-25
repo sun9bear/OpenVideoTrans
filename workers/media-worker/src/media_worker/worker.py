@@ -18,11 +18,17 @@ from pathlib import Path
 from autodub_core.isolation import ensure_within, safe_component
 from ovt_schemas import Job
 
+from .admission import SourceRejected, admit_source
 from .config import DEFAULT_CONFIG, WorkerConfig
 from .control_plane import Claim, ControlPlane, StaleClaimError
 from .storage import Storage
 
 logger = logging.getLogger("media_worker")
+
+# The re-admission port (T2.4): (downloaded source path, job, config) -> None, raising
+# SourceRejected on a format/size/duration violation. Injected so the stub copy-loop tests can pass
+# a pass-through; the default is the real ffprobe re-admission.
+Admitter = Callable[[Path, Job, WorkerConfig], None]
 
 # Per output_mode: the artifact(s) to produce, each (Job.artifacts field, output filename,
 # content-type). The stub copies the source bytes into each; `both` emits a video AND an SRT so
@@ -168,8 +174,9 @@ def process_job(
     workdir_base: Path | str,
     config: WorkerConfig,
     clock: Callable[[], float] = time.monotonic,
+    admit: Admitter = admit_source,
 ) -> None:
-    """Run one claimed job through the stub: copy source -> artifact(s) -> complete (or fail)."""
+    """Run one claimed job through the stub: fetch -> re-admit -> copy -> complete (or fail)."""
     job = claim.job
     claim_version = claim.claim_version
     job_id = job.job_id
@@ -187,13 +194,30 @@ def process_job(
     heartbeat.start()
     started = clock()
     try:
+        # Fetch the source, then RE-ADMIT it (T2.4): the authoritative format/size/duration gate on
+        # the actual bytes, closing a post-HEAD swap. A re-admission rejection is a specific
+        # user-facing error_code (+ delete the offending source); a genuine fetch failure is
+        # internal_error. error_detail is always omitted (exception text can carry a path/URL).
         try:
-            artifacts = _produce_artifacts(storage, job, claim_version, workdir)
+            in_path = _download_source(storage, job, workdir)
+            admit(in_path, job, config)
+        except SourceRejected as rej:
+            # Record the rejection FIRST, then delete the source — and only if the report landed. A
+            # transient fail() blip then leaves the job running with its source intact, so the lease
+            # recovery re-admits + re-rejects with the SAME error_code (idempotent), instead of the
+            # source being gone and the retry mislabeling it internal_error.
+            if _report_fail(cp, job_id, claim_version, rej.error_code):
+                _delete_source_quietly(storage, job)
+                logger.info("job %s rejected at re-admission (%s); deleted", job_id, rej.error_code)
+            return
         except Exception:
-            # Genuine processing failure (fetch/copy/upload) -> terminal fail. error_detail is
-            # omitted on purpose: exception text can carry a path/URL and must never reach the
-            # control plane / user (the stable error_code is enough).
-            cp.fail(job_id, claim_version, error_code="internal_error")
+            _report_fail(cp, job_id, claim_version, "internal_error")
+            logger.warning("job %s failed (stub)", job_id)
+            return
+        try:
+            artifacts = _produce_artifacts(storage, job, claim_version, workdir, in_path)
+        except Exception:
+            _report_fail(cp, job_id, claim_version, "internal_error")
             logger.warning("job %s failed (stub)", job_id)
             return
         # Hard-timeout gate, checked PRECISELY here (not only on the coarse heartbeat tick): a job
@@ -201,7 +225,7 @@ def process_job(
         # lease_lost also covers a lease reclaimed mid-run. Either way report processing_timeout (a
         # no-op server-side if the lease was already reclaimed; terminal if we still hold it).
         if clock() - started >= config.job_hard_timeout_sec or lease_lost.is_set():
-            cp.fail(job_id, claim_version, error_code="processing_timeout")
+            _report_fail(cp, job_id, claim_version, "processing_timeout")
             logger.warning("job %s exceeded the hard timeout; reported processing_timeout", job_id)
             return
         # Processing succeeded. Reporting completion is a separate concern: a transient transport
@@ -217,13 +241,40 @@ def process_job(
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _produce_artifacts(
-    storage: Storage, job: Job, claim_version: int, workdir: Path
-) -> dict[str, str]:
-    """STUB: copy the source straight to each output artifact for the job's output_mode."""
+def _download_source(storage: Storage, job: Job, workdir: Path) -> Path:
+    """Fetch the source object into the job's workdir and return the local path."""
     source = storage.download(source_key_for(job))
     in_path = workdir / "input"
     in_path.write_bytes(source)
+    return in_path
+
+
+def _delete_source_quietly(storage: Storage, job: Job) -> None:
+    """Best-effort delete of a rejected source. The sweeper's TTL purge is the backstop, so a
+    transient delete failure must not crash the claim loop — log generically (no secret text)."""
+    try:
+        storage.delete(source_key_for(job))
+    except Exception:
+        logger.warning("job %s source delete failed; left for the TTL sweeper", job.job_id)
+
+
+def _report_fail(cp: ControlPlane, job_id: str, claim_version: int, error_code: str) -> bool:
+    """Report a terminal failure, swallowing a transient transport error the way the success path
+    guards cp.complete: a control-plane blip must not crash the loop OR escape run_once — leave the
+    job running for lease recovery instead. Returns True iff the failure was durably recorded. Logs
+    the job id only (no exception text — secret hygiene)."""
+    try:
+        cp.fail(job_id, claim_version, error_code=error_code)
+        return True
+    except Exception:
+        logger.warning("job %s fail report failed; left for lease recovery", job_id)
+        return False
+
+
+def _produce_artifacts(
+    storage: Storage, job: Job, claim_version: int, workdir: Path, in_path: Path
+) -> dict[str, str]:
+    """STUB: copy the (already re-admitted) source straight to each output artifact for the mode."""
     artifacts: dict[str, str] = {}
     for field, name, content_type in _ARTIFACTS_BY_MODE.get(
         job.output_mode, _ARTIFACTS_BY_MODE["dub_only"]
@@ -242,12 +293,13 @@ def run_once(
     *,
     workdir_base: Path | str,
     config: WorkerConfig,
+    admit: Admitter = admit_source,
 ) -> str | None:
     """Claim one job and process it. Returns the job_id, or None if nothing was claimable."""
     claim = cp.claim()
     if claim is None:
         return None
-    process_job(cp, storage, claim, workdir_base=workdir_base, config=config)
+    process_job(cp, storage, claim, workdir_base=workdir_base, config=config, admit=admit)
     return claim.job.job_id
 
 
@@ -259,6 +311,7 @@ def run_forever(
     config: WorkerConfig | None = None,
     poll_idle_sec: float = 2.0,
     stop_event: threading.Event | None = None,
+    admit: Admitter = admit_source,
 ) -> None:
     """Long-poll the claim loop until stopped. Clears orphan dirs at startup (crash recovery)."""
     base = Path(workdir_base)
@@ -281,7 +334,7 @@ def run_forever(
             if claim is not None:
                 if config is None:
                     cfg = _fetch_config(cp, cfg)
-                process_job(cp, storage, claim, workdir_base=base, config=cfg)
+                process_job(cp, storage, claim, workdir_base=base, config=cfg, admit=admit)
         except Exception:
             # A single iteration's unexpected error (e.g. a control-plane blip) must not kill the
             # long-running worker. Log generically — no exception text (secret hygiene).

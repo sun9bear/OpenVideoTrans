@@ -4,7 +4,9 @@ import threading
 import time
 from pathlib import Path
 
+import media_worker.admission as adm
 import pytest
+from autodub_core import ffmpeg_utils as ff
 from autodub_core.isolation import PathEscapeError
 from media_worker.config import WorkerConfig
 from media_worker.worker import (
@@ -16,7 +18,7 @@ from media_worker.worker import (
     run_once,
     source_key_for,
 )
-from mw_fakes import TEST_CONFIG, Claim, FakeControlPlane, FakeStorage, make_job
+from mw_fakes import ALLOW_ADMIT, TEST_CONFIG, Claim, FakeControlPlane, FakeStorage, make_job
 
 
 def test_source_key_matches_control_plane_convention() -> None:
@@ -36,7 +38,7 @@ def test_closed_loop_copies_source_to_artifact_and_completes(tmp_path: Path) -> 
     job = make_job(job_id="job_a", upload_session_id="us_a", output_mode="dub_only")
     cp = FakeControlPlane(config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)])
     storage = FakeStorage({"uploads/us_a": b"VIDEOBYTES"})
-    jid = run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG)
+    jid = run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT)
     assert jid == "job_a"
     akey = artifact_key("job_a", 1, "output.mp4")
     assert storage.objects[akey] == b"VIDEOBYTES"  # input copied as-is to output (stub)
@@ -49,7 +51,7 @@ def test_subtitle_only_completes_with_srt_key(tmp_path: Path) -> None:
     job = make_job(job_id="job_s", upload_session_id="us_s", output_mode="subtitle_only")
     cp = FakeControlPlane(config=TEST_CONFIG, claims=[Claim(job=job, claim_version=2, attempt=1)])
     storage = FakeStorage({"uploads/us_s": b"X"})
-    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG)
+    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT)
     assert cp.completed == [("job_s", 2, {"srt_key": artifact_key("job_s", 2, "output.srt")})]
 
 
@@ -58,7 +60,7 @@ def test_both_mode_completes_with_both_artifacts(tmp_path: Path) -> None:
     job = make_job(job_id="job_b", upload_session_id="us_b", output_mode="both")
     cp = FakeControlPlane(config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)])
     storage = FakeStorage({"uploads/us_b": b"SRC"})
-    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG)
+    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT)
     vkey = artifact_key("job_b", 1, "output.mp4")
     skey = artifact_key("job_b", 1, "output.srt")
     assert cp.completed == [("job_b", 1, {"video_key": vkey, "srt_key": skey})]
@@ -95,7 +97,7 @@ def test_completion_transport_error_does_not_fail_job(tmp_path: Path) -> None:
         config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)], complete_error=True
     )
     storage = FakeStorage({"uploads/us_c": b"X"})
-    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG)
+    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT)
     assert cp.failed == []  # NOT failed despite the /complete transport error
     assert storage.objects[artifact_key("job_c", 1, "output.mp4")] == b"X"  # work succeeded
     assert not (tmp_path / "job_c__1").exists()  # workdir still cleaned
@@ -122,7 +124,7 @@ def test_heartbeat_renews_during_a_long_single_stage(tmp_path: Path) -> None:
     worker = threading.Thread(
         target=run_once,
         args=(cp, storage),
-        kwargs={"workdir_base": tmp_path, "config": FAST_CONFIG},
+        kwargs={"workdir_base": tmp_path, "config": FAST_CONFIG, "admit": ALLOW_ADMIT},
     )
     worker.start()
     assert entered.wait(3.0)
@@ -153,6 +155,7 @@ def test_exceeding_hard_timeout_reports_processing_timeout(tmp_path: Path) -> No
         workdir_base=tmp_path,
         config=cfg,
         clock=lambda: next(times, 100.0),
+        admit=ALLOW_ADMIT,
     )
     assert cp.completed == []  # NOT marked done
     assert cp.failed == [("job_t", 1, "processing_timeout", None)]
@@ -185,7 +188,8 @@ def test_run_forever_refreshes_config_per_claim(tmp_path: Path) -> None:
     stop = threading.Event()
     cp = _OneJobThenStop(stop)
     storage = FakeStorage({"uploads/us_r": b"X"})
-    run_forever(cp, storage, workdir_base=tmp_path, stop_event=stop)  # config=None -> refresh path
+    # config=None -> refresh path; admit pass-through (the copy-loop test, not the source gate).
+    run_forever(cp, storage, workdir_base=tmp_path, stop_event=stop, admit=ALLOW_ADMIT)
     assert cp.config_calls == 2  # 1 at startup + 1 at the claim
     assert cp.completed == [("job_r", 1, {"video_key": artifact_key("job_r", 1, "output.mp4")})]
 
@@ -230,3 +234,66 @@ def test_run_forever_falls_back_to_defaults_on_config_error(tmp_path: Path) -> N
     cp = FakeControlPlane(claims=[], config_error=True)
     # config=None forces the startup fetch; it raises -> must be caught + defaulted, not propagated.
     run_forever(cp, FakeStorage({}), workdir_base=tmp_path, stop_event=stop)
+
+
+# --------------------------------------------------------------------------- #
+# T2.4 — ffprobe re-admission wired into the claim loop (the DEFAULT admit path)
+# --------------------------------------------------------------------------- #
+def test_process_job_rejects_disguised_playlist_and_deletes_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A source whose real container is a playlist (hls/concat) is refused by the worker's ffprobe
+    # re-admission BEFORE any artifact is produced: fail(unsupported_format) + delete the R2 source.
+    def _raise(p: object) -> None:
+        raise ff.FfmpegError("input container 'hls,applehttp' refused (SSRF guard, T1.3c)")
+
+    monkeypatch.setattr(adm.ff, "assert_allowed_input_format", _raise)
+    job = make_job(job_id="job_p", upload_session_id="us_p", output_mode="dub_only")
+    cp = FakeControlPlane(config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)])
+    storage = FakeStorage({"uploads/us_p": b"\x00disguised"})
+    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG)  # DEFAULT admit
+    assert cp.failed == [("job_p", 1, "unsupported_format", None)]  # no error_detail (hygiene)
+    assert cp.completed == []
+    assert storage.deleted == ["uploads/us_p"]  # over-cap/wrong-format object removed promptly
+    assert storage.uploads == []  # never produced an artifact
+    assert not (tmp_path / "job_p__1").exists()  # workdir still cleaned
+
+
+def test_process_job_rejects_swapped_oversize_source_and_deletes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The post-HEAD swap: the control plane HEAD-passed a small object, then a larger one was PUT
+    # before claim. The worker re-reads the ACTUAL bytes and rejects upload_too_large + deletes.
+    monkeypatch.setattr(adm.ff, "assert_allowed_input_format", lambda p: None)
+    monkeypatch.setattr(adm.ff, "probe_duration_ms", lambda p: 1_000)
+    tiny_cap = WorkerConfig(
+        heartbeat_interval_sec=30.0, lease_ttl_sec=180.0, job_hard_timeout_sec=2700.0,
+        max_attempts=2, max_upload_bytes=8,
+    )
+    job = make_job(job_id="job_o", upload_session_id="us_o", output_mode="dub_only")
+    cp = FakeControlPlane(config=tiny_cap, claims=[Claim(job=job, claim_version=1, attempt=1)])
+    storage = FakeStorage({"uploads/us_o": b"\x00" * 64})  # 64 bytes > the 8-byte cap
+    run_once(cp, storage, workdir_base=tmp_path, config=tiny_cap)  # DEFAULT admit
+    assert cp.failed == [("job_o", 1, "upload_too_large", None)]
+    assert cp.completed == []
+    assert storage.deleted == ["uploads/us_o"]
+
+
+def test_reject_path_transient_fail_keeps_source_for_reclaim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # If fail() blips transiently on the reject path, the source must NOT be deleted (so the lease
+    # recovery re-admits + re-rejects with the same code) and the error must not escape run_once.
+    def _raise(p: object) -> None:
+        raise ff.FfmpegError("input container 'hls' refused (SSRF guard)")
+
+    monkeypatch.setattr(adm.ff, "assert_allowed_input_format", _raise)
+    job = make_job(job_id="job_e", upload_session_id="us_e", output_mode="dub_only")
+    cp = FakeControlPlane(
+        config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)], fail_error=True
+    )
+    storage = FakeStorage({"uploads/us_e": b"\x00disguised"})
+    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG)  # must NOT raise
+    assert storage.deleted == []  # source kept — the reclaim re-reads + re-rejects it
+    assert cp.completed == []
+    assert not (tmp_path / "job_e__1").exists()  # workdir still cleaned

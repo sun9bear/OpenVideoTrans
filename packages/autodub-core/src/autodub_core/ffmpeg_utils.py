@@ -144,8 +144,11 @@ def assert_allowed_input_format(path: str | Path) -> None:
 
 
 def probe_duration_ms(path: str | Path) -> int:
+    # Demuxer-restricted like probe_format_name: safe-by-default so a direct caller (e.g. the
+    # worker's ffprobe re-admission, T2.4) cannot probe a disguised playlist/concat/network
+    # demuxer's duration even without a prior assert_allowed_input_format (ffprobe won't open it).
     out = _run([
-        *_FFPROBE_BASE, "-show_entries", "format=duration",
+        *_FFPROBE_BASE, *_FORMAT_WHITELIST, "-show_entries", "format=duration",
         "-of", "json", *_PROTOCOL_WHITELIST, str(path),
     ])
     # Malformed ffprobe output (empty/garbled JSON, a missing format/duration key,

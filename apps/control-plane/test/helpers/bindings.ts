@@ -1,5 +1,5 @@
 import type { KVNamespace, R2Bucket, R2Object } from "@cloudflare/workers-types";
-import type { Deps, Env } from "../../src/core";
+import type { Deps, Env, TurnstileVerifier } from "../../src/core";
 import { handle } from "../../src/router";
 import { makeD1, type RawDb } from "./d1";
 
@@ -48,6 +48,7 @@ export class FakeKV {
 export interface TestEnvOptions {
   internalToken?: string;
   r2Creds?: boolean;
+  turnstileSecret?: string;
 }
 
 export function makeEnv(opts: TestEnvOptions = {}): {
@@ -64,6 +65,7 @@ export function makeEnv(opts: TestEnvOptions = {}): {
     MEDIA: r2 as unknown as R2Bucket,
     CONFIG: kv as unknown as KVNamespace,
     ...(opts.internalToken !== undefined ? { INTERNAL_TOKEN: opts.internalToken } : {}),
+    ...(opts.turnstileSecret !== undefined ? { TURNSTILE_SECRET: opts.turnstileSecret } : {}),
     ...(opts.r2Creds
       ? {
           R2_ACCOUNT_ID: "acct-test",
@@ -181,6 +183,8 @@ export interface CallOpts {
   actor?: string;
   worker?: string;
   body?: unknown;
+  ip?: string;
+  verifyTurnstile?: TurnstileVerifier;
 }
 
 // Drive the Worker handler end-to-end with an injected Env + clock; returns status + parsed JSON.
@@ -194,6 +198,7 @@ export async function call(
   const headers: Record<string, string> = {};
   if (opts.actor !== undefined) headers["X-OVT-Anon-Id"] = opts.actor;
   if (opts.worker !== undefined) headers["Authorization"] = `Bearer ${opts.worker}`;
+  if (opts.ip !== undefined) headers["CF-Connecting-IP"] = opts.ip;
   let body: string | undefined;
   if (opts.body !== undefined) {
     headers["content-type"] = "application/json";
@@ -203,6 +208,7 @@ export async function call(
     new Request(`https://cp.test${path}`, { method, headers, body: body ?? null }),
     env,
     deps,
+    opts.verifyTurnstile,
   );
   const text = await res.text();
   return { status: res.status, json: text ? JSON.parse(text) : null };

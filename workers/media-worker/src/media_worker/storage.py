@@ -24,6 +24,7 @@ class StorageError(RuntimeError):
 class Storage(Protocol):
     def download(self, key: str) -> bytes: ...
     def upload(self, key: str, data: bytes, *, content_type: str) -> None: ...
+    def delete(self, key: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,15 @@ class S3Storage:
         # Content-Type joins the signed header set (its integrity is covered by the signature).
         url, headers = self._sign("PUT", key, data, {"Content-Type": content_type})
         req = urllib.request.Request(url, data=data, method="PUT")
+        for name, value in headers.items():
+            req.add_header(name, value)
+        with self._opener.open(req, timeout=self._timeout) as resp:
+            resp.read()
+
+    def delete(self, key: str) -> None:
+        # Signed DELETE of an object (the worker removes a source rejected by ffprobe re-admission).
+        url, headers = self._sign("DELETE", key, b"")
+        req = urllib.request.Request(url, method="DELETE")
         for name, value in headers.items():
             req.add_header(name, value)
         with self._opener.open(req, timeout=self._timeout) as resp:

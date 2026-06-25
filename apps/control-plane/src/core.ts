@@ -15,7 +15,18 @@ export interface Env {
   // Shared secret the media-worker presents to /internal/*. The SECRETS unit owns bootstrap +
   // zero-downtime rotation; here it is a single fail-closed bearer.
   INTERNAL_TOKEN?: string;
+  // Cloudflare Turnstile secret for the abuse gate's bot-friction layer (T2.4). A wrangler secret
+  // injected by SECRETS/deploy — absent here, so the gate is inert until then. Never in the repo.
+  TURNSTILE_SECRET?: string;
 }
+
+// Verifies a Turnstile token. (secret, token, remoteip) -> true iff valid. Injected via the router
+// so tests can stand in for Cloudflare's siteverify; the real impl lives in abuse.ts.
+export type TurnstileVerifier = (
+  secret: string,
+  token: string,
+  remoteip: string | null,
+) => Promise<boolean>;
 
 // Injected ambient capabilities (clock + id source) so handlers are deterministic under test.
 export interface Deps {
@@ -42,6 +53,7 @@ export interface Ctx {
   url: URL;
   params: Record<string, string>;
   actor: string | undefined;
+  verifyTurnstile: TurnstileVerifier;
 }
 
 // A request-level failure carrying an HTTP status + stable error code. Thrown by handlers and
