@@ -15,7 +15,7 @@ describe("GET /jobs/:id/download presign", () => {
       artifacts: JSON.stringify({ video_key: "artifacts/d1/v.mp4", srt_key: null }),
     });
     const { deps } = makeClock(2000);
-    const r = await call(env, deps, "GET", "/jobs/d1/download", { actor: "owner" });
+    const r = await call(env, deps, "GET", "/api/jobs/d1/download/video", { actor: "owner" });
     expect(r.status).toBe(200);
     expect(r.json.url).toContain("/ovt-media/artifacts/d1/v.mp4");
     expect(r.json.url).toContain("X-Amz-Signature=");
@@ -41,9 +41,27 @@ describe("GET /jobs/:id/download presign", () => {
       artifacts: JSON.stringify({ video_key: "artifacts/d3/v.mp4", srt_key: null }),
     });
     const { deps } = makeClock(2_000_000);
-    expect((await call(env, deps, "GET", "/jobs/d1/download", { actor: "intruder" })).status).toBe(404);
-    expect((await call(env, deps, "GET", "/jobs/d2/download", { actor: "owner" })).status).toBe(409);
-    expect((await call(env, deps, "GET", "/jobs/d3/download", { actor: "owner" })).status).toBe(410);
+    expect((await call(env, deps, "GET", "/api/jobs/d1/download/video", { actor: "intruder" })).status).toBe(404);
+    expect((await call(env, deps, "GET", "/api/jobs/d2/download/video", { actor: "owner" })).status).toBe(409);
+    expect((await call(env, deps, "GET", "/api/jobs/d3/download/video", { actor: "owner" })).status).toBe(410);
+  });
+
+  it("caps the presigned lifetime to the artifact's remaining TTL", async () => {
+    const { env, raw } = makeEnv({ r2Creds: true });
+    const now = 2000;
+    const expiresAt = now + 30_000; // only 30s of artifact TTL left (< 1h presign TTL)
+    insertJob(raw, {
+      job_id: "d4",
+      status: "done",
+      anon: "owner",
+      enqueue_at: 1000,
+      expires_at: expiresAt,
+      artifacts: JSON.stringify({ video_key: "artifacts/d4/v.mp4", srt_key: null }),
+    });
+    const r = await call(env, makeClock(now).deps, "GET", "/api/jobs/d4/download/video", { actor: "owner" });
+    expect(r.status).toBe(200);
+    expect(r.json.expires_at).toBe(expiresAt); // capped to remaining TTL, not now + presignTtl(1h)
+    expect(r.json.url).toContain("X-Amz-Expires=30");
   });
 });
 
@@ -52,9 +70,9 @@ describe("GET /jobs/:id owner scoping", () => {
     const { env, raw } = makeEnv();
     insertJob(raw, { job_id: "g1", anon: "owner", enqueue_at: 1000 });
     const { deps } = makeClock(2000);
-    expect((await call(env, deps, "GET", "/jobs/g1", { actor: "owner" })).status).toBe(200);
-    expect((await call(env, deps, "GET", "/jobs/g1", { actor: "intruder" })).status).toBe(404);
-    expect((await call(env, deps, "GET", "/jobs/missing", { actor: "owner" })).status).toBe(404);
+    expect((await call(env, deps, "GET", "/api/jobs/g1", { actor: "owner" })).status).toBe(200);
+    expect((await call(env, deps, "GET", "/api/jobs/g1", { actor: "intruder" })).status).toBe(404);
+    expect((await call(env, deps, "GET", "/api/jobs/missing", { actor: "owner" })).status).toBe(404);
   });
 
   it("public GET omits the server-only error_detail but keeps error_code", async () => {
@@ -66,7 +84,7 @@ describe("GET /jobs/:id owner scoping", () => {
       worker: WORKER,
       body: { claim_version: claim.json.claim_version, error_code: "internal_error", error_detail: "raw upstream stack trace" },
     });
-    const pub = await call(env, clock.deps, "GET", "/jobs/f1", { actor: "owner" });
+    const pub = await call(env, clock.deps, "GET", "/api/jobs/f1", { actor: "owner" });
     expect(pub.json.job.error_code).toBe("internal_error");
     expect("error_detail" in pub.json.job).toBe(false);
   });

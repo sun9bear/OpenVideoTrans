@@ -80,6 +80,7 @@ interface SessionRow {
   anon_or_user_id: string;
   source_key: string;
   declared_bytes: number;
+  declared_type: string;
   status: string;
   expires_at: number;
 }
@@ -92,7 +93,7 @@ export async function verifyUpload(
   uploadSessionId: string,
 ): Promise<VerifiedUpload> {
   const row = await ctx.env.DB.prepare(
-    `SELECT anon_or_user_id, source_key, declared_bytes, status, expires_at
+    `SELECT anon_or_user_id, source_key, declared_bytes, declared_type, status, expires_at
        FROM upload_sessions WHERE upload_session_id = ?`,
   )
     .bind(uploadSessionId)
@@ -118,6 +119,18 @@ export async function verifyUpload(
       .bind(uploadSessionId)
       .run();
     throw new HttpError(413, "upload_too_large", "uploaded object exceeds the size cap");
+  }
+  // Verify the actual object type matches what was declared (the type half of the post-PUT HEAD
+  // check, plan §endpoints). Mismatch -> delete + reject. Note: R2's content-type is client-set, so
+  // the authoritative format gate remains the worker's ffprobe admission (T2.4); this rejects the
+  // honest-mismatch / wrong-extension case cheaply at admission.
+  const actualType = obj.httpMetadata?.contentType;
+  if (actualType !== undefined && actualType !== row.declared_type) {
+    await ctx.env.MEDIA.delete(row.source_key);
+    await ctx.env.DB.prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ?`)
+      .bind(uploadSessionId)
+      .run();
+    throw new HttpError(422, "source_verify_failed", "uploaded object type does not match the declared type");
   }
 
   // Atomic single-consumer: the conditional UPDATE serializes on D1's single primary, so of two

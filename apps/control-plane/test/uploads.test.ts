@@ -12,7 +12,7 @@ describe("POST /uploads/sign", () => {
   it("creates a pending session and returns a presigned PUT scoped to the source key", async () => {
     const { env, raw } = makeEnv({ r2Creds: true });
     const { deps } = makeClock(1_700_000_000_000);
-    const r = await call(env, deps, "POST", "/uploads/sign", {
+    const r = await call(env, deps, "POST", "/api/uploads/sign", {
       actor: "anon_alice",
       body: { declared_bytes: 1024, declared_type: "video/mp4" },
     });
@@ -29,12 +29,12 @@ describe("POST /uploads/sign", () => {
   it("rejects an oversized declared size (413) and an unknown type (415)", async () => {
     const { env } = makeEnv({ r2Creds: true });
     const { deps } = makeClock(1);
-    const big = await call(env, deps, "POST", "/uploads/sign", {
+    const big = await call(env, deps, "POST", "/api/uploads/sign", {
       actor: "a",
       body: { declared_bytes: 999 * 1024 * 1024 * 1024, declared_type: "video/mp4" },
     });
     expect(big.status).toBe(413);
-    const badType = await call(env, deps, "POST", "/uploads/sign", {
+    const badType = await call(env, deps, "POST", "/api/uploads/sign", {
       actor: "a",
       body: { declared_bytes: 10, declared_type: "application/x-msdownload" },
     });
@@ -44,13 +44,13 @@ describe("POST /uploads/sign", () => {
   it("fails closed (503) when storage is unconfigured, and requires an actor (401)", async () => {
     const noStore = makeEnv();
     const { deps } = makeClock(1);
-    const r = await call(noStore.env, deps, "POST", "/uploads/sign", {
+    const r = await call(noStore.env, deps, "POST", "/api/uploads/sign", {
       actor: "a",
       body: { declared_bytes: 10, declared_type: "video/mp4" },
     });
     expect(r.status).toBe(503);
     const withStore = makeEnv({ r2Creds: true });
-    const anon = await call(withStore.env, deps, "POST", "/uploads/sign", {
+    const anon = await call(withStore.env, deps, "POST", "/api/uploads/sign", {
       body: { declared_bytes: 10, declared_type: "video/mp4" },
     });
     expect(anon.status).toBe(401);
@@ -63,7 +63,7 @@ describe("POST /jobs — HEAD-after-PUT verification", () => {
     deps: ReturnType<typeof makeClock>["deps"],
     actor: string,
   ) {
-    const r = await call(env, deps, "POST", "/uploads/sign", {
+    const r = await call(env, deps, "POST", "/api/uploads/sign", {
       actor,
       body: { declared_bytes: 1000, declared_type: "video/mp4" },
     });
@@ -75,7 +75,7 @@ describe("POST /jobs — HEAD-after-PUT verification", () => {
     const { deps } = makeClock(1_000_000);
     const s = await sign(env, deps, "u1");
     r2.putSized(s.source_key, 2048);
-    const create = await call(env, deps, "POST", "/jobs", {
+    const create = await call(env, deps, "POST", "/api/jobs", {
       actor: "u1",
       body: { upload_session_id: s.upload_session_id, ...SUB },
     });
@@ -93,7 +93,7 @@ describe("POST /jobs — HEAD-after-PUT verification", () => {
     const { deps } = makeClock(1_000_000);
     const s = await sign(env, deps, "u1");
     r2.putSized(s.source_key, 600 * 1024 * 1024); // > 500 MiB cap
-    const create = await call(env, deps, "POST", "/jobs", {
+    const create = await call(env, deps, "POST", "/api/jobs", {
       actor: "u1",
       body: { upload_session_id: s.upload_session_id, ...SUB },
     });
@@ -107,11 +107,24 @@ describe("POST /jobs — HEAD-after-PUT verification", () => {
     const { env } = makeEnv({ r2Creds: true });
     const { deps } = makeClock(1_000_000);
     const s = await sign(env, deps, "u1");
-    const create = await call(env, deps, "POST", "/jobs", {
+    const create = await call(env, deps, "POST", "/api/jobs", {
       actor: "u1",
       body: { upload_session_id: s.upload_session_id, ...SUB },
     });
     expect(create.status).toBe(422);
+  });
+
+  it("uploaded type mismatching the declared type -> deleted + source_verify_failed (422)", async () => {
+    const { env, r2 } = makeEnv({ r2Creds: true });
+    const { deps } = makeClock(1_000_000);
+    const s = await sign(env, deps, "u1");
+    r2.putSized(s.source_key, 2048, "application/zip"); // declared video/mp4, actual zip
+    const create = await call(env, deps, "POST", "/api/jobs", {
+      actor: "u1",
+      body: { upload_session_id: s.upload_session_id, ...SUB },
+    });
+    expect(create.status).toBe(422);
+    expect(r2.has(s.source_key)).toBe(false);
   });
 
   it("another actor cannot consume someone else's upload session (404)", async () => {
@@ -119,7 +132,7 @@ describe("POST /jobs — HEAD-after-PUT verification", () => {
     const { deps } = makeClock(1_000_000);
     const s = await sign(env, deps, "owner");
     r2.putSized(s.source_key, 2048);
-    const create = await call(env, deps, "POST", "/jobs", {
+    const create = await call(env, deps, "POST", "/api/jobs", {
       actor: "intruder",
       body: { upload_session_id: s.upload_session_id, ...SUB },
     });
@@ -131,7 +144,7 @@ describe("POST /jobs — HEAD-after-PUT verification", () => {
     const { deps } = makeClock(1_000_000);
     const s = await sign(env, deps, "u1");
     r2.putSized(s.source_key, 2048);
-    const create = await call(env, deps, "POST", "/jobs", {
+    const create = await call(env, deps, "POST", "/api/jobs", {
       actor: "u1",
       body: {
         upload_session_id: s.upload_session_id,

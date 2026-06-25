@@ -294,21 +294,29 @@ export async function fail(ctx: Ctx): Promise<Response> {
   return json({ job: rowToJob(after!) });
 }
 
-// GET /jobs/:id/download?artifact=video|srt — owner-scoped presigned GET; rejects not-done/expired.
+// GET /api/jobs/:id/download/:artifact (artifact = video|srt) — owner-scoped presigned GET; rejects
+// not-done/expired. The presign lifetime is capped to the artifact's remaining TTL so a URL minted
+// just before expires_at cannot outlive the advertised retention.
 export async function download(ctx: Ctx): Promise<Response> {
   const actor = ctx.actor!;
-  const which = ctx.url.searchParams.get("artifact") ?? "video";
+  const which = ctx.params.artifact!;
+  if (which !== "video" && which !== "srt") {
+    throw new HttpError(404, "not_found", "unknown artifact");
+  }
   const row = await getJobRow(ctx, ctx.params.id!);
   if (!row || row.anon_or_user_id !== actor) {
     throw new HttpError(404, "not_found", "job not found");
   }
   if (row.status !== "done") throw new HttpError(409, "not_ready", "job is not complete");
-  if (row.expires_at <= ctx.deps.now()) throw new HttpError(410, "expired", "artifacts expired");
+  const now = ctx.deps.now();
+  if (row.expires_at <= now) throw new HttpError(410, "expired", "artifacts expired");
   const artifacts = JSON.parse(row.artifacts) as { video_key?: string | null; srt_key?: string | null };
   const key = which === "srt" ? artifacts.srt_key : artifacts.video_key;
   if (!key) throw new HttpError(404, "not_found", "requested artifact not available");
   const creds = requireR2(ctx.env);
-  const now = ctx.deps.now();
+  // Cap to min(presign TTL, remaining artifact TTL).
+  const remainingSec = Math.floor((row.expires_at - now) / 1000);
+  const expiresSec = Math.min(ctx.config.presignTtlSec, remainingSec);
   const url = await presignR2Url({
     method: "GET",
     accountId: creds.accountId,
@@ -317,7 +325,7 @@ export async function download(ctx: Ctx): Promise<Response> {
     accessKeyId: creds.accessKeyId,
     secretAccessKey: creds.secretAccessKey,
     now,
-    expiresSec: ctx.config.presignTtlSec,
+    expiresSec,
   });
-  return json({ url, expires_at: now + ctx.config.presignTtlSec * 1000 });
+  return json({ url, expires_at: now + expiresSec * 1000 });
 }

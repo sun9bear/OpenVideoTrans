@@ -30,10 +30,11 @@ function route(method: string, path: string, auth: Auth, handler: Handler): Rout
 }
 
 const ROUTES: Route[] = [
-  route("POST", "/uploads/sign", "actor", signUpload),
-  route("POST", "/jobs", "actor", createJob),
-  route("GET", "/jobs/:id", "actor", getJob),
-  route("GET", "/jobs/:id/download", "actor", download),
+  // Public API surface (documented contract, plan §endpoints): /api prefix, artifact as a path segment.
+  route("POST", "/api/uploads/sign", "actor", signUpload),
+  route("POST", "/api/jobs", "actor", createJob),
+  route("GET", "/api/jobs/:id", "actor", getJob),
+  route("GET", "/api/jobs/:id/download/:artifact", "actor", download),
   route("POST", "/internal/jobs/claim", "worker", claimNext),
   route("POST", "/internal/jobs/:id/progress", "worker", heartbeat),
   route("POST", "/internal/jobs/:id/complete", "worker", complete),

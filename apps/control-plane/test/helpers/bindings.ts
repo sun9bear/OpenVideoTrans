@@ -6,14 +6,15 @@ import { makeD1, type RawDb } from "./d1";
 // In-memory R2 modelling only head/put/delete (+ a size-only seed so tests can simulate a browser
 // PUT of a given size without allocating the bytes).
 export class FakeR2 {
-  private readonly store = new Map<string, number>();
-  putSized(key: string, size: number): void {
-    this.store.set(key, size);
+  private readonly store = new Map<string, { size: number; contentType: string }>();
+  // Simulate a browser PUT of a given size + content-type (defaults to a valid declared type).
+  putSized(key: string, size: number, contentType = "video/mp4"): void {
+    this.store.set(key, { size, contentType });
   }
   async head(key: string): Promise<R2Object | null> {
-    const size = this.store.get(key);
-    if (size === undefined) return null;
-    return { key, size } as unknown as R2Object;
+    const obj = this.store.get(key);
+    if (obj === undefined) return null;
+    return { key, size: obj.size, httpMetadata: { contentType: obj.contentType } } as unknown as R2Object;
   }
   async delete(key: string): Promise<void> {
     this.store.delete(key);
