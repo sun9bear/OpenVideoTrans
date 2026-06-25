@@ -11,19 +11,25 @@ describe("mime — resolveUploadType", () => {
     expect(resolveUploadType({ name: "clip.avi", type: "" })).toBe("video/x-msvideo");
   });
 
-  it("infers by extension when the browser MIME is octet-stream (not allowlisted)", () => {
+  it("infers by extension when the browser MIME is octet-stream (treated as indeterminate)", () => {
     expect(resolveUploadType({ name: "clip.mov", type: "application/octet-stream" })).toBe("video/quicktime");
   });
 
-  it("returns null for a genuinely unsupported file", () => {
-    expect(resolveUploadType({ name: "doc.pdf", type: "application/pdf" })).toBeNull();
+  it("trusts a concrete browser MIME even if not in the local mirror (server is authoritative)", () => {
+    // a runtime-expanded server allowlist (CFG-GUARD) may accept this; the client must not hard-block
+    expect(resolveUploadType({ name: "x.3gp", type: "video/3gpp" })).toBe("video/3gpp");
+  });
+
+  it("returns null only when no declared_type can be formed (blank type + unknown extension)", () => {
     expect(resolveUploadType({ name: "noext", type: "" })).toBeNull();
+    expect(resolveUploadType({ name: "data.bin", type: "application/octet-stream" })).toBeNull();
   });
 });
 
 describe("mime — unsupportedTypeWarning", () => {
-  it("warns only when the format cannot be resolved", () => {
+  it("warns only when no declared_type can be formed (the sole hard gate)", () => {
     expect(unsupportedTypeWarning({ name: "movie.mkv", type: "" })).toBeNull();
-    expect(unsupportedTypeWarning({ name: "doc.pdf", type: "application/pdf" })).toContain("暂不支持");
+    expect(unsupportedTypeWarning({ name: "clip.3gp", type: "video/3gpp" })).toBeNull(); // server decides
+    expect(unsupportedTypeWarning({ name: "noext", type: "" })).toContain("无法识别");
   });
 });

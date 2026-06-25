@@ -36,18 +36,26 @@ function extOf(name: string): string {
   return dot === -1 ? "" : name.slice(dot + 1).toLowerCase();
 }
 
-// Resolve an allowlisted declared_type for a file, or null if it is genuinely unsupported. Prefer the
-// browser MIME when it is itself allowlisted; otherwise fall back to an extension mapping. The result
-// MUST be used for BOTH the declared_type and the PUT Content-Type — verifyUpload requires the R2
-// object's content-type to equal the declared_type, and the current upload reuses one value for both.
+// Browser types we treat as "indeterminate" — the OS gave no useful MIME, so we infer from extension.
+const INDETERMINATE = new Set(["", "application/octet-stream", "application/x-octet-stream"]);
+
+// Resolve a sendable declared_type for a file, or null when we genuinely cannot form one. We do NOT
+// hard-block on the local allowlist mirror (the server cap/allowlist is runtime-configurable via
+// CFG-GUARD and may accept more than these defaults): a concrete browser MIME is TRUSTED and passed
+// through so the server stays authoritative. Only a blank/octet-stream type is inferred from the
+// extension — and null (indeterminate) is the sole client-side hard gate. The result MUST be used for
+// BOTH declared_type and the PUT Content-Type (verifyUpload requires them to match; the upload reuses
+// one value for both).
 export function resolveUploadType(file: { name: string; type: string }): string | null {
-  if (file.type && (ALLOWED_UPLOAD_TYPES as readonly string[]).includes(file.type)) return file.type;
-  return EXT_TO_TYPE[extOf(file.name)] ?? null;
+  if (!INDETERMINATE.has(file.type)) return file.type; // OS-provided concrete type -> trust the server
+  return EXT_TO_TYPE[extOf(file.name)] ?? null; // indeterminate -> infer by extension, else give up
 }
 
-// zh-Hans warning when a file's format is not server-supported (null when resolvable).
+// zh-Hans warning ONLY when no declared_type can be formed (blank type + unknown extension). This is
+// the one hard gate; a possibly-unsupported-but-concrete type is left to the server's authoritative
+// 415, per CFG-GUARD's runtime-configurable allowlist.
 export function unsupportedTypeWarning(file: { name: string; type: string }): string | null {
   return resolveUploadType(file) === null
-    ? "暂不支持该文件格式，请上传 mp4 / mov / webm / mkv / avi / mp3 / m4a / wav 等常见音视频格式。"
+    ? "无法识别文件格式，请上传 mp4 / mov / webm / mkv / avi / mp3 / m4a / wav 等常见音视频文件。"
     : null;
 }

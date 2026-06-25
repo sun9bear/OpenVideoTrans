@@ -44,23 +44,32 @@
   // response outlives the interval (or a poll from a superseded submit) is dropped when its captured
   // gen no longer matches — setInterval can't cancel an in-flight fetch, so this guards the race.
   let pollGen = 0;
+  // A createJob whose upload finished but is waiting on a fresh Turnstile token (T2.4 gate). The
+  // token is requested AFTER the upload so it can't expire mid-upload; the widget callback resumes it.
+  let pendingBody: CreateJobBody | null = null;
 
   onMount(() => {
     const anonId = ensureAnonId(document, location.protocol === "https:");
     api = new ApiClient(API_BASE, anonId);
     if (turnstileEnabled() && turnstileEl) {
-      renderTurnstile(
-        turnstileEl,
-        (t) => (turnstileToken = t),
-        () => (turnstileToken = ""),
-      )
+      renderTurnstile(turnstileEl, onTurnstileToken, () => (turnstileToken = ""))
         .then((h) => (turnstileHandle = h))
         .catch(() => {
-          // script load failed -> leave the token empty so submit stays gated (fail closed)
+          // script load failed -> leave the token empty so a gated submit waits (fail closed)
         });
     }
     return () => stopPolling();
   });
+
+  // Turnstile solved (or refreshed): record the token and, if an uploaded job is waiting on it, create.
+  function onTurnstileToken(token: string) {
+    turnstileToken = token;
+    if (pendingBody) {
+      const body = pendingBody;
+      pendingBody = null;
+      void runCreate(body);
+    }
+  }
 
   function resetTurnstile() {
     turnstileToken = "";
@@ -71,8 +80,12 @@
   const typeWarn = $derived(file ? unsupportedTypeWarning(file) : null);
   const durationWarn = $derived(file && durationSec ? longVideoWarning(durationSec, outputMode) : null);
   const busy = $derived(phase === "working" || phase === "polling");
-  const needsChallenge = $derived(turnstileEnabled() && !turnstileToken);
-  const canSubmit = $derived(!!file && !sizeWarn && !typeWarn && !busy && !needsChallenge);
+  // sizeWarn is ADVISORY only (the byte cap is runtime-configurable server-side via CFG-GUARD; a stale
+  // client mirror must not hard-block a file the server would accept). typeWarn is the one hard gate
+  // because it means no declared_type can be formed at all. The Turnstile token is NOT a submit gate —
+  // the upload runs first and the token is required only at createJob (handled post-upload), so a
+  // token solved during the upload stays fresh.
+  const canSubmit = $derived(!!file && !typeWarn && !busy);
 
   async function onFile(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
@@ -114,12 +127,12 @@
     job = null;
     srtUrl = "";
     videoUrl = "";
+    pendingBody = null;
     phase = "working";
     statusText = "上传中…";
     try {
       const sign = await api.signUpload(file.size, type);
       await api.putSource(sign.put_url, file, type);
-      statusText = "创建任务…";
       // exactOptionalPropertyTypes: only attach advisory_duration_ms when we actually have a duration.
       const body: CreateJobBody = {
         upload_session_id: sign.upload_session_id,
@@ -129,9 +142,28 @@
         subtitle_lang: subtitleLang,
       };
       if (durationSec) body.advisory_duration_ms = Math.round(durationSec * 1000);
+      // The upload is done. If the abuse gate is on and we don't hold a fresh token (never solved, or
+      // it expired during a slow upload), park the job and wait for the widget callback to resume it.
+      if (turnstileEnabled() && !turnstileToken) {
+        pendingBody = body;
+        statusText = "请完成人机验证以提交…";
+        return;
+      }
+      await runCreate(body);
+    } catch (e) {
+      resetTurnstile();
+      fail(e);
+    }
+  }
+
+  // Create the job once any required Turnstile token is in hand (the upload already happened).
+  async function runCreate(body: CreateJobBody) {
+    if (!api) return;
+    try {
       if (turnstileToken) body.turnstile_token = turnstileToken;
+      statusText = "创建任务…";
       job = await api.createJob(body);
-      resetTurnstile(); // the token was consumed by the server's abuse gate; force a fresh one next time
+      resetTurnstile(); // the token is single-use; force a fresh challenge for the next job
       phase = "polling";
       statusText = "排队中…";
       startPolling(job.job_id);
@@ -255,7 +287,7 @@
       <div class="field">
         <span>人机验证</span>
         <div bind:this={turnstileEl}></div>
-        {#if needsChallenge}<small>请完成上方人机验证后再提交。</small>{/if}
+        <small>可在上传期间完成；验证通过后会自动继续提交。</small>
       </div>
     {/if}
 

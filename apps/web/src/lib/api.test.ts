@@ -23,6 +23,15 @@ describe("ApiClient", () => {
     expect(JSON.parse(init!.body as string)).toEqual({ declared_bytes: 2048, declared_type: "video/mp4" });
   });
 
+  it("normalizes a trailing slash in the API base so routes are not doubled", async () => {
+    const fetchFn = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ upload_session_id: "us", source_key: "k", put_url: "u", expires_at: 1 }),
+    );
+    const api = new ApiClient("https://cp.example/", "anon_abc", fetchFn as unknown as typeof fetch);
+    await api.signUpload(1, "video/mp4");
+    expect(fetchFn.mock.calls[0]![0]).toBe("https://cp.example/api/uploads/sign"); // not //api
+  });
+
   it("createJob returns the job and sends the full body", async () => {
     const fetchFn = vi.fn(async (_url: string, _init?: RequestInit) =>
       jsonResponse({ job: { job_id: "job_1", status: "queued", output_mode: "subtitle_only", error_code: null, artifacts: {} } }),

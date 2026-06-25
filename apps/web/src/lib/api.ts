@@ -28,11 +28,16 @@ interface ErrorBody {
 type FetchFn = typeof fetch;
 
 export class ApiClient {
+  private readonly baseUrl: string;
   constructor(
-    private readonly baseUrl: string,
+    baseUrl: string,
     private readonly anonId: string,
     private readonly fetchFn: FetchFn = fetch,
-  ) {}
+  ) {
+    // Trim trailing slashes so a configured VITE_API_BASE like "https://cp.example/" does not produce
+    // "https://cp.example//api/..." — the Worker router matches the exact "/api/..." path and would 404.
+    this.baseUrl = baseUrl.replace(/\/+$/, "");
+  }
 
   private headers(json: boolean): Record<string, string> {
     const h: Record<string, string> = { "X-OVT-Anon-Id": this.anonId };
