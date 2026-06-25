@@ -203,6 +203,38 @@ describe("purgeExpired — 24h artifact/source TTL", () => {
     expect(row.status).toBe("done"); // AD-17: no 'expired' state; UI derives it
   });
 
+  it("keeps purging other jobs after one job's R2 delete fails (no backlog pinning)", async () => {
+    // CodeX P2: the scan returns the oldest un-stamped row first, so an un-isolated throw lets a
+    // persistently-failing job pin the TTL backlog. Per-row isolation purges the rest + retries it.
+    const { env, r2, raw } = makeEnv();
+    insertJob(raw, {
+      job_id: "jobA",
+      enqueue_at: 0,
+      status: "done",
+      expires_at: 1000, // oldest -> scanned first
+      artifacts: JSON.stringify({ video_key: "artifacts/jobA/1/v.mp4", srt_key: null }),
+    });
+    insertJob(raw, {
+      job_id: "jobB",
+      enqueue_at: 1,
+      status: "done",
+      expires_at: 1001,
+      artifacts: JSON.stringify({ video_key: "artifacts/jobB/1/v.mp4", srt_key: null }),
+    });
+    r2.putSized("artifacts/jobA/1/v.mp4", 1);
+    r2.putSized("artifacts/jobB/1/v.mp4", 1);
+    const origDelete = (env.MEDIA as any).delete.bind(env.MEDIA);
+    (env.MEDIA as any).delete = async (keys: string | string[]) => {
+      const arr = Array.isArray(keys) ? keys : [keys];
+      if (arr.some((k) => k.includes("jobA"))) throw new Error("R2 transient on jobA");
+      return origDelete(keys);
+    };
+    // jobA fails first, but the loop continues and purges jobB; the error still surfaces.
+    await expect(purgeExpired(env.DB, env.MEDIA, 10_000, 200)).rejects.toThrow();
+    expect(jobRow(raw, "jobB").data_purged_at).toBe(10_000); // purged despite jobA failing
+    expect(jobRow(raw, "jobA").data_purged_at).toBeNull(); // not stamped -> retried next tick
+  });
+
   it("is idempotent — a second pass purges nothing", async () => {
     const { env, r2, raw } = makeEnv();
     insertJob(raw, {

@@ -76,20 +76,30 @@ export async function purgeExpired(
     .all<ArtifactRow>();
 
   let purged = 0;
+  let firstError: unknown;
   for (const row of rows.results) {
-    // Delete EVERY attempt's artifacts under the job prefix, not just the keys on the job row: a
-    // reclaimed job can leave artifacts/<job>/<stale_cv>/... from a superseded worker whose /complete
-    // 409'd, and those keys are never recorded in jobs.artifacts. Plus the source object (the
-    // intermediate "成片后尽早删源", §263). List+delete is idempotent, so a tick that crashes mid-purge
-    // retries cleanly — data_purged_at is stamped only after the deletes.
-    await deletePrefix(r2, `artifacts/${row.job_id}/`);
-    await r2.delete(`uploads/${row.upload_session_id}`);
-    const res = await db
-      .prepare(`UPDATE jobs SET data_purged_at = ? WHERE job_id = ? AND data_purged_at IS NULL`)
-      .bind(now, row.job_id)
-      .run();
-    purged += res.meta.changes;
+    // Per-row isolation: one job's R2 failure must not abort the loop. The scan returns the OLDEST
+    // un-stamped rows first, so an un-isolated throw would let a single persistently-failing job pin
+    // the whole TTL backlog and leak newer expired artifacts. Collect the error, keep purging the
+    // rest, surface it after the loop (the failed row retries next tick — data_purged_at is unset).
+    try {
+      // Delete EVERY attempt's artifacts under the job prefix, not just the keys on the job row: a
+      // reclaimed job can leave artifacts/<job>/<stale_cv>/... from a superseded worker whose
+      // /complete 409'd, and those keys are never recorded in jobs.artifacts. Plus the source object
+      // (the intermediate "成片后尽早删源", §263). List+delete is idempotent, so a tick that crashes
+      // mid-purge retries cleanly — data_purged_at is stamped only after the deletes succeed.
+      await deletePrefix(r2, `artifacts/${row.job_id}/`);
+      await r2.delete(`uploads/${row.upload_session_id}`);
+      const res = await db
+        .prepare(`UPDATE jobs SET data_purged_at = ? WHERE job_id = ? AND data_purged_at IS NULL`)
+        .bind(now, row.job_id)
+        .run();
+      purged += res.meta.changes;
+    } catch (e) {
+      if (firstError === undefined) firstError = e;
+    }
   }
+  if (firstError !== undefined) throw firstError;
   return purged;
 }
 
