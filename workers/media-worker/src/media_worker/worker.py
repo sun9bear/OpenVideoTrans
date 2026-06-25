@@ -39,8 +39,12 @@ def source_key_for(job: Job) -> str:
     Mirrors the control plane's signUpload convention (apps/control-plane/src/uploads.ts):
     ``uploads/${upload_session_id}``. The schemas Job intentionally omits source_key, so the worker
     re-derives it from upload_session_id (a deterministic, no-client-path server convention).
+
+    upload_session_id is server-issued, but it is validated as a safe component defensively so a
+    malformed/hostile value can never inject a path or query separator into the R2 object URL.
     """
-    return f"uploads/{job.upload_session_id}"
+    session = safe_component(job.upload_session_id, label="upload_session_id")
+    return f"uploads/{session}"
 
 
 def artifact_key(job_id: str, claim_version: int, name: str) -> str:
@@ -158,7 +162,8 @@ def process_job(
         key = artifact_key(job_id, claim_version, name)
         storage.upload(key, out_path.read_bytes(), content_type=content_type)
         cp.complete(job_id, claim_version, artifacts={field: key})
-        logger.info("job %s completed (stub copy -> %s)", job_id, key)
+        # Log the job id only — not the (job_id, claim_version) pair the artifact key encodes.
+        logger.info("job %s completed (stub copy)", job_id)
     except Exception:
         # Fail closed. error_detail is omitted on purpose: exception text can carry a path/URL,
         # so it must never reach the control plane / user (the stable error_code is enough).
@@ -198,7 +203,11 @@ def run_forever(
     base.mkdir(parents=True, exist_ok=True)
     cleared = clean_orphan_workdirs(base)
     if cleared:
-        logger.info("cleared %d orphan workdir(s) at startup", len(cleared))
+        # List the names (job ids, never secrets) so an unexpected non-job dir under the dedicated
+        # jobs base is visible in the log rather than silently destroyed.
+        logger.info(
+            "cleared %d orphan workdir(s) at startup: %s", len(cleared), ", ".join(sorted(cleared))
+        )
     cfg = config if config is not None else cp.get_config()
     while stop_event is None or not stop_event.is_set():
         try:

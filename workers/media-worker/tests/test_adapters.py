@@ -115,6 +115,10 @@ def test_s3_storage_upload_puts_bytes() -> None:
     req = opener.requests[0]
     assert req.get_method() == "PUT"
     assert req.data == b"PAYLOAD"
+    assert req.get_header("Content-type") == "video/mp4"
+    # Content-Type is part of the signed header set (integrity-protected by the signature).
+    auth = req.get_header("Authorization")
+    assert auth is not None and "content-type" in auth
 
 
 # ── HTTP control plane ───────────────────────────────────────────────────────

@@ -23,6 +23,13 @@ def test_source_key_matches_control_plane_convention() -> None:
     assert source_key_for(make_job(upload_session_id="us_xyz")) == "uploads/us_xyz"
 
 
+def test_source_key_rejects_unsafe_session_id() -> None:
+    # Defense-in-depth: a hostile upload_session_id can't inject a path/query separator.
+    for bad in ("../evil", "a/b", "x?y", "*"):
+        with pytest.raises(PathEscapeError):
+            source_key_for(make_job(upload_session_id=bad))
+
+
 def test_closed_loop_copies_source_to_artifact_and_completes(tmp_path: Path) -> None:
     job = make_job(job_id="job_a", upload_session_id="us_a", output_mode="dub_only")
     cp = FakeControlPlane(config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)])

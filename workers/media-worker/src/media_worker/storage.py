@@ -70,7 +70,9 @@ class S3Storage:
         self._clock = clock if clock is not None else _utcnow
         self._timeout = timeout
 
-    def _sign(self, method: str, key: str, payload: bytes) -> tuple[str, dict[str, str]]:
+    def _sign(
+        self, method: str, key: str, payload: bytes, extra: Mapping[str, str] | None = None
+    ) -> tuple[str, dict[str, str]]:
         url = self._s.url_for(key)
         headers = sign_request(
             method=method,
@@ -81,6 +83,7 @@ class S3Storage:
             secret_key=self._s.secret_access_key,
             payload=payload,
             amz_datetime=self._clock(),
+            extra_headers=extra,
         )
         return url, headers
 
@@ -94,9 +97,9 @@ class S3Storage:
         return data
 
     def upload(self, key: str, data: bytes, *, content_type: str) -> None:
-        url, headers = self._sign("PUT", key, data)
+        # Content-Type joins the signed header set (its integrity is covered by the signature).
+        url, headers = self._sign("PUT", key, data, {"Content-Type": content_type})
         req = urllib.request.Request(url, data=data, method="PUT")
-        req.add_header("Content-Type", content_type)  # sent unsigned (not part of the SigV4 set)
         for name, value in headers.items():
             req.add_header(name, value)
         with self._opener.open(req, timeout=self._timeout) as resp:
