@@ -85,6 +85,12 @@ def test_egress_ruleset_invariants() -> None:
     bare = good + "\n      tcp dport 443 accept\n"
     assert any("destination-constrained" in m for m in g.egress_ruleset_violations(bare))
 
+    # an accept containing an allowlist token in a BROADER expression must still be flagged:
+    negated = good + "\n      ip daddr != @egress_allow accept\n"  # everything-except the set
+    assert any("destination-constrained" in m for m in g.egress_ruleset_violations(negated))
+    ct_new = good + "\n      ct state new,established,related accept\n"  # NEW = broad new outbound
+    assert any("destination-constrained" in m for m in g.egress_ruleset_violations(ct_new))
+
 
 def test_admit_before_produce() -> None:
     reject = "\nSourceRejected\n_delete_source_quietly("

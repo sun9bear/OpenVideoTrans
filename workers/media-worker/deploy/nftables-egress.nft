@@ -18,7 +18,11 @@
 # enabled-provider hostnames and keeps the @egress_allow set current so a provider's IP rotation is
 # not missed (backlog T2.5/DEPLOY: "DNS 刷新不漏新 IP，与 T2.4 SSRF CI 一致"). The set is empty here.
 
-flush ruleset
+# SCOPED, idempotent reset: create-if-absent then delete only THIS table, so re-applying never
+# errors and never wipes other host tables (e.g. an INPUT default-drop / SSH-only policy). A bare
+# `flush ruleset` here would delete every table on the box — including unrelated inbound protection.
+table inet ovt_egress {}
+delete table inet ovt_egress
 
 table inet ovt_egress {
 	# Allowed egress destinations: the control plane + R2 + enabled provider IPs, written by the

@@ -107,10 +107,19 @@ def download_owner_guarded(download_fn: str) -> bool:
     )
 
 
-# An accept rule is only sanctioned if it is destination-constrained to an allowlisted target:
-# the named egress sets, conntrack return traffic, loopback, or the pinned DNS resolver. Anything
-# else (a bare `tcp dport 443 accept`, `ct state new accept`, a negated daddr) re-opens egress.
-_SANCTIONED_ACCEPT = ("@egress_allow", "established,related", 'oif "lo"', "oif lo")
+def _sanctioned_accept(line: str) -> bool:
+    """A (whitespace-normalized) accept rule is sanctioned only if it is POSITIVELY destination-
+    constrained: a negated match (`!=`, everything-except) or a conntrack set that includes `new`
+    re-opens egress and is rejected, even though it contains an allowlist token."""
+    if "!=" in line:  # negated destination (everything-except the set) re-opens egress
+        return False
+    if "ct state" in line:  # conntrack: only the exact established,related return set (no NEW)
+        return "established,related" in line and "new" not in line
+    if 'oif "lo"' in line or "oif lo" in line:  # loopback
+        return True
+    if "@egress_allow" in line:  # positive allowlist set (negation already excluded above)
+        return True
+    return "1.1.1.1" in line and "dport 53" in line  # the pinned DNS resolver only
 
 
 def egress_ruleset_violations(nft: str) -> list[str]:
@@ -127,19 +136,17 @@ def egress_ruleset_violations(nft: str) -> list[str]:
     for v6 in ("fc00::/7", "fe80::/10", "::1/128"):
         if v6 not in nft:
             out.append(f"egress must drop IPv6 ULA/link-local/loopback ({v6})")
-    # Allowlist (not blacklist) the accept paths: every accept must be destination-constrained, so a
-    # broad accept that is not literally "0.0.0.0/0" cannot slip through.
+    # Allowlist (not blacklist) the accept paths: every accept must be positively destination-
+    # constrained, so a broad accept (bare port, negated set, or a NEW-state conntrack) is flagged
+    # even when it is not literally "0.0.0.0/0".
     for raw in nft.splitlines():
-        line = raw.strip()
+        line = " ".join(raw.split())  # normalize tabs / runs of spaces
         if not line.endswith("accept"):
             continue
-        sanctioned = any(s in line for s in _SANCTIONED_ACCEPT) or (
-            "1.1.1.1" in line and "dport 53" in line
-        )
-        if not sanctioned:
+        if not _sanctioned_accept(line):
             out.append(
-                "egress accept must be destination-constrained to @egress_allow / loopback / "
-                f"established / pinned DNS, not a broad accept: {line!r}"
+                "egress accept must be positively destination-constrained to @egress_allow / "
+                f"loopback / established-only / pinned DNS, not a broad accept: {line!r}"
             )
     return out
 
