@@ -1,0 +1,35 @@
+name: D1 claim spike (M2 remote hard gate)
+
+# Manual only. Runs the T2.0 optimistic-lock job claim against a REAL Cloudflare D1 database to
+# prove exactly-once-under-concurrency on real D1 (the local SQLite half runs in the normal CI).
+# It is deliberately NOT triggered on push/PR — it hits a real account, so it runs only when asked:
+#   gh workflow run "D1 claim spike (M2 remote hard gate)"
+#
+# The harness uses an isolated table (_ovt_spike_jobs), dropped before and after, so it never
+# touches the control-plane `jobs` table T2.1 will own. The API token is injected as a secret and
+# only ever sent in the Authorization header (never logged). Account/database ids are repo variables.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  remote-d1-spike:
+    name: Remote D1 claim spike (20 consumers x 100 jobs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # stdlib-only (urllib/json/threading) — no dependency install needed.
+      - name: Run remote D1 spike
+        working-directory: apps/control-plane
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          OVT_D1_DATABASE_ID: ${{ vars.OVT_D1_DATABASE_ID }}
+        run: python -m spike.remote_d1
