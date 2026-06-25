@@ -217,11 +217,12 @@ export async function cleanUploadOrphans(
 }
 
 // Duty 4 — reconcile the queue. Returns the ids of `queued` jobs that have waited longer than
-// staleMs. In the D1-claim adapter this is a read-only liveness check: the jobs table is the
-// authoritative worklist, so these stay claimable by long-poll claim() regardless of any external
-// queue signal — they cannot be stranded by a lost CF-Queues message. The actual re-enqueue of a
-// wake-message belongs to the CF-Queues adapter (T2.5, which depends on T2.3); this returns exactly
-// the worklist T2.5 will re-signal, and feeds OBS metrics meanwhile.
+// staleMs. This is a read-only liveness/metric check: the jobs table is the authoritative worklist,
+// so these stay claimable by long-poll claim() regardless of any external queue signal — they cannot
+// be stranded by a lost CF-Queues message. T2.5 deliberately does NOT re-emit a wake for this set:
+// the same rows recur every tick (enqueue_at is immutable), so re-waking them would storm the queue
+// during a worker outage (CodeX bot P2); the D1 long-poll backstop already serves them. runSweep
+// re-wakes only the requeue STATE TRANSITION. The count feeds OBS.
 export async function reconcileQueue(
   db: D1Database,
   now: number,
@@ -249,11 +250,12 @@ export async function reconcileQueue(
 // stale-queued threshold of one lease TTL flags a job that has sat unclaimed longer than a worker
 // would hold it.
 //
-// T2.5: every job that became (re)claimable this tick — requeued by recoverLeases OR surfaced stale by
-// reconcileQueue — gets a fresh best-effort wake re-emitted through the producer (no-op under the d1
-// backend; a CF-Queues send under cf_queues). This completes the bridge symmetry: createJob is no
-// longer the only wake site, so a recovered/stale job is re-signalled instead of waiting for the next
-// poll. The producer defaults from config+bindings so the scheduled handler need not thread it.
+// T2.5: a lost-worker job that recoverLeases flips running->queued this tick gets a fresh best-effort
+// wake re-emitted through the producer (no-op under d1; a CF-Queues send under cf_queues) — that is a
+// real, bounded state transition, so createJob is no longer the only wake site. Stale-queued jobs are
+// NOT re-woken (see the wake duty below: re-waking the same recurring rows every tick would storm the
+// queue; the D1 long-poll backstop serves them). The producer defaults from config+bindings so the
+// scheduled handler need not thread it.
 export async function runSweep(
   env: Env,
   deps: Deps,
@@ -264,7 +266,6 @@ export async function runSweep(
   const summary: SweepSummary = { purged: 0, requeued: 0, workerLost: 0, orphans: 0, reconciled: 0 };
   const errors: unknown[] = [];
   let requeuedIds: string[] = [];
-  let reconciledIds: string[] = [];
   const duty = async (run: () => Promise<void>): Promise<void> => {
     try {
       await run();
@@ -286,14 +287,19 @@ export async function runSweep(
     summary.orphans = await cleanUploadOrphans(env.DB, env.MEDIA, now);
   });
   await duty(async () => {
-    reconciledIds = await reconcileQueue(env.DB, now, config.leaseTtlMs);
-    summary.reconciled = reconciledIds.length;
+    summary.reconciled = (await reconcileQueue(env.DB, now, config.leaseTtlMs)).length;
   });
-  // Re-signal the (re)claimable set, deduped (a requeued job can also be surfaced by reconcile). Each
-  // wake is best-effort (the producer swallows a send blip) and isolated, so it never fails the sweep
-  // — D1 stays authoritative and the worker's long-poll claim is the backstop regardless.
+  // Re-signal ONLY a real state transition: a lost worker's job that recoverLeases flipped
+  // running->queued THIS tick (bounded — at most once per lease loss; next tick it is queued, not
+  // running, so it is not requeued again). Stale-queued jobs are deliberately NOT re-woken here:
+  // reconcileQueue returns the SAME rows every tick (enqueue_at is immutable), so re-waking them would
+  // send a duplicate wake per stale job per minute during a worker outage (CodeX bot P2). They are
+  // already served by the D1 long-poll backstop (the spec's no-orphan acceptance); a per-job throttled
+  // re-wake would need a last_wake_at column + audit -> routed to CFG-GUARD/OBS, out of this spike.
+  // Each wake is best-effort (the producer swallows a send blip) and isolated, so it never fails the
+  // sweep — D1 stays authoritative regardless.
   await duty(async () => {
-    for (const id of new Set([...requeuedIds, ...reconciledIds])) {
+    for (const id of requeuedIds) {
       await producer.wake(id);
     }
   });

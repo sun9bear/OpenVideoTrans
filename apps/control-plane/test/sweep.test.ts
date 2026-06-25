@@ -527,10 +527,10 @@ describe("runSweep — all four duties in one pass", () => {
   });
 });
 
-// ── T2.5: the sweeper re-emits wakes for every (re)claimable job (CodeX CLI P2-2) ──────────────────
+// ── T2.5: the sweeper re-wakes only a real state transition; no stale-job wake storm (CodeX bot P2) ──
 describe("runSweep — wake re-signal (T2.5 bridge symmetry)", () => {
   function seed(raw: RawDb) {
-    // a lost worker (expired lease, attempt < max) -> recoverLeases requeues it
+    // a lost worker (expired lease, attempt < max) -> recoverLeases requeues it (a real transition)
     insertJob(raw, {
       job_id: "lost",
       enqueue_at: 0,
@@ -539,20 +539,32 @@ describe("runSweep — wake re-signal (T2.5 bridge symmetry)", () => {
       claim_version: 1,
       lease_expires_at: 1000,
     });
-    // a long-aged queued job whose original wake is gone -> reconcileQueue surfaces it
+    // a long-aged queued job that just sits there -> reconcileQueue surfaces it, but it is NOT a
+    // transition, so it must NOT be re-woken (the D1 long-poll backstop serves it).
     insertJob(raw, { job_id: "stale", enqueue_at: 0 });
   }
 
-  it("cf_queues backend: re-signals the requeued ∪ reconciled set, deduped", async () => {
+  it("cf_queues: re-signals ONLY the requeue state transition, not stale-queued jobs", async () => {
     const queue = new FakeQueue();
     const { env, raw } = makeEnv({ jobQueue: queue });
     seed(raw);
     const now = LEASE + 100_000;
     await runSweep(env, { now: () => now, newId: (p) => p }, { ...DEFAULT_CONFIG, queueBackend: "cf_queues" });
-    // 'lost' is requeued AND (now queued+aged) reconciled — it must be woken exactly once (dedup).
-    const ids = queue.sent.map((m) => m.job_id);
-    expect(new Set(ids)).toEqual(new Set(["lost", "stale"]));
-    expect(ids.filter((id) => id === "lost")).toHaveLength(1);
+    // 'lost' flipped running->queued this tick -> woken once. 'stale' was already queued -> NOT woken.
+    expect(queue.sent.map((m) => m.job_id)).toEqual(["lost"]);
+  });
+
+  it("cf_queues: a stale-queued job is NOT re-woken across ticks (no wake storm)", async () => {
+    const queue = new FakeQueue();
+    const { env, raw } = makeEnv({ jobQueue: queue });
+    seed(raw);
+    const cfg = { ...DEFAULT_CONFIG, queueBackend: "cf_queues" as const };
+    // tick 1: 'lost' requeued+woken once; 'stale' not woken.
+    await runSweep(env, { now: () => LEASE + 100_000, newId: (p) => p }, cfg);
+    // tick 2 (a minute later): 'lost' is now queued (not running) -> not requeued -> not re-woken;
+    // 'stale' is still queued -> still not woken. So NO duplicate wakes accumulate over ticks.
+    await runSweep(env, { now: () => LEASE + 160_000, newId: (p) => p }, cfg);
+    expect(queue.sent.map((m) => m.job_id)).toEqual(["lost"]); // exactly one wake total, ever
   });
 
   it("d1 backend (default): emits NO wake even with a queue bound", async () => {
