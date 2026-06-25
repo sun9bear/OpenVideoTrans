@@ -94,6 +94,16 @@
   const turnstileBroken = $derived(turnstileEnabled() && turnstileFailed);
   const canSubmit = $derived(!!file && !typeWarn && !busy && !turnstileBroken);
 
+  // If the widget breaks WHILE a submission is parked waiting for a token, fail it rather than leaving
+  // the form stuck in `working` forever (R4-A). The upload is already spent; the user can reload/retry.
+  $effect(() => {
+    if (turnstileFailed && pendingBody) {
+      pendingBody = null;
+      phase = "failed";
+      errorMsg = "人机验证加载失败，请刷新页面后重试。";
+    }
+  });
+
   async function onFile(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
     file = input.files?.[0] ?? null;
@@ -153,8 +163,14 @@
         subtitle_lang: subtitleLang,
       };
       if (durationSec) body.advisory_duration_ms = Math.round(durationSec * 1000);
-      // The upload is done. If the abuse gate is on and we don't hold a fresh token (never solved, or
-      // it expired during a slow upload), park the job and wait for the widget callback to resume it.
+      // The upload is done. If the gate is on but the widget is broken, no token can ever arrive — fail
+      // now (don't park forever). Otherwise, if we don't hold a fresh token (never solved, or it expired
+      // during a slow upload), park the job; the widget callback resumes it via runCreate.
+      if (turnstileEnabled() && turnstileFailed) {
+        phase = "failed";
+        errorMsg = "人机验证加载失败，请刷新页面后重试。";
+        return;
+      }
       if (turnstileEnabled() && !turnstileToken) {
         pendingBody = body;
         statusText = "请完成人机验证以提交…";
@@ -179,6 +195,21 @@
       statusText = "排队中…";
       startPolling(job.job_id);
     } catch (e) {
+      // A Turnstile 403 (token expired/rejected) fires in admitJob BEFORE verifyUpload, so the upload
+      // session is still valid — keep the uploaded body pending and ask for a fresh token instead of
+      // forcing a full re-upload. If the widget is now broken, fail (no token can arrive).
+      if (e instanceof ApiError && (e.code === "challenge_required" || e.code === "challenge_failed")) {
+        resetTurnstile();
+        if (turnstileFailed) {
+          phase = "failed";
+          errorMsg = "人机验证加载失败，请刷新页面后重试。";
+          return;
+        }
+        pendingBody = body;
+        phase = "working";
+        statusText = "验证已过期，请重新完成人机验证…";
+        return;
+      }
       resetTurnstile();
       fail(e);
     }
