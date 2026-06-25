@@ -265,14 +265,27 @@ export async function complete(ctx: Ctx): Promise<Response> {
   const artifacts = JSON.stringify({ video_key: videoKey ?? null, srt_key: srtKey ?? null });
   const existing = await getJobRow(ctx, jobId);
   if (!existing) throw new HttpError(404, "not_found", "job not found");
-  await ctx.env.DB.prepare(
+  const res = await ctx.env.DB.prepare(
     `UPDATE jobs SET status = 'done', finished_at = ?, artifacts = ?, current_stage = 'done', lease_expires_at = NULL
        WHERE job_id = ? AND status = 'running' AND claim_version = ?`,
   )
     .bind(ctx.deps.now(), artifacts, jobId, claimVersion)
     .run();
   const after = await getJobRow(ctx, jobId);
+  guardTerminal(res.meta.changes, after!.status);
   return json({ job: rowToJob(after!) });
+}
+
+// A guarded terminal UPDATE that matched 0 rows is one of two things:
+//   • the job is ALREADY terminal (done/failed) — a duplicate/late call; first-terminal-wins makes
+//     it an idempotent no-op, so return the winning state (200).
+//   • the job is NOT terminal under this claim_version — the lease lapsed and the sweeper re-queued
+//     it (or another worker re-claimed it). This worker is stale: 409 so it stops and does NOT report
+//     a discarded completion as success (the same guard heartbeat() applies on lease loss).
+function guardTerminal(changes: number, status: string): void {
+  if (changes === 0 && status !== "done" && status !== "failed") {
+    throw new HttpError(409, "stale_claim", "claim superseded or job not running");
+  }
 }
 
 // POST /internal/jobs/:id/fail — idempotent terminal failure, same first-terminal-wins guard.
@@ -284,13 +297,14 @@ export async function fail(ctx: Ctx): Promise<Response> {
   const errorDetail = optString(body, "error_detail");
   const existing = await getJobRow(ctx, jobId);
   if (!existing) throw new HttpError(404, "not_found", "job not found");
-  await ctx.env.DB.prepare(
+  const res = await ctx.env.DB.prepare(
     `UPDATE jobs SET status = 'failed', finished_at = ?, error_code = ?, error_detail = ?, current_stage = 'failed', lease_expires_at = NULL
        WHERE job_id = ? AND status = 'running' AND claim_version = ?`,
   )
     .bind(ctx.deps.now(), errorCode, errorDetail ?? null, jobId, claimVersion)
     .run();
   const after = await getJobRow(ctx, jobId);
+  guardTerminal(res.meta.changes, after!.status);
   return json({ job: rowToJob(after!) });
 }
 

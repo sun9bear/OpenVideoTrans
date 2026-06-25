@@ -17,8 +17,15 @@ export class FakeR2 {
     if (obj === undefined) return null;
     return { key, size: obj.size, httpMetadata: { contentType: obj.contentType } } as unknown as R2Object;
   }
-  async delete(key: string): Promise<void> {
-    this.store.delete(key);
+  // R2Bucket.delete accepts a single key or an array of keys (used by the sweeper's prefix purge).
+  async delete(keys: string | string[]): Promise<void> {
+    for (const k of Array.isArray(keys) ? keys : [keys]) this.store.delete(k);
+  }
+  // Minimal R2Bucket.list: prefix filter, never truncated (test object counts are tiny).
+  async list(opts?: { prefix?: string }): Promise<{ objects: { key: string }[]; truncated: false }> {
+    const prefix = opts?.prefix ?? "";
+    const objects = [...this.store.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key }));
+    return { objects, truncated: false };
   }
   has(key: string): boolean {
     return this.store.has(key);
@@ -136,6 +143,37 @@ export function insertJob(raw: RawDb, o: JobSeed): void {
       o.artifacts ?? "{}",
       o.attempt ?? 0,
       o.claim_version ?? 0,
+    );
+}
+
+export interface UploadSessionSeed {
+  upload_session_id: string;
+  created_at: number;
+  expires_at: number;
+  status?: string;
+  source_key?: string;
+  anon?: string;
+  declared_bytes?: number;
+  declared_type?: string;
+}
+
+// Seed an upload_sessions row directly for orphan-sweep tests (bypasses the presign flow).
+export function insertUploadSession(raw: RawDb, o: UploadSessionSeed): void {
+  raw
+    .prepare(
+      `INSERT INTO upload_sessions
+         (upload_session_id, anon_or_user_id, source_key, declared_bytes, declared_type, status, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      o.upload_session_id,
+      o.anon ?? "anon_seed",
+      o.source_key ?? `uploads/${o.upload_session_id}`,
+      o.declared_bytes ?? 1024,
+      o.declared_type ?? "video/mp4",
+      o.status ?? "pending",
+      o.created_at,
+      o.expires_at,
     );
 }
 

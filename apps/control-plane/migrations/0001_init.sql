@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     priority               INTEGER NOT NULL DEFAULT 0,       -- reserved operator boost; comparator key 0
     advisory_duration_ms   INTEGER,                          -- browser hint, SORT-ONLY (hard cap = ffprobe)
     enqueue_at             INTEGER NOT NULL,                 -- ms; aging + FIFO tiebreak
-    deadline_at            INTEGER NOT NULL,                 -- ms; anti-starvation backstop (enforced by sweeper, T2.3)
+    deadline_at            INTEGER NOT NULL,                 -- ms; anti-starvation backstop (routed to M2-CLOSE; T2.3 sweeper does TTL/lease/orphan/reconcile)
     created_at             INTEGER NOT NULL,
     started_at             INTEGER,                          -- ms; first claim time (kept across re-claims)
     lease_expires_at       INTEGER,                          -- ms; NULL unless running
