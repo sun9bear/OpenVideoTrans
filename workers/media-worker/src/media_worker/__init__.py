@@ -13,6 +13,8 @@ from .control_plane import (
     ControlPlaneError,
     HttpControlPlane,
     StaleClaimError,
+    WorkerCredentials,
+    parse_credentials,
 )
 from .storage import R2Settings, S3Storage, Storage, StorageError
 from .worker import (
@@ -37,6 +39,8 @@ __all__ = [
     "ControlPlaneError",
     "HttpControlPlane",
     "StaleClaimError",
+    "WorkerCredentials",
+    "parse_credentials",
     "R2Settings",
     "S3Storage",
     "Storage",

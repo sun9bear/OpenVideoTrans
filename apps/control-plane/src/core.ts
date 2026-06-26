@@ -12,9 +12,21 @@ export interface Env {
   R2_BUCKET?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
-  // Shared secret the media-worker presents to /internal/*. The SECRETS unit owns bootstrap +
-  // zero-downtime rotation; here it is a single fail-closed bearer.
+  // Shared bootstrap secret the media-worker presents to /internal/*. SECRETS owns rotation: the
+  // worker box holds ONLY this secret and pulls every other credential from /internal/credentials.
   INTERNAL_TOKEN?: string;
+  // Staged "next" bootstrap secret. requireWorker accepts EITHER current or next so a rotation has a
+  // zero-downtime overlap window (set next → roll workers onto it → promote next to current → drop
+  // old). A wrangler secret injected at deploy; absent outside a rotation.
+  INTERNAL_TOKEN_NEXT?: string;
+  // Free-provider API keys served (only over the authed /internal/credentials channel) to the worker
+  // so they never live on the worker box. Names only — wrangler secrets injected at deploy by the
+  // owner (red line: never in the repo, never logged). A provider absent here is simply unavailable
+  // to the free pool. Cloudflare Workers AI needs BOTH the account id and the API token.
+  GROQ_API_KEY?: string;
+  CF_AI_ACCOUNT_ID?: string;
+  CF_AI_API_TOKEN?: string;
+  DEEPL_API_KEY?: string;
   // Cloudflare Turnstile secret for the abuse gate's bot-friction layer (T2.4). The binding name
   // MUST match the deployment secret (docs prep-checklist: TURNSTILE_SECRET_KEY) or the gate stays
   // silently inert in production. A wrangler secret injected by SECRETS/deploy — never in the repo.

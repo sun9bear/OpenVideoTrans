@@ -7,7 +7,9 @@ status, never the response body (which could echo a secret) or the token.
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -16,6 +18,7 @@ from typing import Any, Protocol
 from ovt_schemas import Job
 
 from .config import WorkerConfig, parse_config
+from .storage import R2Settings
 
 
 @dataclass(frozen=True)
@@ -26,11 +29,78 @@ class Claim:
 
 
 class ControlPlaneError(RuntimeError):
-    """A control-plane call failed (a non-2xx other than the modeled 409)."""
+    """A control-plane call failed (a non-2xx other than the modeled 409). Carries the HTTP status
+    (when known) so the dual-token retry can recognize a 401 without re-parsing the message."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class StaleClaimError(ControlPlaneError):
     """The lease was reclaimed (409): this worker no longer owns the job and must stop renewing."""
+
+
+@dataclass(frozen=True)
+class WorkerCredentials:
+    """Secrets pulled from the control plane at startup and held in MEMORY ONLY — never written to
+    the worker box's disk (SECRETS #21). ``r2`` drives the storage client; ``providers`` carries
+    each configured free provider's keys for the FREE-POOL adapters to consume."""
+
+    r2: R2Settings
+    providers: Mapping[str, Mapping[str, str]]
+
+
+def parse_credentials(payload: Mapping[str, Any]) -> WorkerCredentials:
+    """Parse a /internal/credentials response into WorkerCredentials. Raises ControlPlaneError
+    naming a missing FIELD (never a secret value) so a misconfigured control plane fails loud."""
+    r2 = payload.get("r2")
+    if not isinstance(r2, Mapping):
+        raise ControlPlaneError("GET /internal/credentials -> missing r2 settings")
+
+    def r2_field(name: str) -> str:
+        # Validate the VALUE, not just key presence: a present-but-null/non-str/empty field must
+        # fail loud at this bootstrap trust boundary rather than str()-coercing to junk
+        # (str(None)->"None") that only surfaces as a confusing S3/DNS error at first I/O. The error
+        # names the field, never the value.
+        value = r2.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ControlPlaneError(f"GET /internal/credentials -> invalid r2 field {name!r}")
+        return value
+
+    settings = R2Settings(
+        account_id=r2_field("accountId"),
+        bucket=r2_field("bucket"),
+        access_key_id=r2_field("accessKeyId"),
+        secret_access_key=r2_field("secretAccessKey"),
+    )
+    raw = payload.get("providers")
+    providers: dict[str, Mapping[str, str]] = {}
+    if isinstance(raw, Mapping):
+        for name, fields in raw.items():
+            if isinstance(fields, Mapping):
+                providers[str(name)] = {str(k): str(v) for k, v in fields.items()}
+    return WorkerCredentials(r2=settings, providers=providers)
+
+
+# Hosts allowed over plaintext http for local dev only (DEVLOOP). Everything else MUST be https.
+_DEV_PLAINTEXT_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def require_secure_base(base_url: str) -> None:
+    """Fail closed unless the control-plane URL is TLS (https). Every /internal call carries the
+    bootstrap bearer, and /internal/credentials returns the R2 + provider secrets, so a plaintext
+    http origin would expose them all (SECRETS contract: TLS + shared-secret auth). A narrow
+    localhost exception keeps local dev usable. Raises ControlPlaneError naming only the scheme."""
+    parsed = urllib.parse.urlsplit(base_url)
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme == "http" and (parsed.hostname or "").lower() in _DEV_PLAINTEXT_HOSTS:
+        return
+    raise ControlPlaneError(
+        f"control-plane URL must be https (scheme {parsed.scheme!r}); refusing to send "
+        "credentials over plaintext"
+    )
 
 
 class ControlPlane(Protocol):
@@ -49,19 +119,30 @@ class HttpControlPlane:
     """ControlPlane over HTTP(S) against the control-plane Worker's /internal endpoints."""
 
     def __init__(
-        self, base_url: str, token: str, *, opener: Any = None, timeout: float = 30.0
+        self,
+        base_url: str,
+        token: str,
+        *,
+        next_token: str | None = None,
+        opener: Any = None,
+        timeout: float = 30.0,
     ) -> None:
+        require_secure_base(base_url)  # fail closed on a plaintext control-plane URL
         self._base = base_url.rstrip("/")
         self._auth = f"Bearer {token}"
+        # Staged next bootstrap secret for a zero-downtime rotation (SECRETS): if the current token
+        # is rejected (401), _call retries once with `next` and promotes it. None when not rotating.
+        self._next_auth = f"Bearer {next_token}" if next_token else None
+        # The worker calls the control plane from BOTH the main thread and the heartbeat thread, so
+        # the token state is shared. This lock guards ONLY the in-memory snapshot + promotion (never
+        # held across network I/O), so a concurrent rotation can't poison _auth (e.g. set it None).
+        self._auth_lock = threading.Lock()
         self._opener = opener if opener is not None else urllib.request.build_opener()
         self._timeout = timeout
 
-    def _call(
-        self, method: str, path: str, body: Mapping[str, Any] | None = None
-    ) -> dict[str, Any]:
-        data = json.dumps(body).encode() if body is not None else None
+    def _send(self, method: str, path: str, data: bytes | None, auth: str) -> dict[str, Any]:
         req = urllib.request.Request(f"{self._base}{path}", data=data, method=method)
-        req.add_header("Authorization", self._auth)
+        req.add_header("Authorization", auth)
         if data is not None:
             req.add_header("Content-Type", "application/json")
         try:
@@ -71,14 +152,47 @@ class HttpControlPlane:
             if e.code == 409:
                 raise StaleClaimError(f"{method} {path} -> 409 stale_claim") from None
             # Never include the response body (it could echo a secret) — status + path only.
-            raise ControlPlaneError(f"{method} {path} -> {e.code}") from None
+            raise ControlPlaneError(f"{method} {path} -> {e.code}", status=e.code) from None
         if not raw:
             return {}
         parsed: Any = json.loads(raw)
         return parsed if isinstance(parsed, dict) else {}
 
+    def _call(
+        self, method: str, path: str, body: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        data = json.dumps(body).encode() if body is not None else None
+        with self._auth_lock:
+            auth, next_auth = self._auth, self._next_auth  # snapshot; don't hold the lock over I/O
+        try:
+            return self._send(method, path, data, auth)
+        except ControlPlaneError as err:
+            # Zero-downtime rotation: our current bootstrap secret was retired (401). Retry once
+            # with the staged `next` token and, on success, promote it so later calls skip the
+            # retry. A 401 means the rejected request did nothing server-side, so re-sending the
+            # same body is safe. A 409 (StaleClaimError, status None) never matches here, so the
+            # lease signal stays intact.
+            if err.status == 401 and next_auth is not None:
+                result = self._send(method, path, data, next_auth)
+                self._promote(next_auth)
+                return result
+            raise
+
+    def _promote(self, used: str) -> None:
+        # Promote a successfully-used `next` token to current exactly once. CAS under the lock so a
+        # concurrent retry on another thread (heartbeat vs main) can't double-promote and clobber
+        # _auth to None: only the thread that still sees `used` staged wins; the rest are no-ops.
+        with self._auth_lock:
+            if self._next_auth == used:
+                self._auth = used
+                self._next_auth = None
+
     def get_config(self) -> WorkerConfig:
         return parse_config(self._call("GET", "/internal/config"))
+
+    def get_credentials(self) -> WorkerCredentials:
+        # Bootstrap pull (SECRETS): R2 storage creds + free-provider keys over the authed channel.
+        return parse_credentials(self._call("GET", "/internal/credentials"))
 
     def claim(self) -> Claim | None:
         resp = self._call("POST", "/internal/jobs/claim")

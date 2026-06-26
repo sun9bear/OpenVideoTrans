@@ -115,11 +115,13 @@ describe("internal config + credentials + auth", () => {
     expect(JSON.stringify(r.json)).not.toContain(WORKER);
   });
 
-  it("/internal/credentials is disabled (501) and returns no credentials", async () => {
-    const { env } = makeEnv({ internalToken: WORKER });
+  it("/internal/credentials is enabled by SECRETS and fail-closed (503) without storage creds", async () => {
+    // SECRETS (#21) opened the former 501 stub. With no storage creds configured it fails closed
+    // (503) rather than returning a half-empty payload. The full contract lives in credentials.test.ts.
+    const { env } = makeEnv({ internalToken: WORKER }); // r2Creds intentionally unset
     const r = await call(env, makeClock(1).deps, "GET", "/internal/credentials", { worker: WORKER });
-    expect(r.status).toBe(501);
-    expect(r.json.error.code).toBe("not_implemented");
+    expect(r.status).toBe(503);
+    expect(r.json.error.code).toBe("credentials_unconfigured");
   });
 
   it("internal endpoints reject a bad bearer (401) and fail closed when unconfigured (503)", async () => {

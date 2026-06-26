@@ -58,9 +58,19 @@ export class FakeKV {
 
 export interface TestEnvOptions {
   internalToken?: string;
+  // Staged "next" bootstrap secret for the SECRETS zero-downtime rotation overlap window.
+  internalTokenNext?: string;
   r2Creds?: boolean;
   turnstileSecret?: string;
   jobQueue?: FakeQueue;
+  // Free-provider secrets served by /internal/credentials (SECRETS). Keys are the exact Env names so
+  // a test sets exactly the subset it wants configured (an unset provider is omitted from the payload).
+  providerSecrets?: {
+    GROQ_API_KEY?: string;
+    CF_AI_ACCOUNT_ID?: string;
+    CF_AI_API_TOKEN?: string;
+    DEEPL_API_KEY?: string;
+  };
 }
 
 export function makeEnv(opts: TestEnvOptions = {}): {
@@ -77,6 +87,8 @@ export function makeEnv(opts: TestEnvOptions = {}): {
     MEDIA: r2 as unknown as R2Bucket,
     CONFIG: kv as unknown as KVNamespace,
     ...(opts.internalToken !== undefined ? { INTERNAL_TOKEN: opts.internalToken } : {}),
+    ...(opts.internalTokenNext !== undefined ? { INTERNAL_TOKEN_NEXT: opts.internalTokenNext } : {}),
+    ...(opts.providerSecrets ?? {}),
     ...(opts.turnstileSecret !== undefined ? { TURNSTILE_SECRET_KEY: opts.turnstileSecret } : {}),
     ...(opts.jobQueue !== undefined
       ? { JOB_QUEUE: opts.jobQueue as unknown as Queue<WakeMessage> }

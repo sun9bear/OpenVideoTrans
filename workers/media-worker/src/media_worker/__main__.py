@@ -1,10 +1,15 @@
 """Entry point: ``python -m media_worker`` runs the claim loop against the control plane + R2.
 
 Config from env (secrets are read from env ONLY — never logged or passed on a command line):
-  OVT_CONTROL_PLANE_URL   base URL of the control plane
-  OVT_INTERNAL_TOKEN      worker bearer token (the /internal shared secret)
-  OVT_WORKDIR             jobs scratch dir (default /var/lib/ovt/jobs)
-  R2_ACCOUNT_ID / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY   R2 S3 credentials
+  OVT_CONTROL_PLANE_URL    base URL of the control plane
+  OVT_INTERNAL_TOKEN       worker bootstrap shared secret (the /internal bearer)
+  OVT_INTERNAL_TOKEN_NEXT  optional staged next bootstrap secret (zero-downtime rotation)
+  OVT_WORKDIR              jobs scratch dir (default /var/lib/ovt/jobs)
+
+The box holds ONLY the bootstrap secret(s) (SECRETS #21): the R2 storage creds and the free-provider
+API keys are pulled from the control plane's /internal/credentials at startup and kept in memory —
+never on the box disk. R2 creds drive the storage client; the provider creds are held (in `creds`,
+alive for the worker's lifetime) for the FREE-POOL adapters to consume (routed).
 """
 from __future__ import annotations
 
@@ -13,8 +18,10 @@ import os
 from pathlib import Path
 
 from .control_plane import HttpControlPlane
-from .storage import R2Settings, S3Storage
+from .storage import S3Storage
 from .worker import run_forever
+
+logger = logging.getLogger("media_worker")
 
 
 def main() -> int:
@@ -23,9 +30,17 @@ def main() -> int:
     )
     base_url = os.environ["OVT_CONTROL_PLANE_URL"]
     token = os.environ["OVT_INTERNAL_TOKEN"]
+    next_token = os.environ.get("OVT_INTERNAL_TOKEN_NEXT") or None
     workdir = Path(os.environ.get("OVT_WORKDIR", "/var/lib/ovt/jobs"))
-    cp = HttpControlPlane(base_url, token)
-    storage = S3Storage(R2Settings.from_env(os.environ))
+    cp = HttpControlPlane(base_url, token, next_token=next_token)
+    # Pull R2 + free-provider creds over the authed /internal channel and keep them in memory only.
+    creds = cp.get_credentials()
+    storage = S3Storage(creds.r2)
+    # Log provider NAMES only — never a key value.
+    logger.info(
+        "pulled worker credentials: storage configured; providers available: %s",
+        ", ".join(sorted(creds.providers)) or "(none)",
+    )
     run_forever(cp, storage, workdir_base=workdir)
     return 0
 
