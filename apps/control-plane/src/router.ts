@@ -2,6 +2,7 @@ import type { Ctx, Deps, Env, QueueProducer, TurnstileVerifier } from "./core";
 import { HttpError, apiError, json, realDeps } from "./core";
 import { realTurnstileVerifier } from "./abuse";
 import { getConfig } from "./config";
+import { credentials } from "./credentials";
 import { selectProducer } from "./queue";
 import { signUpload } from "./uploads";
 import { claimNext, complete, createJob, download, fail, getJob, heartbeat } from "./jobs";
@@ -42,10 +43,9 @@ const ROUTES: Route[] = [
   route("POST", "/internal/jobs/:id/complete", "worker", complete),
   route("POST", "/internal/jobs/:id/fail", "worker", fail),
   route("GET", "/internal/config", "worker", (ctx) => json(ctx.config)),
-  // Inert stub: real free-provider credentials are enabled only by the SECRETS unit. Default disabled.
-  route("GET", "/internal/credentials", "worker", () =>
-    apiError(501, "not_implemented", "credentials endpoint disabled (enabled by the SECRETS unit)"),
-  ),
+  // SECRETS (#21): the worker's bootstrap pull — R2 storage creds + configured free-provider keys,
+  // over the authed /internal channel, fail-closed when storage is unset (see credentials.ts).
+  route("GET", "/internal/credentials", "worker", credentials),
 ];
 
 // Length-stable comparison so the internal-bearer check does not leak via timing.
@@ -65,10 +65,18 @@ function getActor(request: Request): string {
 }
 
 function requireWorker(request: Request, env: Env): void {
-  const token = env.INTERNAL_TOKEN;
-  if (!token) throw new HttpError(503, "internal_unconfigured", "internal endpoints are not configured");
+  const current = env.INTERNAL_TOKEN;
+  const next = env.INTERNAL_TOKEN_NEXT;
+  if (!current && !next) {
+    throw new HttpError(503, "internal_unconfigured", "internal endpoints are not configured");
+  }
   const header = request.headers.get("Authorization") ?? "";
-  if (!safeEqual(header, `Bearer ${token}`)) {
+  // Accept EITHER the current or the staged next bootstrap secret so a rotation has a zero-downtime
+  // overlap window (SECRETS). Both comparisons run (constant-time, no short-circuit) so which token
+  // matched never leaks via timing; the result is combined only after both have executed.
+  const okCurrent = current ? safeEqual(header, `Bearer ${current}`) : false;
+  const okNext = next ? safeEqual(header, `Bearer ${next}`) : false;
+  if (!okCurrent && !okNext) {
     throw new HttpError(401, "unauthorized", "invalid internal credentials");
   }
 }
