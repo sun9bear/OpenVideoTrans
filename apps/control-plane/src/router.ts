@@ -1,13 +1,13 @@
 import type { Ctx, Deps, Env, QueueProducer, TurnstileVerifier } from "./core";
 import { HttpError, apiError, json, realDeps } from "./core";
 import { realTurnstileVerifier } from "./abuse";
-import { getConfig } from "./config";
 import { credentials } from "./credentials";
 import { selectProducer } from "./queue";
+import { adminSetSetting, configEndpoint, getConfig, getSettingsAudit } from "./settings";
 import { signUpload } from "./uploads";
 import { claimNext, complete, createJob, download, fail, getJob, heartbeat } from "./jobs";
 
-type Auth = "actor" | "worker" | "none";
+type Auth = "actor" | "worker" | "admin" | "none";
 type Handler = (ctx: Ctx) => Promise<Response> | Response;
 
 interface Route {
@@ -42,10 +42,16 @@ const ROUTES: Route[] = [
   route("POST", "/internal/jobs/:id/progress", "worker", heartbeat),
   route("POST", "/internal/jobs/:id/complete", "worker", complete),
   route("POST", "/internal/jobs/:id/fail", "worker", fail),
-  route("GET", "/internal/config", "worker", (ctx) => json(ctx.config)),
+  route("GET", "/internal/config", "worker", configEndpoint),
   // SECRETS (#21): the worker's bootstrap pull — R2 storage creds + configured free-provider keys,
   // over the authed /internal channel, fail-closed when storage is unset (see credentials.ts).
   route("GET", "/internal/credentials", "worker", credentials),
+  // CFG-GUARD (#22): operator config changes go THROUGH the guard (validation + audit + version bump)
+  // — never a raw D1 edit. ADMIN auth (a SEPARATE ADMIN_TOKEN, not the shared worker bearer) so a
+  // media-worker compromise can't mutate config; the named operator rides in X-OVT-Actor for audit.
+  // Red-line keys are rejected 403 here.
+  route("POST", "/internal/admin/settings", "admin", adminSetSetting),
+  route("GET", "/internal/admin/settings/audit", "admin", getSettingsAudit),
 ];
 
 // Length-stable comparison so the internal-bearer check does not leak via timing.
@@ -62,6 +68,18 @@ function getActor(request: Request): string {
   // of ownership for presign + job access. Absent -> 401 (fail closed).
   if (!id) throw new HttpError(401, "unauthenticated", "missing actor identity");
   return id;
+}
+
+// Admin (operator) auth for the CFG-GUARD settings-mutation routes. A SEPARATE ADMIN_TOKEN from the
+// worker bearer: workers never hold it, so a worker compromise cannot change runtime config. Fail
+// closed (503) when unset — the admin surface is simply disabled until an operator credential exists.
+function requireAdmin(request: Request, env: Env): void {
+  const token = env.ADMIN_TOKEN;
+  if (!token) throw new HttpError(503, "admin_unconfigured", "admin endpoints are not configured");
+  const header = request.headers.get("Authorization") ?? "";
+  if (!safeEqual(header, `Bearer ${token}`)) {
+    throw new HttpError(401, "unauthorized", "invalid admin credentials");
+  }
 }
 
 function requireWorker(request: Request, env: Env): void {
@@ -100,6 +118,7 @@ export async function handle(
       });
       let actor: string | undefined;
       if (r.auth === "worker") requireWorker(request, env);
+      else if (r.auth === "admin") requireAdmin(request, env);
       else if (r.auth === "actor") actor = getActor(request);
       const config = await getConfig(env);
       // The queue_adapter producer is selected from config + bindings (cf_queues vs d1), injectable

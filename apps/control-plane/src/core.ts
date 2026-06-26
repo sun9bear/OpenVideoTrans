@@ -19,6 +19,10 @@ export interface Env {
   // zero-downtime overlap window (set next → roll workers onto it → promote next to current → drop
   // old). A wrangler secret injected at deploy; absent outside a rotation.
   INTERNAL_TOKEN_NEXT?: string;
+  // Operator/admin bearer for the CFG-GUARD settings-mutation routes (/internal/admin/*). SEPARATE
+  // from INTERNAL_TOKEN so a media-worker compromise can't change runtime config: the workers never
+  // hold this. A wrangler secret injected at deploy; when unset the admin routes fail closed (503).
+  ADMIN_TOKEN?: string;
   // Free-provider API keys served (only over the authed /internal/credentials channel) to the worker
   // so they never live on the worker box. Names only — wrangler secrets injected at deploy by the
   // owner (red line: never in the repo, never logged). A provider absent here is simply unavailable

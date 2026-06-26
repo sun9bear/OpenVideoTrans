@@ -1,7 +1,7 @@
 import type { ExportedHandler, MessageBatch } from "@cloudflare/workers-types";
 import type { Env, WakeMessage } from "./core";
 import { realDeps } from "./core";
-import { getConfig } from "./config";
+import { getConfig } from "./settings";
 import { handleQueueBatch } from "./queue";
 import { handle } from "./router";
 import { runSweep } from "./sweep";

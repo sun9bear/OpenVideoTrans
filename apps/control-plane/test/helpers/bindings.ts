@@ -43,11 +43,14 @@ export class FakeQueue {
   }
 }
 
-// In-memory KV modelling get("key","json"|"text").
+// In-memory KV modelling get("key","json"|"text") + put (CFG-GUARD's runtime_config hot cache).
 export class FakeKV {
   private readonly store = new Map<string, string>();
   setJson(key: string, value: unknown): void {
     this.store.set(key, JSON.stringify(value));
+  }
+  async put(key: string, value: string): Promise<void> {
+    this.store.set(key, value);
   }
   async get(key: string, type?: "text" | "json"): Promise<unknown> {
     const v = this.store.get(key);
@@ -60,6 +63,8 @@ export interface TestEnvOptions {
   internalToken?: string;
   // Staged "next" bootstrap secret for the SECRETS zero-downtime rotation overlap window.
   internalTokenNext?: string;
+  // Separate operator/admin bearer for the CFG-GUARD settings-mutation routes.
+  adminToken?: string;
   r2Creds?: boolean;
   turnstileSecret?: string;
   jobQueue?: FakeQueue;
@@ -88,6 +93,7 @@ export function makeEnv(opts: TestEnvOptions = {}): {
     CONFIG: kv as unknown as KVNamespace,
     ...(opts.internalToken !== undefined ? { INTERNAL_TOKEN: opts.internalToken } : {}),
     ...(opts.internalTokenNext !== undefined ? { INTERNAL_TOKEN_NEXT: opts.internalTokenNext } : {}),
+    ...(opts.adminToken !== undefined ? { ADMIN_TOKEN: opts.adminToken } : {}),
     ...(opts.providerSecrets ?? {}),
     ...(opts.turnstileSecret !== undefined ? { TURNSTILE_SECRET_KEY: opts.turnstileSecret } : {}),
     ...(opts.jobQueue !== undefined
@@ -209,6 +215,7 @@ export function insertUploadSession(raw: RawDb, o: UploadSessionSeed): void {
 export interface CallOpts {
   actor?: string;
   worker?: string;
+  admin?: string;
   body?: unknown;
   ip?: string;
   verifyTurnstile?: TurnstileVerifier;
@@ -225,6 +232,7 @@ export async function call(
   const headers: Record<string, string> = {};
   if (opts.actor !== undefined) headers["X-OVT-Anon-Id"] = opts.actor;
   if (opts.worker !== undefined) headers["Authorization"] = `Bearer ${opts.worker}`;
+  if (opts.admin !== undefined) headers["Authorization"] = `Bearer ${opts.admin}`;
   if (opts.ip !== undefined) headers["CF-Connecting-IP"] = opts.ip;
   let body: string | undefined;
   if (opts.body !== undefined) {
