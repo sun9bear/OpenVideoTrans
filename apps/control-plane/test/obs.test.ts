@@ -234,6 +234,29 @@ describe("OBS computeMetrics — derived read-view over D1", () => {
     expect(m.worker.running_overdue).toBe(0);
   });
 
+  it("reclaim clears stale progress_meta so metrics don't attribute the dead attempt's timing (@codex P2)", async () => {
+    const { env, raw } = makeEnv({ adminToken: ADMIN, internalToken: WORKER });
+    // a running job with an EXPIRED lease + telemetry from the now-dead prior attempt
+    insertJob(raw, {
+      job_id: "rc", enqueue_at: NOW, status: "running", claim_version: 1, attempt: 1,
+      lease_expires_at: NOW - 1, started_at: NOW,
+      current_stage: "tts", progress_meta: JSON.stringify({ stage: "tts", stage_elapsed_ms: 999_999 }),
+    });
+    const clock = makeClock(NOW + 1000);
+    // reclaim via CLAIM_SQL (status->running, claim_version++, progress_meta->NULL atomically)
+    const claimed = await call(env, clock.deps, "POST", "/internal/jobs/claim", { worker: WORKER, body: {} });
+    expect(claimed.json.job.job_id).toBe("rc");
+    expect(claimed.json.claim_version).toBe(2);
+    const row = raw
+      .prepare("SELECT progress_meta, current_stage FROM jobs WHERE job_id='rc'")
+      .get() as { progress_meta: string | null; current_stage: string };
+    expect(row.progress_meta).toBeNull();
+    expect(row.current_stage).toBe("claimed");
+    // the dead attempt's 999999ms elapsed is NOT aggregated into the snapshot
+    const m = await computeMetrics(env, NOW + 1000, DEFAULT_CONFIG);
+    expect(m.stages.elapsed_ms).toBeNull();
+  });
+
   it("metrics payload carries ONLY aggregates — no anon id / upload_session / artifact key / error_detail", async () => {
     const { env, raw } = makeEnv({ adminToken: ADMIN });
     insertJob(raw, {
