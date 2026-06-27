@@ -81,12 +81,14 @@ source = { editable = "workers/media-worker" }
 dependencies = [
     { name = "autodub-core" },
     { name = "ovt-schemas" },
+    { name = "provider-adapters" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "autodub-core", editable = "packages/autodub-core" },
     { name = "ovt-schemas", editable = "packages/schemas" },
+    { name = "provider-adapters", editable = "packages/provider-adapters" },
 ]
 
 [[package]]

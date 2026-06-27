@@ -18,6 +18,7 @@ import shutil
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from ovt_schemas.contracts import Transcript
 
@@ -39,6 +40,62 @@ class ProviderInfo:
 
 class ProviderUnavailable(RuntimeError):
     """A selected/required provider (or its key/binary) is not configured."""
+
+
+class QuotaExhausted(ProviderUnavailable):
+    """A FREE provider returned 429 / quota-exhausted. Subclasses ``ProviderUnavailable`` so every
+    existing ``except ProviderUnavailable`` path still treats the provider as unusable, while the
+    worker's FREE-POOL routing can catch THIS specifically to circuit-break the provider (report it
+    exhausted to the control plane + re-route to the next free provider — 429 不复撞) instead of
+    failing the job. Carries the provider name + the parsed Retry-After hint (delta-seconds,
+    when present); the worker computes the absolute resetAt against its OWN clock, so this
+    package stays clock-free (no time source / no import edge)."""
+
+    def __init__(
+        self,
+        provider: str,
+        *,
+        kind: str | None = None,
+        retry_after_sec: float | None = None,
+        message: str | None = None,
+    ) -> None:
+        super().__init__(message or f"{provider} quota exhausted (HTTP 429)")
+        self.provider = provider
+        self.kind = kind  # stage ('asr'|'mt'|'tts') it serves, so the worker re-routes that kind
+        self.retry_after_sec = retry_after_sec
+
+
+def parse_retry_after(resp: Any) -> float | None:
+    """Parse a ``Retry-After`` header in *delta-seconds* form into seconds; None when absent, an
+    HTTP-date (not parsed here — the worker uses a default reset), or unparseable. Header lookup
+    is case-insensitive and tolerant of any mapping shape (never raises)."""
+    getter = getattr(getattr(resp, "headers", None), "get", None)
+    if not callable(getter):
+        return None
+    raw = getter("Retry-After")
+    if raw is None:
+        raw = getter("retry-after")
+    if raw is None:
+        return None
+    try:
+        sec = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None  # HTTP-date form / garbage -> let the worker use its default reset
+    return sec if sec >= 0 else None
+
+
+def raise_quota_if_429(
+    resp: Any, provider: str, *, kind: str | None = None, extra: tuple[int, ...] = ()
+) -> None:
+    """Raise ``QuotaExhausted`` when ``resp`` is a rate-limit / quota status — 429, or a
+    provider-specific ``extra`` status (e.g. DeepL Free's 456). A no-op for every other status, so
+    the caller's existing ``>= 400`` branch keeps raising a plain ``ProviderUnavailable`` (a hard
+    error, NOT a circuit-break) for genuine failures. ``kind`` records the stage the adapter serves
+    so the worker re-routes just that kind. Call this BEFORE that branch at each adapter's HTTP
+    error check."""
+    status = getattr(resp, "status_code", 0)
+    if status == 429 or status in extra:
+        raise QuotaExhausted(provider, kind=kind, retry_after_sec=parse_retry_after(resp))
 
 
 class PaidProviderBlocked(RuntimeError):

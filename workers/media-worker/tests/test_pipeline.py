@@ -1,0 +1,182 @@
+"""M2-CLOSE (PR-A): the worker runs the REAL autodub-core pipeline with FREE-POOL routing.
+
+The routing / 429-rotation / artifact-collection logic is tested here with an INJECTED fake
+run_pipeline (no ffmpeg, so it runs in CI); the real-ffmpeg end-to-end run is proved by `just dev`
+(DEVLOOP) + autodub-core's e2e smoke. route_free only ever returns $0 ladder names, so the fakes
+use real provider names (cloudflare/groq/deepl/piper) while the FakeResolver ignores them.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import pytest
+from media_worker.control_plane import ProviderSnapshot
+from media_worker.pipeline import FreePoolExhausted, inject_provider_env, run_real_pipeline
+from mw_fakes import FakeControlPlane, FakeStorage, make_job
+from provider_adapters import LanguageError, QuotaExhausted
+
+
+def _make_key(job_id: str, cv: int, name: str) -> str:
+    return f"artifacts/{job_id}/{cv}/{name}"
+
+
+def _avail(mapping: dict[str, set[str]]) -> Callable[[str], frozenset[str]]:
+    return lambda kind: frozenset(mapping.get(kind, set()))
+
+
+class FakeRunPipeline:
+    """Stands in for autodub_core.run_pipeline: records the routed plan, optionally 429s a given
+    (kind, provider) ONCE, then writes the per-output_mode deliverables. No ffmpeg — CI-safe."""
+
+    def __init__(self, *, quota_fail: tuple[tuple[str, str], ...] = ()) -> None:
+        self.calls: list[dict[str, str]] = []
+        self._pending = set(quota_fail)
+
+    def __call__(
+        self, paths: Any, resolver: object, *, source: str, job: Any, **_kw: object
+    ) -> Path:
+        plan = {"asr": job.plan.asr, "mt": job.plan.mt, "tts": job.plan.tts}
+        self.calls.append(plan)
+        for kind in ("asr", "mt", "tts"):
+            key = (kind, plan[kind])
+            if key in self._pending:
+                self._pending.discard(key)
+                raise QuotaExhausted(plan[kind], kind=kind, retry_after_sec=30.0)
+        if job.output_mode in ("dub_only", "both"):
+            paths.dubbed_video.write_bytes(b"DUBBED-VIDEO")
+        if job.output_mode in ("subtitle_only", "both"):
+            paths.subtitles.write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n", encoding="utf-8")
+        return paths.dubbed_video if job.output_mode != "subtitle_only" else paths.subtitles
+
+
+# ── inject_provider_env (Piece 3) ─────────────────────────────────────────────
+def test_inject_provider_env_sets_keys_verbatim_and_returns_names() -> None:
+    env: dict[str, str] = {}
+    names = inject_provider_env(
+        {
+            "groq": {"GROQ_API_KEY": "gsk_x"},
+            "cloudflare": {"CLOUDFLARE_ACCOUNT_ID": "acct", "CLOUDFLARE_API_TOKEN": "tok"},
+            "deepl": {"DEEPL_API_KEY": "k:fx"},
+        },
+        environ=env,
+    )
+    assert env == {
+        "GROQ_API_KEY": "gsk_x", "CLOUDFLARE_ACCOUNT_ID": "acct",
+        "CLOUDFLARE_API_TOKEN": "tok", "DEEPL_API_KEY": "k:fx",
+    }
+    assert names == ["cloudflare", "deepl", "groq"]  # sorted NAMES only (redaction-safe log)
+
+
+def test_inject_provider_env_skips_provider_with_no_fields() -> None:
+    env: dict[str, str] = {}
+    out = inject_provider_env({"groq": {"GROQ_API_KEY": "x"}, "empty": {}}, environ=env)
+    assert out == ["groq"]  # a provider with no fields is not reported
+
+
+# ── run_real_pipeline routing (Piece 4) ───────────────────────────────────────
+def test_routes_free_providers_and_collects_dub_artifact(tmp_path: Path) -> None:
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="dub_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = FakeRunPipeline()
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=object(), run_pipeline_fn=run,
+        available_providers=_avail({"asr": {"cloudflare"}, "mt": {"deepl"}, "tts": {"piper"}}),
+        now_ms=lambda: 1000,
+    )
+    assert artifacts == {"video_key": "artifacts/job_x/1/output.mp4"}
+    assert ("artifacts/job_x/1/output.mp4", "video/mp4") in storage.uploads
+    assert run.calls[0] == {"asr": "cloudflare", "mt": "deepl", "tts": "piper"}  # routed
+
+
+def test_subtitle_only_skips_tts_and_collects_srt(tmp_path: Path) -> None:
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = FakeRunPipeline()
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=object(), run_pipeline_fn=run,
+        available_providers=_avail({"asr": {"cloudflare"}, "mt": {"deepl"}}),
+        now_ms=lambda: 1000,
+    )
+    assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}
+    assert run.calls[0]["tts"] == job.plan.tts  # tts never routed for subtitle_only
+
+
+def test_429_reports_exhausted_and_reroutes_only_the_failed_stage(tmp_path: Path) -> None:
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = FakeRunPipeline(quota_fail=(("asr", "groq"),))  # groq (ladder head) 429s once
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=object(), run_pipeline_fn=run,
+        available_providers=_avail({"asr": {"groq", "cloudflare"}, "mt": {"deepl"}}),
+        now_ms=lambda: 1000,
+    )
+    # groq 429 -> reported exhausted (reset = now + retry_after) -> re-routed to cloudflare -> done
+    assert cp.exhausted_reports == [("groq", 1000 + 30_000, "429")]
+    assert run.calls[0]["asr"] == "groq"
+    assert run.calls[1]["asr"] == "cloudflare"
+    assert run.calls[1]["mt"] == "deepl"  # the un-failed stage was NOT re-routed
+    assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}
+
+
+def test_all_free_exhausted_for_a_stage_raises_free_pool_exhausted(tmp_path: Path) -> None:
+    # deepl is the only configured MT, and the shared snapshot marks it circuit-broken -> no MT.
+    cp = FakeControlPlane(
+        availability=ProviderSnapshot(now_ms=1000, exhausted_until={"deepl": 9_999_999})
+    )
+    storage = FakeStorage()
+    job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    with pytest.raises(FreePoolExhausted) as ei:
+        run_real_pipeline(
+            cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+            resolver=object(), run_pipeline_fn=FakeRunPipeline(),
+            available_providers=_avail({"asr": {"cloudflare"}, "mt": {"deepl"}}),
+            now_ms=lambda: 1000,
+        )
+    assert ei.value.kind == "mt"
+
+
+def test_fails_closed_on_unsupported_dub_language(tmp_path: Path) -> None:
+    # eo (Esperanto) has no commercial-safe TTS voice -> a dub job fails closed BEFORE any routing.
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="dub_only", target_lang="eo")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = FakeRunPipeline()
+    with pytest.raises(LanguageError) as ei:
+        run_real_pipeline(
+            cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+            resolver=object(), run_pipeline_fn=run,
+            available_providers=_avail({"asr": {"cloudflare"}, "mt": {"deepl"}, "tts": {"piper"}}),
+            now_ms=lambda: 1000,
+        )
+    assert ei.value.code == "no_tts_model_for_language"
+    assert run.calls == []  # never ran the pipeline
+
+
+def test_emits_routing_telemetry(tmp_path: Path) -> None:
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    seen: list[dict[str, object]] = []
+    run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=object(), run_pipeline_fn=FakeRunPipeline(),
+        available_providers=_avail({"asr": {"cloudflare"}, "mt": {"deepl"}}),
+        on_telemetry=lambda **kw: seen.append(kw), now_ms=lambda: 1000,
+    )
+    assert seen and seen[0]["free_pool_result"] == "ok"
+    assert seen[0]["provider"] == "cloudflare"  # representative routed provider (asr)

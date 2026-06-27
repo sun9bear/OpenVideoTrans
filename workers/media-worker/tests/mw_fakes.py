@@ -10,7 +10,13 @@ import threading
 from collections.abc import Mapping
 
 from media_worker.config import WorkerConfig
-from media_worker.control_plane import Claim, ControlPlaneError, ProgressTelemetry, StaleClaimError
+from media_worker.control_plane import (
+    Claim,
+    ControlPlaneError,
+    ProgressTelemetry,
+    ProviderSnapshot,
+    StaleClaimError,
+)
 from media_worker.storage import SourceTooLargeError
 from ovt_schemas import AigcMarking, Job, JobArtifacts, JobPlan
 
@@ -74,6 +80,7 @@ class FakeControlPlane:
         complete_error: bool = False,
         config_error: bool = False,
         fail_error: bool = False,
+        availability: ProviderSnapshot | None = None,
     ) -> None:
         self._config = config
         self._claims = list(claims or [])
@@ -81,8 +88,11 @@ class FakeControlPlane:
         self._complete_error = complete_error
         self._config_error = config_error
         self._fail_error = fail_error
+        self._availability = availability or ProviderSnapshot(now_ms=0, exhausted_until={})
         self._lock = threading.Lock()
         self.heartbeats: list[tuple[str, int, str | None]] = []
+        # FREE-POOL (M2-CLOSE): every report_provider_exhausted call, recorded for assertions.
+        self.exhausted_reports: list[tuple[str, int, str | None]] = []
         # OBS (#24): the telemetry passed alongside each heartbeat, recorded in parallel so the
         # existing 3-tuple `heartbeats` unpacks stay intact.
         self.telemetry: list[ProgressTelemetry | None] = []
@@ -130,6 +140,15 @@ class FakeControlPlane:
             raise ControlPlaneError(f"transient error failing {job_id}")
         with self._lock:
             self.failed.append((job_id, claim_version, error_code, error_detail))
+
+    def get_provider_availability(self) -> ProviderSnapshot:
+        return self._availability
+
+    def report_provider_exhausted(
+        self, provider: str, *, reset_at_ms: int, reason: str | None = None
+    ) -> None:
+        with self._lock:
+            self.exhausted_reports.append((provider, reset_at_ms, reason))
 
     @property
     def heartbeat_count(self) -> int:

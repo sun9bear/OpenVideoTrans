@@ -28,6 +28,7 @@ from .base import (
     ProviderUnavailable,
     has_binary,
     has_module,
+    raise_quota_if_429,
     register,
 )
 
@@ -261,6 +262,7 @@ class _OpenAICompatASR(ASRProvider):
                 headers={"Authorization": f"Bearer {self._key()}"},
                 data=data, files=files, timeout=600,
             )
+        raise_quota_if_429(resp, self.info.name, kind="asr")  # 429 -> circuit-break (FREE-POOL)
         if resp.status_code >= 400:
             raise ProviderUnavailable(
                 f"{self.info.name} ASR HTTP {resp.status_code}: {resp.text[:500]}"
@@ -382,6 +384,7 @@ class CloudflareASR(ASRProvider):
         resp = requests.post(
             url, headers={"Authorization": f"Bearer {token}"}, data=audio, timeout=300
         )
+        raise_quota_if_429(resp, "cloudflare", kind="asr")  # 429 -> circuit-break (FREE-POOL)
         if resp.status_code >= 400:
             raise ProviderUnavailable(f"cloudflare ASR HTTP {resp.status_code}: {resp.text[:500]}")
         result = resp.json().get("result", {})

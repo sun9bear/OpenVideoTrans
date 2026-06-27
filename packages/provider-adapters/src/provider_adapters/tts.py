@@ -18,7 +18,15 @@ import subprocess
 from pathlib import Path
 
 from ._env import env, require_env
-from .base import ProviderInfo, ProviderUnavailable, TTSProvider, has_binary, has_module, register
+from .base import (
+    ProviderInfo,
+    ProviderUnavailable,
+    TTSProvider,
+    has_binary,
+    has_module,
+    raise_quota_if_429,
+    register,
+)
 
 _VOICES_PATH = Path(__file__).resolve().parent / "assets" / "voices.json"
 
@@ -106,6 +114,7 @@ class CloudflareTTS(TTSProvider):
             url, headers={"Authorization": f"Bearer {token}"},
             json={"prompt": text, "lang": voice_id}, timeout=120,
         )
+        raise_quota_if_429(resp, "cloudflare", kind="tts")  # 429 -> circuit-break (FREE-POOL)
         if resp.status_code >= 400:
             raise ProviderUnavailable(f"cloudflare TTS HTTP {resp.status_code}: {resp.text[:300]}")
         audio_b64 = resp.json().get("result", {}).get("audio", "")
