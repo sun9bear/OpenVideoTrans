@@ -41,6 +41,7 @@ from provider_adapters import (
     Resolver,
     assert_language_pair,
     get_capability,
+    piper_model_covers,
     probe,
     route_free,
 )
@@ -138,6 +139,12 @@ def _available_free_providers(kind: str, target_lang: str) -> frozenset[str]:
     free = frozenset(name for name, avail, info in probe(kind) if avail and not info.paid)
     if kind == "tts":
         free &= _locale_commercial_safe_tts(target_lang)
+        # The capability registry lists "piper" for a locale generically, but Piper exposes ONE
+        # installed model and probe() can't see its language. Drop piper unless the installed model
+        # actually covers the locale, so routing picks another commercial-safe provider (or fails
+        # closed) instead of synthesizing the WRONG language (@CodeX bot M2-CLOSE).
+        if "piper" in free and not piper_model_covers(target_lang):
+            free -= {"piper"}
     return free
 
 
@@ -305,7 +312,14 @@ def run_real_pipeline(
                 cp.report_provider_exhausted(reported, reset_at_ms=reset_ms, reason="429")
             except Exception:
                 logger.warning("provider-exhausted report failed; re-routing locally")
-            snapshot = _snapshot(cp, clock)
+            try:
+                snapshot = _snapshot(cp, clock)
+            except Exception:
+                # The post-429 availability refresh sits OUTSIDE the report guard above; a transient
+                # control-plane blip on THIS GET must not abort the reroute either. The local
+                # `excluded` set already prevents re-picking the 429'd provider, so reuse the prior
+                # snapshot and let the local circuit-break complete (@CodeX bot M2-CLOSE).
+                logger.warning("availability refresh failed; reusing prior snapshot for reroute")
             for k in kinds[kinds.index(kind):]:
                 # Exclude the 429'd provider from EVERY active stage (not only those currently using
                 # it) so a later 429 can't re-route a stage back onto it even if the shared snapshot

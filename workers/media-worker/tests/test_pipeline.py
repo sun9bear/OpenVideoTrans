@@ -271,6 +271,55 @@ def test_report_exhausted_failure_does_not_abort_rotation(tmp_path: Path) -> Non
     assert cp.exhausted_reports == []  # the report raised -> nothing recorded
 
 
+def test_snapshot_refresh_blip_does_not_abort_rotation(tmp_path: Path) -> None:
+    # @CodeX bot M2-CLOSE P2: the post-429 availability refresh sits OUTSIDE the report guard; a
+    # transient control-plane blip on THAT GET must not abort the reroute. The local `excluded` set
+    # still prevents re-picking the 429'd provider, so the prior snapshot is reused and the local
+    # circuit-break completes (else process_job would report internal_error instead of rerouting).
+    cp = FakeControlPlane(availability_error_on_call=2)  # call 1 = initial route OK, call 2 = blip
+    storage = FakeStorage()
+    job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = FakeRunPipeline(quota_fail=(("asr", "groq"),))
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=object(), run_pipeline_fn=run,
+        available_providers=_avail({"asr": {"groq", "cloudflare"}, "mt": {"deepl"}}),
+        now_ms=lambda: 1000,
+    )
+    assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}
+    assert run.calls[0]["asr"] == "groq"
+    assert run.calls[1]["asr"] == "cloudflare"  # rerouted despite the refresh GET blip
+    assert cp.exhausted_reports == [("groq", 1000 + 30_000, "429")]  # the report itself succeeded
+
+
+def test_routing_drops_piper_when_installed_model_language_mismatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # @CodeX bot M2-CLOSE P2: piper exposes ONE installed model; the registry lists "piper" for many
+    # locales, but a worker with an en model must NOT be routed piper for a de dub (it would
+    # synthesize German text with the English voice). Drop piper unless its model covers the locale.
+    import media_worker.pipeline as pl
+
+    class _Info:
+        def __init__(self, name: str, paid: bool) -> None:
+            self.name = name
+            self.paid = paid
+
+    def fake_probe(kind: str) -> list[tuple[str, bool, _Info]]:
+        return {"tts": [("piper", True, _Info("piper", False))]}.get(kind, [])
+
+    monkeypatch.setattr(pl, "probe", fake_probe)
+    monkeypatch.delenv("FVD_PIPER_LANG", raising=False)
+    monkeypatch.setenv("FVD_PIPER_MODEL", "/models/en_US-amy-medium.onnx")  # an ENGLISH voice
+    # en job: the installed en model covers it -> piper stays routable.
+    assert pl._available_free_providers("tts", "en") == frozenset({"piper"})
+    assert pl._available_free_providers("tts", "en-GB") == frozenset({"piper"})  # base-subtag match
+    # de job: the en model can't serve de -> piper dropped -> no commercial-safe tts -> fail closed.
+    assert pl._available_free_providers("tts", "de") == frozenset()
+
+
 def test_tts_reroute_clears_tts_scratch(tmp_path: Path) -> None:
     # P3 (review): on a mid-stream TTS 429 the per-segment raws are cleared before re-synth, so the
     # new provider re-voices the WHOLE deliverable (no mixed timbre across segments).

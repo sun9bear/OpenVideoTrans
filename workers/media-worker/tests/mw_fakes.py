@@ -83,6 +83,7 @@ class FakeControlPlane:
         config_error: bool = False,
         fail_error: bool = False,
         availability: ProviderSnapshot | None = None,
+        availability_error_on_call: int | None = None,
         report_error: bool = False,
     ) -> None:
         self._config = config
@@ -92,6 +93,10 @@ class FakeControlPlane:
         self._config_error = config_error
         self._fail_error = fail_error
         self._availability = availability or ProviderSnapshot(now_ms=0, exhausted_until={})
+        # Raise on the Nth get_provider_availability call (1-based) to simulate a transient refresh
+        # blip — e.g. call 1 = initial routing OK, call 2 = post-429 refresh fails (M2-CLOSE PR-A).
+        self._availability_error_on_call = availability_error_on_call
+        self._availability_calls = 0
         self._report_error = report_error
         self._lock = threading.Lock()
         self.heartbeats: list[tuple[str, int, str | None]] = []
@@ -146,6 +151,11 @@ class FakeControlPlane:
             self.failed.append((job_id, claim_version, error_code, error_detail))
 
     def get_provider_availability(self) -> ProviderSnapshot:
+        with self._lock:
+            self._availability_calls += 1
+            n = self._availability_calls
+        if self._availability_error_on_call is not None and n == self._availability_error_on_call:
+            raise ControlPlaneError("transient availability refresh blip")
         return self._availability
 
     def report_provider_exhausted(
