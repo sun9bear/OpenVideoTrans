@@ -71,13 +71,17 @@ function validateProvider(name: string): void {
   }
 }
 
-function validateResetAt(resetAt: number, now: number): void {
+// Validate + CLAMP a reset. A non-future reset is a malformed report (rejected 400). A reset further
+// out than the cap is CLAMPED to the cap, NOT rejected: some free quotas reset monthly (DeepL Free's
+// 500k-char/month), so a ~30-day reset is legitimate — rejecting it would leave that provider
+// un-circuit-broken and re-hit until it re-probes, defeating the unit. Clamping still bounds a single
+// report's blast radius (the worker re-probes and re-reports to extend it if still exhausted past the
+// cap), AND it neutralises an absurd far-future value from a buggy/poisoned report.
+function clampResetAt(resetAt: number, now: number): number {
   if (resetAt <= now) {
     throw new HttpError(400, "invalid_reset", "resetAt must be a future epoch-ms timestamp");
   }
-  if (resetAt > now + MAX_EXHAUSTION_MS) {
-    throw new HttpError(400, "invalid_reset", "resetAt is too far in the future");
-  }
+  return Math.min(resetAt, now + MAX_EXHAUSTION_MS);
 }
 
 // On a re-report the circuit window is MONOTONIC: keep the LATER of the stored and incoming reset
@@ -132,9 +136,11 @@ async function getQuotaMap(env: Env): Promise<Record<string, number>> {
   return {};
 }
 
+// Field names mirror the provider-adapters ProviderAvailability dataclass (now_ms / exhausted_until)
+// so the worker can hydrate it directly from this JSON without a remap — one cross-language contract.
 export interface ProviderAvailabilitySnapshot {
-  now: number;
-  exhausted: Record<string, number>;
+  now_ms: number;
+  exhausted_until: Record<string, number>;
 }
 
 // The shared snapshot at `now`: only providers still circuit-broken (exhausted_until > now). The
@@ -144,11 +150,11 @@ export async function getProviderAvailability(
   now: number,
 ): Promise<ProviderAvailabilitySnapshot> {
   const map = await getQuotaMap(env);
-  const exhausted: Record<string, number> = {};
+  const exhaustedUntil: Record<string, number> = {};
   for (const [provider, until] of Object.entries(map)) {
-    if (typeof until === "number" && until > now) exhausted[provider] = until;
+    if (typeof until === "number" && until > now) exhaustedUntil[provider] = until;
   }
-  return { now, exhausted };
+  return { now_ms: now, exhausted_until: exhaustedUntil };
 }
 
 export interface ProviderExhaustion {
@@ -167,9 +173,9 @@ export async function recordProviderExhausted(
   change: ProviderExhaustion,
 ): Promise<void> {
   validateProvider(change.provider);
-  validateResetAt(change.resetAt, now);
+  const resetAt = clampResetAt(change.resetAt, now);
   const reason = change.reason !== undefined ? change.reason.slice(0, 64) : null;
-  await env.DB.prepare(UPSERT_QUOTA).bind(change.provider, change.resetAt, reason, now).run();
+  await env.DB.prepare(UPSERT_QUOTA).bind(change.provider, resetAt, reason, now).run();
   try {
     await projectAvailabilityToKV(env, await loadQuotaFromD1(env));
   } catch {

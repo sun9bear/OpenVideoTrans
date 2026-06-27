@@ -20,8 +20,8 @@ describe("POST /internal/providers/exhausted + GET /internal/providers/availabil
     expect(rec.status).toBe(200);
     const avail = await call(env, deps, "GET", "/internal/providers/availability", { worker: WORKER });
     expect(avail.status).toBe(200);
-    expect(avail.json.now).toBe(1_000_000);
-    expect(avail.json.exhausted).toEqual({ groq: resetAt });
+    expect(avail.json.now_ms).toBe(1_000_000);
+    expect(avail.json.exhausted_until).toEqual({ groq: resetAt });
   });
 
   it("auto-recovers a provider once its reset time has passed (now-filter)", async () => {
@@ -34,11 +34,11 @@ describe("POST /internal/providers/exhausted + GET /internal/providers/availabil
     });
     // Still broken before reset.
     let avail = await call(env, clock.deps, "GET", "/internal/providers/availability", { worker: WORKER });
-    expect(avail.json.exhausted).toEqual({ groq: resetAt });
+    expect(avail.json.exhausted_until).toEqual({ groq: resetAt });
     // Past reset -> dropped from the snapshot without any new write.
     clock.set(resetAt);
     avail = await call(env, clock.deps, "GET", "/internal/providers/availability", { worker: WORKER });
-    expect(avail.json.exhausted).toEqual({});
+    expect(avail.json.exhausted_until).toEqual({});
   });
 
   it("tracks several providers and returns only the currently-broken ones", async () => {
@@ -56,7 +56,7 @@ describe("POST /internal/providers/exhausted + GET /internal/providers/availabil
     });
     clock.set(groqReset + 1); // groq recovered, cloudflare still broken
     const avail = await call(env, clock.deps, "GET", "/internal/providers/availability", { worker: WORKER });
-    expect(avail.json.exhausted).toEqual({ cloudflare: cfReset });
+    expect(avail.json.exhausted_until).toEqual({ cloudflare: cfReset });
   });
 
   it("re-reporting extends the reset window monotonically (a shorter later report never shrinks it)", async () => {
@@ -72,7 +72,7 @@ describe("POST /internal/providers/exhausted + GET /internal/providers/availabil
       body: { provider: "deepl", resetAt: 1_000_000 + 50_000 },
     });
     let avail = await call(env, deps, "GET", "/internal/providers/availability", { worker: WORKER });
-    expect(avail.json.exhausted).toEqual({ deepl: 1_000_000 + 50_000 });
+    expect(avail.json.exhausted_until).toEqual({ deepl: 1_000_000 + 50_000 });
     // A later, SHORTER reset must NOT shrink the window: two boxes can report different Retry-After
     // hints for the same provider, and the shorter one landing last must not cause a premature re-hit.
     await call(env, deps, "POST", "/internal/providers/exhausted", {
@@ -80,7 +80,7 @@ describe("POST /internal/providers/exhausted + GET /internal/providers/availabil
       body: { provider: "deepl", resetAt: 1_000_000 + 2_000 },
     });
     avail = await call(env, deps, "GET", "/internal/providers/availability", { worker: WORKER });
-    expect(avail.json.exhausted).toEqual({ deepl: 1_000_000 + 50_000 });
+    expect(avail.json.exhausted_until).toEqual({ deepl: 1_000_000 + 50_000 });
   });
 
   it("RED LINE: rejects a PAID provider name with a distinct 403 (never circuit-breaks paid)", async () => {
@@ -105,7 +105,7 @@ describe("POST /internal/providers/exhausted + GET /internal/providers/availabil
     expect(r.json.error.code).toBe("unknown_provider");
   });
 
-  it("rejects a non-future resetAt and an absurd far-future resetAt (400)", async () => {
+  it("rejects a non-future resetAt (400) but CLAMPS an over-cap reset to the 7-day max", async () => {
     const { env } = makeEnv({ internalToken: WORKER });
     const { deps } = makeClock(1_000_000);
     const past = await call(env, deps, "POST", "/internal/providers/exhausted", {
@@ -114,12 +114,16 @@ describe("POST /internal/providers/exhausted + GET /internal/providers/availabil
     });
     expect(past.status).toBe(400);
     expect(past.json.error.code).toBe("invalid_reset");
-    const tooFar = await call(env, deps, "POST", "/internal/providers/exhausted", {
+    // A reset beyond the 7-day cap (e.g. DeepL Free's MONTHLY quota) is CLAMPED, not dropped —
+    // dropping it would leave that provider un-circuit-broken and re-hit until it re-probes.
+    const cap = 7 * 24 * 60 * 60 * 1000;
+    const far = await call(env, deps, "POST", "/internal/providers/exhausted", {
       worker: WORKER,
-      body: { provider: "groq", resetAt: 1_000_000 + 8 * 24 * 60 * 60 * 1000 }, // > 7d cap
+      body: { provider: "deepl", resetAt: 1_000_000 + 30 * 24 * 60 * 60 * 1000 }, // ~monthly
     });
-    expect(tooFar.status).toBe(400);
-    expect(tooFar.json.error.code).toBe("invalid_reset");
+    expect(far.status).toBe(200);
+    const avail = await call(env, deps, "GET", "/internal/providers/availability", { worker: WORKER });
+    expect(avail.json.exhausted_until).toEqual({ deepl: 1_000_000 + cap });
   });
 
   it("rejects a non-integer resetAt (400)", async () => {
@@ -142,7 +146,7 @@ describe("POST /internal/providers/exhausted + GET /internal/providers/availabil
       .run("cloudflare", resetAt, "seed", 1_000_000);
     const avail = await call(env, deps, "GET", "/internal/providers/availability", { worker: WORKER });
     expect(avail.status).toBe(200);
-    expect(avail.json.exhausted).toEqual({ cloudflare: resetAt });
+    expect(avail.json.exhausted_until).toEqual({ cloudflare: resetAt });
   });
 
   it("requires worker auth: 503 when no internal token configured, 401 without a bearer", async () => {
