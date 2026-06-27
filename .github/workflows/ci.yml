@@ -40,6 +40,13 @@ jobs:
       - name: CFG-GUARD §14 red-line invariant
         run: pnpm --filter @open-video-trans/control-plane exec vitest run test/settings.guard.test.ts
 
+      # FREE-POOL §23 guard: a named, visible gate asserting the free-pool circuit-breaker never
+      # admits a paid provider (the free set is disjoint from the paid set, and a paid name is
+      # rejected 403 at the report route). Fails loudly if a paid provider ever leaks into the
+      # free-pool state surface (red line §1/§14). (Also covered by `pnpm test`; this makes it explicit.)
+      - name: FREE-POOL §23 red-line invariant
+        run: pnpm --filter @open-video-trans/control-plane exec vitest run test/providers.guard.test.ts
+
   # ── Python job ─────────────────────────────────────────────────────────────
   py:
     name: Py (ruff + pytest + typecheck)

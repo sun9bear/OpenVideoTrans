@@ -13,6 +13,16 @@ keeps T1.1 ∥ T1.2 (backlog DAG) and keeps the kernel free of paid-provider kno
 from __future__ import annotations
 
 from . import asr, mt, tts
+from .circuit import (
+    FREE_LADDER_PROVIDERS,
+    FREE_POOL_EXHAUSTED,
+    NO_FREE_PROVIDER,
+    ProviderAvailability,
+    ProviderFailure,
+    ProviderResult,
+    configured_free_providers,
+    route_free,
+)
 from .base import (
     PaidProviderBlocked,
     ProviderInfo,
@@ -57,22 +67,30 @@ REGISTRY: dict[str, ProviderInfo] = build_registry()
 __all__ = [
     "AUTO_LADDER",
     "CAPABILITIES",
+    "FREE_LADDER_PROVIDERS",
+    "FREE_POOL_EXHAUSTED",
+    "NO_FREE_PROVIDER",
     "PAID_PROVIDERS",
     "REGISTRY",
     "LanguageError",
     "PaidProviderBlocked",
+    "ProviderAvailability",
+    "ProviderFailure",
     "ProviderInfo",
+    "ProviderResult",
     "ProviderUnavailable",
     "Resolver",
     "SupplyChainError",
     "assert_default_image_allowed",
     "assert_language_pair",
+    "configured_free_providers",
     "deepl_target_code",
     "get_capability",
     "has_binary",
     "has_module",
     "is_non_commercial",
     "is_paid_provider",
+    "route_free",
     "license_for",
     "list_providers",
     "probe",
