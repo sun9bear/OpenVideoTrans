@@ -2,6 +2,7 @@ import type { Ctx, Deps, Env, QueueProducer, TurnstileVerifier } from "./core";
 import { HttpError, apiError, json, realDeps } from "./core";
 import { realTurnstileVerifier } from "./abuse";
 import { credentials } from "./credentials";
+import { logEvent, metricsEndpoint } from "./obs";
 import { providerAvailability, reportProviderExhausted } from "./providers";
 import { selectProducer } from "./queue";
 import { adminSetSetting, configEndpoint, getConfig, getSettingsAudit } from "./settings";
@@ -13,6 +14,9 @@ type Handler = (ctx: Ctx) => Promise<Response> | Response;
 
 interface Route {
   method: string;
+  // The literal path TEMPLATE (e.g. "/api/jobs/:id"). Kept so OBS error logs can carry the route
+  // template — never the concrete URL/query (no job id / token / PII in the structured log).
+  path: string;
   pattern: RegExp;
   keys: string[];
   auth: Auth;
@@ -30,7 +34,7 @@ function compile(path: string): { pattern: RegExp; keys: string[] } {
 
 function route(method: string, path: string, auth: Auth, handler: Handler): Route {
   const { pattern, keys } = compile(path);
-  return { method, pattern, keys, auth, handler };
+  return { method, path, pattern, keys, auth, handler };
 }
 
 const ROUTES: Route[] = [
@@ -58,6 +62,10 @@ const ROUTES: Route[] = [
   // Red-line keys are rejected 403 here.
   route("POST", "/internal/admin/settings", "admin", adminSetSetting),
   route("GET", "/internal/admin/settings/audit", "admin", getSettingsAudit),
+  // OBS (#24): the observability snapshot (job counts · claim latency · stage timings · free-pool
+  // balance · global-minute gauge · worker liveness) + live alerts. ADMIN auth (operator-only;
+  // workers don't hold ADMIN_TOKEN) — deliberately NOT worker-pullable. Serves aggregates only.
+  route("GET", "/internal/admin/metrics", "admin", metricsEndpoint),
 ];
 
 // Length-stable comparison so the internal-bearer check does not leak via timing.
@@ -113,11 +121,15 @@ export async function handle(
   producer?: QueueProducer,
 ): Promise<Response> {
   const url = new URL(request.url);
+  // Track the matched route so the OBS error log can carry the route TEMPLATE (never the concrete
+  // path/query). Set before auth runs, so an auth rejection logs the right route.
+  let matched: Route | undefined;
   try {
     for (const r of ROUTES) {
       if (r.method !== request.method) continue;
       const match = r.pattern.exec(url.pathname);
       if (!match) continue;
+      matched = r;
       const params: Record<string, string> = {};
       r.keys.forEach((k, i) => {
         params[k] = decodeURIComponent(match[i + 1]!);
@@ -145,8 +157,15 @@ export async function handle(
     }
     return apiError(404, "not_found", "no such route");
   } catch (e) {
-    if (e instanceof HttpError) return apiError(e.status, e.code, e.message);
+    // OBS structured error log: status + stable code + method + route TEMPLATE only. The HttpError
+    // message is user-safe by construction and is NOT logged (defense in depth); never a body/secret.
+    const routeLabel = matched?.path ?? "unmatched";
+    if (e instanceof HttpError) {
+      logEvent("request_error", { status: e.status, code: e.code, method: request.method, route: routeLabel });
+      return apiError(e.status, e.code, e.message);
+    }
     // Never surface internals/secrets on an unexpected error.
+    logEvent("request_error", { status: 500, code: "internal_error", method: request.method, route: routeLabel });
     return apiError(500, "internal_error", "internal error");
   }
 }

@@ -28,6 +28,45 @@ class Claim:
     attempt: int
 
 
+@dataclass(frozen=True)
+class ProgressTelemetry:
+    """OBS (#24) worker /progress telemetry — NAMES + INTS only. By construction it cannot hold a
+    provider key, raw request/response, plaintext IP, or original filename (脱敏), and the control
+    plane re-validates against the same allowlist before storing (apps/control-plane/src/obs.ts
+    parseProgressMeta). The T2.2 stub selects no provider and never touches the free pool, so
+    provider / chunk_* / free_pool_result stay None until the real pipeline (M2-CLOSE) — the
+    CONTRACT ships now so M2-CLOSE only fills the values."""
+
+    stage_elapsed_ms: int | None = None
+    provider: str | None = None
+    chunk_index: int | None = None
+    chunk_count: int | None = None
+    free_pool_result: str | None = None
+
+
+def build_progress_body(
+    claim_version: int, stage: str | None, telemetry: ProgressTelemetry | None
+) -> dict[str, Any]:
+    """Assemble the /progress (heartbeat) JSON body. Only claim_version + stage + the telemetry's
+    NON-None fields are included (an omitted field is never serialized as null), so the payload
+    carries solely the allowlisted observability fields — redaction-safe by construction."""
+    body: dict[str, Any] = {"claim_version": claim_version}
+    if stage is not None:
+        body["stage"] = stage
+    if telemetry is not None:
+        if telemetry.stage_elapsed_ms is not None:
+            body["stage_elapsed_ms"] = telemetry.stage_elapsed_ms
+        if telemetry.provider is not None:
+            body["provider"] = telemetry.provider
+        if telemetry.chunk_index is not None:
+            body["chunk_index"] = telemetry.chunk_index
+        if telemetry.chunk_count is not None:
+            body["chunk_count"] = telemetry.chunk_count
+        if telemetry.free_pool_result is not None:
+            body["free_pool_result"] = telemetry.free_pool_result
+    return body
+
+
 class ControlPlaneError(RuntimeError):
     """A control-plane call failed (a non-2xx other than the modeled 409). Carries the HTTP status
     (when known) so the dual-token retry can recognize a 401 without re-parsing the message."""
@@ -106,7 +145,14 @@ def require_secure_base(base_url: str) -> None:
 class ControlPlane(Protocol):
     def get_config(self) -> WorkerConfig: ...
     def claim(self) -> Claim | None: ...
-    def heartbeat(self, job_id: str, claim_version: int, *, stage: str | None = None) -> None: ...
+    def heartbeat(
+        self,
+        job_id: str,
+        claim_version: int,
+        *,
+        stage: str | None = None,
+        telemetry: ProgressTelemetry | None = None,
+    ) -> None: ...
     def complete(
         self, job_id: str, claim_version: int, *, artifacts: Mapping[str, str]
     ) -> None: ...
@@ -205,10 +251,18 @@ class HttpControlPlane:
             attempt=int(resp["attempt"]),
         )
 
-    def heartbeat(self, job_id: str, claim_version: int, *, stage: str | None = None) -> None:
-        body: dict[str, Any] = {"claim_version": claim_version}
-        if stage is not None:
-            body["stage"] = stage
+    def heartbeat(
+        self,
+        job_id: str,
+        claim_version: int,
+        *,
+        stage: str | None = None,
+        telemetry: ProgressTelemetry | None = None,
+    ) -> None:
+        # OBS (#24): the worker folds redaction-safe stage timing / provider / chunk / free-pool
+        # telemetry into the same /progress body. build_progress_body emits only the allowlisted,
+        # non-None fields; the control plane re-validates before storing.
+        body = build_progress_body(claim_version, stage, telemetry)
         self._call("POST", f"/internal/jobs/{job_id}/progress", body)
 
     def complete(self, job_id: str, claim_version: int, *, artifacts: Mapping[str, str]) -> None:

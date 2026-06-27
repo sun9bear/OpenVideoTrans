@@ -3,6 +3,7 @@ import type { Ctx } from "./core";
 import { HttpError, asObject, json, optInt, optString, readJson, reqEnum, reqInt, reqString } from "./core";
 import { admitJob } from "./abuse";
 import { claimOne } from "./claim";
+import { isValidStage, logEvent, parseProgressMeta } from "./obs";
 import { presignR2Url } from "./sigv4";
 import { requireR2, verifyUpload } from "./uploads";
 
@@ -222,6 +223,16 @@ export async function claimNext(ctx: Ctx): Promise<Response> {
   });
   if (!claimed) return json({ job: null });
   const row = await getJobRow(ctx, claimed.job_id);
+  // OBS: claim latency = started_at - enqueue_at (first-claim wait); started_at is pinned at the
+  // first claim via COALESCE, so a reclaim still reports the original wait. job_id-keyed.
+  const latency =
+    row && typeof row.started_at === "number" ? Math.max(0, row.started_at - row.enqueue_at) : undefined;
+  logEvent("job_claimed", {
+    job_id: claimed.job_id,
+    claim_version: claimed.claim_version,
+    attempt: claimed.attempt,
+    ...(latency !== undefined ? { claim_latency_ms: latency } : {}),
+  });
   return json({
     job: rowToJob(row!),
     claim_version: claimed.claim_version,
@@ -229,19 +240,31 @@ export async function claimNext(ctx: Ctx): Promise<Response> {
   });
 }
 
-// POST /internal/jobs/:id/progress — claim_version-gated lease renewal (independent of stage edges).
+// POST /internal/jobs/:id/progress — claim_version-gated lease renewal (independent of stage edges),
+// plus the OBS (#24) telemetry sink: the worker folds stage timing / provider / chunk count / free-
+// pool result into this same body. The `stage` (current_stage source) is slug-validated at this write
+// boundary (so it can never carry a path/IP/filename into the served metrics — 脱敏), and the rest of
+// the body goes through parseProgressMeta's ALLOWLIST before landing in progress_meta.
 export async function heartbeat(ctx: Ctx): Promise<Response> {
   const jobId = ctx.params.id!;
   const body = asObject(await readJson(ctx.request));
   const claimVersion = reqInt(body, "claim_version");
   const stage = optString(body, "stage");
+  if (stage !== undefined && !isValidStage(stage)) {
+    throw new HttpError(400, "invalid_field", "stage must be a lowercase slug ([a-z][a-z0-9_]{0,63})");
+  }
+  // Allowlist the raw body into canonical telemetry JSON (or null) — an injected filename / IP / key
+  // as extra body keys is dropped here, never stored. COALESCE keeps prior telemetry when a heartbeat
+  // carries none (a bare lease renewal must not wipe the last reported stage data).
+  const progressMeta = parseProgressMeta(body);
   const now = ctx.deps.now();
   const leaseExpiresAt = now + ctx.config.leaseTtlMs;
   const res = await ctx.env.DB.prepare(
-    `UPDATE jobs SET lease_expires_at = ?, current_stage = COALESCE(?, current_stage)
+    `UPDATE jobs SET lease_expires_at = ?, current_stage = COALESCE(?, current_stage),
+       progress_meta = COALESCE(?, progress_meta)
        WHERE job_id = ? AND status = 'running' AND claim_version = ?`,
   )
-    .bind(leaseExpiresAt, stage ?? null, jobId, claimVersion)
+    .bind(leaseExpiresAt, stage ?? null, progressMeta, jobId, claimVersion)
     .run();
   if (res.meta.changes === 0) {
     const exists = await getJobRow(ctx, jobId);
@@ -250,6 +273,8 @@ export async function heartbeat(ctx: Ctx): Promise<Response> {
     // is stale and must stop (do not extend a lease it no longer holds).
     throw new HttpError(409, "stale_claim", "claim superseded or job not running");
   }
+  // job_id-keyed structured log (allowlisted; never error_detail/body). stage is already slug-validated.
+  logEvent("job_progress", { job_id: jobId, claim_version: claimVersion, ...(stage ? { stage } : {}) });
   return json({ lease_expires_at: leaseExpiresAt });
 }
 
@@ -284,6 +309,7 @@ export async function complete(ctx: Ctx): Promise<Response> {
     .run();
   const after = await getJobRow(ctx, jobId);
   guardTerminal(res.meta.changes, after!.status);
+  if (res.meta.changes > 0) logEvent("job_completed", { job_id: jobId, claim_version: claimVersion });
   return json({ job: rowToJob(after!) });
 }
 
@@ -316,6 +342,10 @@ export async function fail(ctx: Ctx): Promise<Response> {
     .run();
   const after = await getJobRow(ctx, jobId);
   guardTerminal(res.meta.changes, after!.status);
+  // Log the stable error_code only — NEVER error_detail (it can carry raw ffmpeg/URL output).
+  if (res.meta.changes > 0) {
+    logEvent("job_failed", { job_id: jobId, claim_version: claimVersion, error_code: errorCode });
+  }
   return json({ job: rowToJob(after!) });
 }
 

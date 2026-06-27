@@ -148,9 +148,16 @@ export interface JobSeed {
   anon?: string;
   artifacts?: string;
   expires_at?: number;
+  // OBS (#24) metric inputs: first-claim time (claim latency = started_at - enqueue_at), the
+  // validated stage slug, the latest stored telemetry JSON, and created_at (metrics window). All
+  // default to NULL / enqueue_at so existing call sites are unaffected.
+  started_at?: number | null;
+  current_stage?: string | null;
+  progress_meta?: string | null;
+  created_at?: number;
 }
 
-// Seed a job row directly (bypassing the upload flow) for claim / lifecycle / access tests.
+// Seed a job row directly (bypassing the upload flow) for claim / lifecycle / access / obs tests.
 export function insertJob(raw: RawDb, o: JobSeed): void {
   raw
     .prepare(
@@ -158,9 +165,10 @@ export function insertJob(raw: RawDb, o: JobSeed): void {
          job_id, anon_or_user_id, status, source_type, upload_session_id, target_lang,
          output_mode, subtitle_delivery, subtitle_lang, plan, settings_version, aigc_marking,
          priority, advisory_duration_ms, enqueue_at, deadline_at, created_at, expires_at,
-         lease_expires_at, data_purged_at, artifacts, attempt, claim_version
+         lease_expires_at, data_purged_at, artifacts, attempt, claim_version,
+         started_at, current_stage, progress_meta
        ) VALUES (?, ?, ?, 'upload', 'us_seed', 'zh-Hans', ?, 'srt', 'target',
-         '{"asr":"auto","mt":"auto","tts":null}', 1, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         '{"asr":"auto","mt":"auto","tts":null}', 1, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       o.job_id,
@@ -171,13 +179,16 @@ export function insertJob(raw: RawDb, o: JobSeed): void {
       o.advisory_duration_ms ?? null,
       o.enqueue_at,
       o.enqueue_at + 4 * 60 * 60 * 1000,
-      o.enqueue_at,
+      o.created_at ?? o.enqueue_at,
       o.expires_at ?? o.enqueue_at + 24 * 60 * 60 * 1000,
       o.lease_expires_at ?? null,
       o.data_purged_at ?? null,
       o.artifacts ?? "{}",
       o.attempt ?? 0,
       o.claim_version ?? 0,
+      o.started_at ?? null,
+      o.current_stage ?? null,
+      o.progress_meta ?? null,
     );
 }
 

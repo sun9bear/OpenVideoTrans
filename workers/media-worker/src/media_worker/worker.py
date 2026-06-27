@@ -20,7 +20,7 @@ from ovt_schemas import Job
 
 from .admission import SourceRejected, admit_source
 from .config import DEFAULT_CONFIG, WorkerConfig
-from .control_plane import Claim, ControlPlane, StaleClaimError
+from .control_plane import Claim, ControlPlane, ProgressTelemetry, StaleClaimError
 from .storage import SourceTooLargeError, Storage
 
 logger = logging.getLogger("media_worker")
@@ -137,7 +137,10 @@ class Heartbeat:
         # promptly on stop. Renewal is driven purely by this timer, never by stage edges (plan §6).
         started = self._clock()
         while not self._stop.wait(self._interval):
-            if self._max_total_sec is not None and self._clock() - started >= self._max_total_sec:
+            # One clock read per iteration, reused for BOTH the hard-cap check and the OBS stage
+            # timing telemetry (so telemetry doesn't change the lease/timeout tick semantics).
+            tnow = self._clock()
+            if self._max_total_sec is not None and tnow - started >= self._max_total_sec:
                 # Hard cap reached (plan §6 job_hard_timeout_sec): stop renewing so the lease
                 # lapses and the sweeper requeues/fails it (a wedged stage can't hold it forever).
                 logger.warning("job %s hit the hard timeout; stopping lease renewal", self._job_id)
@@ -145,7 +148,15 @@ class Heartbeat:
                     self._on_lost()
                 return
             try:
-                self._cp.heartbeat(self._job_id, self._claim_version, stage=self._stage)
+                # OBS (#24): report stage timing. The stub selects no provider and never touches the
+                # free pool, so provider / chunk_* / free_pool_result stay None until M2-CLOSE.
+                elapsed_ms = max(0, int((tnow - started) * 1000))
+                self._cp.heartbeat(
+                    self._job_id,
+                    self._claim_version,
+                    stage=self._stage,
+                    telemetry=ProgressTelemetry(stage_elapsed_ms=elapsed_ms),
+                )
             except StaleClaimError:
                 # Lease reclaimed -> this worker is stale; stop renewing. Exactly-once is enforced
                 # server-side (claim_version-gated complete/fail), so we needn't race the new owner.
