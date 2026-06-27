@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Mapping
+from pathlib import Path
 
 from media_worker.config import WorkerConfig
 from media_worker.control_plane import (
@@ -18,6 +19,7 @@ from media_worker.control_plane import (
     StaleClaimError,
 )
 from media_worker.storage import SourceTooLargeError
+from media_worker.worker import artifact_key
 from ovt_schemas import AigcMarking, Job, JobArtifacts, JobPlan
 
 # Production-shaped knobs (30s heartbeat / 180s lease), mirroring the control-plane defaults.
@@ -193,3 +195,34 @@ class FakeStorage:
 # separately in test_admission.py + the disguised-playlist integration test in test_worker.py.
 def ALLOW_ADMIT(path: object, job: object, config: object) -> None:  # noqa: N802, ARG001
     return None
+
+
+# A copy-loop artifact producer for the orchestration tests: writes the SOURCE bytes to each
+# output_mode artifact (what the T2.2 stub did), so the heartbeat / cleanup / completion / timeout
+# tests need no ffmpeg or real providers. The REAL producer (run_real_pipeline) is exercised in
+# test_pipeline.py + `just dev`.
+_COPY_ARTIFACTS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "subtitle_only": (("srt_key", "output.srt", "application/x-subrip"),),
+    "dub_only": (("video_key", "output.mp4", "video/mp4"),),
+    "both": (
+        ("video_key", "output.mp4", "video/mp4"),
+        ("srt_key", "output.srt", "application/x-subrip"),
+    ),
+}
+
+
+def COPY_PRODUCE(  # noqa: N802
+    _cp: object,
+    storage: FakeStorage,
+    claim: Claim,
+    _workdir: Path | str,
+    in_path: Path,
+    **_kw: object,
+) -> dict[str, str]:
+    data = in_path.read_bytes()
+    artifacts: dict[str, str] = {}
+    for field, name, content_type in _COPY_ARTIFACTS[claim.job.output_mode]:
+        key = artifact_key(claim.job.job_id, claim.claim_version, name)
+        storage.upload(key, data, content_type=content_type)
+        artifacts[field] = key
+    return artifacts

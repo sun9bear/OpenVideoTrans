@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 
 from .control_plane import HttpControlPlane
+from .pipeline import inject_provider_env
 from .storage import S3Storage
 from .worker import run_forever
 
@@ -42,10 +43,14 @@ def main() -> int:
     # Pull R2 + free-provider creds over the authed /internal channel and keep them in memory only.
     creds = cp.get_credentials()
     storage = S3Storage(creds.r2, endpoint=r2_endpoint)
+    # Fold the pulled free-provider keys into the process env so provider-adapters' env-keyed
+    # select() resolves them when the pipeline routes (M2-CLOSE). In-process env ONLY (SECRETS keeps
+    # the keys off the box disk). Returns the configured NAMES (never values) for the startup log.
+    configured = inject_provider_env(creds.providers)
     # Log provider NAMES only — never a key value.
     logger.info(
-        "pulled worker credentials: storage configured; providers available: %s",
-        ", ".join(sorted(creds.providers)) or "(none)",
+        "pulled worker credentials: storage configured; free providers: %s",
+        ", ".join(configured) or "(none)",
     )
     run_forever(cp, storage, workdir_base=workdir)
     return 0

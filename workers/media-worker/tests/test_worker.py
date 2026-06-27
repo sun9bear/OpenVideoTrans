@@ -9,6 +9,7 @@ import pytest
 from autodub_core import ffmpeg_utils as ff
 from autodub_core.isolation import PathEscapeError
 from media_worker.config import WorkerConfig
+from media_worker.pipeline import FreePoolExhausted
 from media_worker.worker import (
     artifact_key,
     clean_orphan_workdirs,
@@ -18,7 +19,16 @@ from media_worker.worker import (
     run_once,
     source_key_for,
 )
-from mw_fakes import ALLOW_ADMIT, TEST_CONFIG, Claim, FakeControlPlane, FakeStorage, make_job
+from mw_fakes import (
+    ALLOW_ADMIT,
+    COPY_PRODUCE,
+    TEST_CONFIG,
+    Claim,
+    FakeControlPlane,
+    FakeStorage,
+    make_job,
+)
+from provider_adapters import LanguageError
 
 
 def test_source_key_matches_control_plane_convention() -> None:
@@ -38,10 +48,13 @@ def test_closed_loop_copies_source_to_artifact_and_completes(tmp_path: Path) -> 
     job = make_job(job_id="job_a", upload_session_id="us_a", output_mode="dub_only")
     cp = FakeControlPlane(config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)])
     storage = FakeStorage({"uploads/us_a": b"VIDEOBYTES"})
-    jid = run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT)
+    jid = run_once(
+        cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT,
+        produce=COPY_PRODUCE,
+    )
     assert jid == "job_a"
     akey = artifact_key("job_a", 1, "output.mp4")
-    assert storage.objects[akey] == b"VIDEOBYTES"  # input copied as-is to output (stub)
+    assert storage.objects[akey] == b"VIDEOBYTES"  # the fake producer copied the source bytes
     assert cp.completed == [("job_a", 1, {"video_key": akey})]
     assert cp.failed == []
     assert not (tmp_path / "job_a__1").exists()  # try/finally cleaned the cv-scoped workdir
@@ -51,7 +64,10 @@ def test_subtitle_only_completes_with_srt_key(tmp_path: Path) -> None:
     job = make_job(job_id="job_s", upload_session_id="us_s", output_mode="subtitle_only")
     cp = FakeControlPlane(config=TEST_CONFIG, claims=[Claim(job=job, claim_version=2, attempt=1)])
     storage = FakeStorage({"uploads/us_s": b"X"})
-    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT)
+    run_once(
+        cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT,
+        produce=COPY_PRODUCE,
+    )
     assert cp.completed == [("job_s", 2, {"srt_key": artifact_key("job_s", 2, "output.srt")})]
 
 
@@ -60,12 +76,49 @@ def test_both_mode_completes_with_both_artifacts(tmp_path: Path) -> None:
     job = make_job(job_id="job_b", upload_session_id="us_b", output_mode="both")
     cp = FakeControlPlane(config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)])
     storage = FakeStorage({"uploads/us_b": b"SRC"})
-    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT)
+    run_once(
+        cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT,
+        produce=COPY_PRODUCE,
+    )
     vkey = artifact_key("job_b", 1, "output.mp4")
     skey = artifact_key("job_b", 1, "output.srt")
     assert cp.completed == [("job_b", 1, {"video_key": vkey, "srt_key": skey})]
     assert storage.objects[vkey] == b"SRC"
     assert storage.objects[skey] == b"SRC"
+
+
+def test_language_gate_failure_maps_to_its_error_code(tmp_path: Path) -> None:
+    # A produce step that fails closed on the language gate is reported with its schema error_code
+    # (not internal_error), so the user sees a precise reason.
+    job = make_job(job_id="job_lg", upload_session_id="us_lg", output_mode="dub_only")
+    cp = FakeControlPlane(config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)])
+    storage = FakeStorage({"uploads/us_lg": b"X"})
+
+    def _raise(*_a: object, **_k: object) -> dict[str, str]:
+        raise LanguageError("no_tts_model_for_language", "no commercial-safe voice")
+
+    run_once(
+        cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT, produce=_raise
+    )
+    assert cp.failed == [("job_lg", 1, "no_tts_model_for_language", None)]
+    assert cp.completed == []
+
+
+def test_free_pool_exhausted_maps_to_error_code(tmp_path: Path) -> None:
+    # Every free provider for a needed stage exhausted -> free_pool_exhausted, a coded terminal,
+    # NEVER a paid escalation (red line §1/§14).
+    job = make_job(job_id="job_fp", upload_session_id="us_fp", output_mode="dub_only")
+    cp = FakeControlPlane(config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)])
+    storage = FakeStorage({"uploads/us_fp": b"X"})
+
+    def _raise(*_a: object, **_k: object) -> dict[str, str]:
+        raise FreePoolExhausted("asr")
+
+    run_once(
+        cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT, produce=_raise
+    )
+    assert cp.failed == [("job_fp", 1, "free_pool_exhausted", None)]
+    assert cp.completed == []
 
 
 def test_no_job_returns_none_without_touching_storage(tmp_path: Path) -> None:
@@ -97,7 +150,10 @@ def test_completion_transport_error_does_not_fail_job(tmp_path: Path) -> None:
         config=TEST_CONFIG, claims=[Claim(job=job, claim_version=1, attempt=1)], complete_error=True
     )
     storage = FakeStorage({"uploads/us_c": b"X"})
-    run_once(cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT)
+    run_once(
+        cp, storage, workdir_base=tmp_path, config=TEST_CONFIG, admit=ALLOW_ADMIT,
+        produce=COPY_PRODUCE,
+    )
     assert cp.failed == []  # NOT failed despite the /complete transport error
     assert storage.objects[artifact_key("job_c", 1, "output.mp4")] == b"X"  # work succeeded
     assert not (tmp_path / "job_c__1").exists()  # workdir still cleaned
@@ -124,7 +180,10 @@ def test_heartbeat_renews_during_a_long_single_stage(tmp_path: Path) -> None:
     worker = threading.Thread(
         target=run_once,
         args=(cp, storage),
-        kwargs={"workdir_base": tmp_path, "config": FAST_CONFIG, "admit": ALLOW_ADMIT},
+        kwargs={
+            "workdir_base": tmp_path, "config": FAST_CONFIG, "admit": ALLOW_ADMIT,
+            "produce": COPY_PRODUCE,
+        },
     )
     worker.start()
     assert entered.wait(3.0)
@@ -156,6 +215,7 @@ def test_exceeding_hard_timeout_reports_processing_timeout(tmp_path: Path) -> No
         config=cfg,
         clock=lambda: next(times, 100.0),
         admit=ALLOW_ADMIT,
+        produce=COPY_PRODUCE,
     )
     assert cp.completed == []  # NOT marked done
     assert cp.failed == [("job_t", 1, "processing_timeout", None)]
@@ -189,7 +249,10 @@ def test_run_forever_refreshes_config_per_claim(tmp_path: Path) -> None:
     cp = _OneJobThenStop(stop)
     storage = FakeStorage({"uploads/us_r": b"X"})
     # config=None -> refresh path; admit pass-through (the copy-loop test, not the source gate).
-    run_forever(cp, storage, workdir_base=tmp_path, stop_event=stop, admit=ALLOW_ADMIT)
+    run_forever(
+        cp, storage, workdir_base=tmp_path, stop_event=stop, admit=ALLOW_ADMIT,
+        produce=COPY_PRODUCE,
+    )
     assert cp.config_calls == 2  # 1 at startup + 1 at the claim
     assert cp.completed == [("job_r", 1, {"video_key": artifact_key("job_r", 1, "output.mp4")})]
 
