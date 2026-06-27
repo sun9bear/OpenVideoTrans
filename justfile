@@ -66,7 +66,10 @@ build-ts:
 # Run the full local dev loop (DEVLOOP #25): one command, upload→claim→complete, no cloud.
 # Spins up a local S3 stub + the control-plane (tsx) + the real media-worker and drives one job
 # through. Prereqs: ffmpeg/ffprobe + node + pnpm (else it SKIPs loudly). See dev/README.md.
+# Sync FIRST so the spawned `python -m media_worker` finds the workspace member in a fresh checkout
+# (the root project has no deps; a bare `uv run` would not install the members — mirrors CI).
 dev:
+    uv sync --all-packages
     uv run python dev/dev_loop.py
 
 # ── Schema codegen ───────────────────────────────────────────────────────────

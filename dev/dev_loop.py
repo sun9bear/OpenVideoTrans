@@ -186,6 +186,12 @@ def run() -> int:
         deadline = time.monotonic() + 90
         state = "queued"
         while time.monotonic() < deadline:
+            # Fast-fail if the worker died (e.g. `No module named media_worker` when the workspace
+            # wasn't synced) instead of waiting out the timeout on a job that can never be claimed.
+            if worker_proc.poll() is not None:
+                code = worker_proc.returncode
+                print(f"[FAIL] worker exited early (code {code}); tail:\n{_tail(worker_log)}")
+                return 1
             _, jr = _http("GET", f"{cp_url}/api/jobs/{job_id}", headers=actor_headers)
             state = json.loads(jr)["job"]["status"]
             if state in ("done", "failed"):
