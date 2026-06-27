@@ -255,10 +255,13 @@ class _FreePoolSelectResolver:
     def __init__(self, inner: object) -> None:
         self._inner = inner
 
-    def select(self, kind: str, provider: str | None = None, *, allow_paid: bool = False) -> object:
-        if provider == _FREE_POOL_EXHAUSTED:
+    def select(self, kind: str, requested: str | None = None, allow_paid: bool = False) -> object:
+        # Signature MIRRORS the kernel's Resolver.select (kind, requested, allow_paid — all
+        # positional): pin_resolver wraps this and forwards allow_paid POSITIONALLY, so a
+        # keyword-only param here would TypeError on the first real selection (@CodeX bot R3 P1).
+        if requested == _FREE_POOL_EXHAUSTED:
             raise FreePoolExhausted(kind)
-        return self._inner.select(kind, provider, allow_paid=allow_paid)  # type: ignore[attr-defined]
+        return self._inner.select(kind, requested, allow_paid)  # type: ignore[attr-defined]
 
     def __getattr__(self, name: str) -> object:
         # Delegate anything else the kernel / pin_resolver needs to the real resolver.

@@ -60,8 +60,10 @@ class _FakeInnerResolver:
     def __init__(self) -> None:
         self.selected: list[tuple[str, str | None]] = []
 
-    def select(self, kind: str, provider: str | None = None, *, allow_paid: bool = False) -> object:
-        self.selected.append((kind, provider))
+    def select(self, kind: str, requested: str | None = None, allow_paid: bool = False) -> object:
+        # Positional allow_paid mirrors the real Resolver.select (pin_resolver forwards it
+        # positionally) — a keyword-only param here would diverge from the kernel protocol.
+        self.selected.append((kind, requested))
         return object()
 
 
@@ -229,6 +231,24 @@ def test_all_free_exhausted_for_a_needed_stage_raises_free_pool_exhausted(tmp_pa
         )
     assert ei.value.kind == "mt"
     assert run.calls[0]["mt"] == "__free_pool_exhausted__"  # MT was routed to the sentinel
+
+
+def test_free_pool_resolver_accepts_pin_resolver_positional_allow_paid() -> None:
+    # @CodeX bot R3 P1: the kernel wraps our resolver with autodub_core.pin_resolver, whose select()
+    # forwards allow_paid POSITIONALLY (select(kind, requested, allow_paid)). A keyword-only param
+    # would TypeError on the first real ASR/MT/TTS selection -> internal_error, so NO real job ever
+    # runs. This exercises the exact wrapping the default run_pipeline uses.
+    import media_worker.pipeline as pl
+    from autodub_core import pin_resolver
+
+    inner = _FakeInnerResolver()
+    # The wrapper is structurally (duck-typed) compatible at runtime; the kernel never type-checks.
+    pinned = pin_resolver(pl._FreePoolSelectResolver(inner))  # type: ignore[arg-type]
+    pinned.select("asr", "groq", False)  # positional allow_paid, as the kernel calls it
+    assert inner.selected == [("asr", "groq")]  # delegated through cleanly (no TypeError)
+    # a sentinel-routed stage still fails closed when the kernel actually reaches it.
+    with pytest.raises(pl.FreePoolExhausted):
+        pinned.select("mt", "__free_pool_exhausted__", False)
 
 
 def test_no_speech_skips_unavailable_mt_and_completes(tmp_path: Path) -> None:
