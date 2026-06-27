@@ -180,3 +180,93 @@ def test_emits_routing_telemetry(tmp_path: Path) -> None:
     )
     assert seen and seen[0]["free_pool_result"] == "ok"
     assert seen[0]["provider"] == "cloudflare"  # representative routed provider (asr)
+
+
+def test_reroute_budget_covers_both_mode_worst_case(tmp_path: Path) -> None:
+    # P2 (review): every non-tail provider of all three ladders 429s — the budget must let routing
+    # reach each stage's ladder TAIL (a viable $0 plan), not a false free_pool_exhausted.
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="both", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = FakeRunPipeline(quota_fail=(
+        ("asr", "groq"), ("asr", "cloudflare"),
+        ("mt", "cloudflare"), ("mt", "groq"), ("mt", "deepl"),
+        ("tts", "piper"), ("tts", "edge_tts"),
+    ))
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=object(), run_pipeline_fn=run,
+        available_providers=_avail({
+            "asr": {"groq", "cloudflare", "faster_whisper"},
+            "mt": {"cloudflare", "groq", "deepl", "ollama"},
+            "tts": {"piper", "edge_tts", "cloudflare"},
+        }),
+        now_ms=lambda: 1000,
+    )
+    assert artifacts == {
+        "video_key": "artifacts/job_x/1/output.mp4",
+        "srt_key": "artifacts/job_x/1/output.srt",
+    }
+    # routing reached every ladder tail — the only non-429'd providers (no false exhaust)
+    assert run.calls[-1] == {"asr": "faster_whisper", "mt": "ollama", "tts": "cloudflare"}
+
+
+def test_report_exhausted_failure_does_not_abort_rotation(tmp_path: Path) -> None:
+    # P3 (review): a transient failure of the exhausted-report POST must NOT abort the re-route
+    # (excluded[kind] already prevents re-picking the 429'd provider).
+    cp = FakeControlPlane(report_error=True)
+    storage = FakeStorage()
+    job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = FakeRunPipeline(quota_fail=(("asr", "groq"),))
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=object(), run_pipeline_fn=run,
+        available_providers=_avail({"asr": {"groq", "cloudflare"}, "mt": {"deepl"}}),
+        now_ms=lambda: 1000,
+    )
+    assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}
+    assert run.calls[0]["asr"] == "groq"
+    assert run.calls[1]["asr"] == "cloudflare"  # rotated despite the report POST failing
+    assert cp.exhausted_reports == []  # the report raised -> nothing recorded
+
+
+def test_tts_reroute_clears_tts_scratch(tmp_path: Path) -> None:
+    # P3 (review): on a mid-stream TTS 429 the per-segment raws are cleared before re-synth, so the
+    # new provider re-voices the WHOLE deliverable (no mixed timbre across segments).
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="dub_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    seen: dict[str, object] = {}
+
+    class _TtsFake:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def __call__(
+            self, paths: Any, resolver: object, *, source: str, job: Any, **_kw: object
+        ) -> Path:
+            self.n += 1
+            paths.tts.mkdir(parents=True, exist_ok=True)
+            if self.n == 1:
+                (paths.tts / "segment_0000.mp3").write_bytes(b"piper-voice")  # partial raw
+                raise QuotaExhausted(job.plan.tts, kind="tts", retry_after_sec=5.0)
+            seen["empty"] = list(paths.tts.iterdir()) == []  # cleared before the re-synth?
+            paths.dubbed_video.write_bytes(b"VIDEO")
+            return paths.dubbed_video
+
+    run = _TtsFake()
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=object(), run_pipeline_fn=run,
+        available_providers=_avail({
+            "asr": {"cloudflare"}, "mt": {"deepl"}, "tts": {"piper", "edge_tts"},
+        }),
+        now_ms=lambda: 1000,
+    )
+    assert artifacts == {"video_key": "artifacts/job_x/1/output.mp4"}
+    assert seen["empty"] is True  # the stale piper raw was cleared before edge_tts re-synth
+    assert run.n == 2

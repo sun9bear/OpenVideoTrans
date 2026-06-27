@@ -3,8 +3,8 @@
 Replaces the T2.2 stub copy-loop. Two responsibilities:
 
   * ``inject_provider_env`` — fold the SECRETS-pulled free-provider keys into the environment
-    so the env-keyed provider-adapters ``select()`` resolves them. The keys live in-process
-    env ONLY (SECRETS: never on the box disk).
+    so the env-keyed provider-adapters ``select()`` resolves them. The keys live in-process env ONLY
+    (SECRETS: never on the box disk).
 
   * ``run_real_pipeline`` — route each needed ASR/MT/TTS stage through the FREE-POOL circuit-breaker
     (``route_free`` against the control plane's shared availability snapshot), override ``job.plan``
@@ -22,7 +22,9 @@ provider-adapters; this module only chooses which free provider each stage uses.
 """
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 import time
 from collections.abc import Callable, Mapping, MutableMapping
 from pathlib import Path
@@ -42,6 +44,8 @@ from provider_adapters import (
 
 from .control_plane import ControlPlane
 from .storage import Storage
+
+logger = logging.getLogger("media_worker")
 
 _STAGE_KINDS = ("asr", "mt", "tts")
 # Default circuit-break window when a 429 carried no Retry-After: hold the provider down ~1h so we
@@ -114,35 +118,42 @@ def _deliverables(job: Job, paths: JobPaths) -> list[tuple[str, str, str, Path]]
     return out
 
 
-def _route(
-    cp: ControlPlane,
+def _snapshot(cp: ControlPlane, now_ms: Callable[[], int]) -> ProviderAvailability:
+    """Hydrate one shared FREE-POOL availability snapshot from the control plane (now-anchored)."""
+    snap = cp.get_provider_availability()
+    return ProviderAvailability(
+        now_ms=snap.now_ms or now_ms(), exhausted_until=dict(snap.exhausted_until)
+    )
+
+
+def _pick(
     kind: str,
+    snapshot: ProviderAvailability,
     excluded: set[str],
     available_providers: Callable[[str], frozenset[str]],
-    now_ms: Callable[[], int],
 ) -> str | None:
     """Pick a free provider for ``kind`` via the FREE-POOL router, or None if none is usable.
 
-    ``configured`` restricts route_free to providers whose adapter is actually available AND not
-    locally excluded (one we already saw 429 on this run). route_free further skips any provider the
-    shared snapshot marks circuit-broken, and NEVER returns a paid name (red line)."""
-    snap = cp.get_provider_availability()
-    avail = ProviderAvailability(
-        now_ms=snap.now_ms or now_ms(), exhausted_until=dict(snap.exhausted_until)
-    )
+    ``configured`` restricts route_free to providers whose adapter is available AND not locally
+    excluded (one we already saw 429 on this run). route_free further skips any provider the
+    snapshot marks circuit-broken, and NEVER returns a paid name (red line)."""
     configured = available_providers(kind) - excluded
-    result = route_free(kind, avail, configured=configured)
+    result = route_free(kind, snapshot, configured=configured)
     return result.provider if isinstance(result, ProviderResult) else None
 
 
-def _emit(
-    on_telemetry: Callable[..., None] | None, plan: Mapping[str, str | None], kinds: tuple[str, ...]
-) -> None:
-    # OBS (#24): report a representative routed provider + the routing outcome. Redaction-safe by
-    # construction (a ladder NAME + a closed-enum result; the control plane re-validates). Per-stage
-    # accuracy is deferred — run_pipeline runs the stages internally (kernel stays frozen).
+def _emit(on_telemetry: Callable[..., None] | None, *, provider: str | None) -> None:
+    # OBS (#24): report the routed provider + a successful routing outcome (redaction-safe: a ladder
+    # NAME + a closed-enum result; the control plane re-validates).
     if on_telemetry is not None:
-        on_telemetry(provider=plan[kinds[0]], free_pool_result="ok")
+        on_telemetry(provider=provider, free_pool_result="ok")
+
+
+def _emit_exhausted(on_telemetry: Callable[..., None] | None) -> None:
+    # OBS (#24): mark the free pool exhausted so the last heartbeat before a free_pool_exhausted
+    # failure reports the real routing outcome (not a stale "ok"); free_pool_exhausted is allowed.
+    if on_telemetry is not None:
+        on_telemetry(free_pool_result="free_pool_exhausted")
 
 
 def _infer_kind(provider: str, plan: Mapping[str, str | None], kinds: tuple[str, ...]) -> str:
@@ -150,6 +161,18 @@ def _infer_kind(provider: str, plan: Mapping[str, str | None], kinds: tuple[str,
         if plan.get(k) == provider:
             return k
     return kinds[-1]  # fall back to the deepest stage if the 429'd provider isn't in the plan
+
+
+def _clear_dir(d: Path) -> None:
+    """Remove the contents of a scratch dir (keep the dir). Used to drop a stage's partial outputs
+    so a re-routed provider re-produces them uniformly."""
+    if not d.exists():
+        return
+    for child in d.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
 
 
 def _collect(
@@ -180,49 +203,71 @@ def run_real_pipeline(
     make_key: Callable[[str, int, str], str],
     resolver: object | None = None,
     on_telemetry: Callable[..., None] | None = None,
-    run_pipeline_fn: Callable[..., Path] = _run_pipeline,
-    available_providers: Callable[[str], frozenset[str]] = _available_free_providers,
-    now_ms: Callable[[], int] = _now_ms,
-    max_reroutes: int = 6,
+    run_pipeline_fn: Callable[..., Path] | None = None,
+    available_providers: Callable[[str], frozenset[str]] | None = None,
+    now_ms: Callable[[], int] | None = None,
+    max_reroutes: int | None = None,
 ) -> dict[str, str]:
     """Run one claimed job through the REAL pipeline and return ``{artifact_field: r2_key}``.
 
     Raises ``LanguageError`` (unsupported pair, fail-closed -> the worker maps ``.code``),
     ``FreePoolExhausted`` (no free provider left -> ``free_pool_exhausted``), or ``PipelineError`` /
-    other (-> ``internal_error``). ``run_pipeline_fn`` / ``available_providers`` are injected so the
-    routing/rotation logic is testable in CI without ffmpeg; the real ffmpeg run is proved by
-    ``just dev`` (DEVLOOP) + autodub-core's e2e smoke."""
+    other (-> ``internal_error``). ``run_pipeline_fn`` / ``available_providers`` / ``now_ms`` are
+    injected so the routing/rotation logic is testable in CI without ffmpeg; the real ffmpeg run is
+    proved by ``just dev`` (DEVLOOP) + autodub-core's e2e smoke."""
     resolver = resolver if resolver is not None else Resolver()
+    run_fn: Callable[..., Path] = run_pipeline_fn if run_pipeline_fn is not None else _run_pipeline
+    avail_fn = available_providers if available_providers is not None else _available_free_providers
+    clock = now_ms if now_ms is not None else _now_ms
     # Fail-closed language gate (T1.3f) BEFORE any provider/transcode work.
     assert_language_pair(job.source_lang_hint, job.target_lang, job.output_mode)
     paths = JobPaths(Path(workdir) / "pipeline").ensure()
     kinds = _stage_kinds(job.output_mode)
     excluded: dict[str, set[str]] = {k: set() for k in _STAGE_KINDS}
     plan: dict[str, str | None] = {"asr": job.plan.asr, "mt": job.plan.mt, "tts": job.plan.tts}
-    # Initial route of every needed stage (a stage with no free provider fails closed up front).
+    # Reroute backstop: at most one rotation per free provider of each active stage. A kind whose
+    # providers are ALL excluded fails closed via _pick -> None first; this budget is sized to the
+    # active ladders so a worst-case burst (every non-tail provider of every stage 429s) can't trip
+    # the backstop before each stage has tried all its free providers (off-by-one fix).
+    if max_reroutes is None:
+        max_reroutes = sum(len(avail_fn(k)) for k in kinds) + 1
+    # Initial route: ONE shared availability snapshot for all stages (re-routes refetch fresh).
+    snapshot = _snapshot(cp, clock)
     for kind in kinds:
-        chosen = _route(cp, kind, excluded[kind], available_providers, now_ms)
+        chosen = _pick(kind, snapshot, excluded[kind], avail_fn)
         if chosen is None:
+            _emit_exhausted(on_telemetry)
             raise FreePoolExhausted(kind)
         plan[kind] = chosen
-    _emit(on_telemetry, plan, kinds)
+    _emit(on_telemetry, provider=plan[kinds[0]])
     for _ in range(max_reroutes + 1):
         routed = job.model_copy(update={"plan": job.plan.model_copy(update=plan)})
         try:
-            run_pipeline_fn(paths, resolver, source=str(in_path), job=routed)
+            run_fn(paths, resolver, source=str(in_path), job=routed)
             return _collect(storage, job, claim_version, paths, make_key)
         except QuotaExhausted as exc:
-            # Circuit-break THIS stage's provider (report shared + exclude locally) and re-route
-            # just that stage. The kernel's resumable skip-gates reuse the completed stages on the
-            # re-run, so only the failed stage onward repeats with the new provider (429 不复撞).
+            # Circuit-break THIS stage's provider and re-route just that stage. The kernel's
+            # resumable skip-gates reuse the completed stages on the re-run, so only the failed
+            # stage onward repeats with the new provider (429 不复撞).
             kind = exc.kind if exc.kind in _STAGE_KINDS else _infer_kind(exc.provider, plan, kinds)
             reported = plan.get(kind) or exc.provider  # the FREE provider we routed (never paid)
-            reset_ms = now_ms() + int((exc.retry_after_sec or _DEFAULT_RESET_SEC) * 1000)
-            cp.report_provider_exhausted(reported, reset_at_ms=reset_ms, reason="429")
+            reset_ms = clock() + int((exc.retry_after_sec or _DEFAULT_RESET_SEC) * 1000)
+            # A transient report blip must NOT abort the local re-route — excluded[kind] already
+            # prevents re-picking the 429'd provider, so the rotation proceeds either way.
+            try:
+                cp.report_provider_exhausted(reported, reset_at_ms=reset_ms, reason="429")
+            except Exception:
+                logger.warning("provider-exhausted report failed; re-routing %s locally", kind)
             excluded[kind].add(reported)
-            chosen = _route(cp, kind, excluded[kind], available_providers, now_ms)
+            # TTS persists per-segment raws; clear them on a provider switch so the new voice is
+            # uniform across the whole deliverable (no mixed-timbre output across segments).
+            if kind == "tts":
+                _clear_dir(paths.tts)
+            chosen = _pick(kind, _snapshot(cp, clock), excluded[kind], avail_fn)
             if chosen is None:
+                _emit_exhausted(on_telemetry)
                 raise FreePoolExhausted(kind) from exc
             plan[kind] = chosen
-            _emit(on_telemetry, plan, kinds)
-    raise FreePoolExhausted("max_reroutes")  # bounded rotation budget spent without converging
+            _emit(on_telemetry, provider=chosen)  # report the rotated provider (per-stage fidelity)
+    _emit_exhausted(on_telemetry)
+    raise FreePoolExhausted("max_reroutes")  # bounded backstop (sized above so this is unreachable)

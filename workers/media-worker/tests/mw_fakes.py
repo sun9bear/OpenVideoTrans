@@ -83,6 +83,7 @@ class FakeControlPlane:
         config_error: bool = False,
         fail_error: bool = False,
         availability: ProviderSnapshot | None = None,
+        report_error: bool = False,
     ) -> None:
         self._config = config
         self._claims = list(claims or [])
@@ -91,6 +92,7 @@ class FakeControlPlane:
         self._config_error = config_error
         self._fail_error = fail_error
         self._availability = availability or ProviderSnapshot(now_ms=0, exhausted_until={})
+        self._report_error = report_error
         self._lock = threading.Lock()
         self.heartbeats: list[tuple[str, int, str | None]] = []
         # FREE-POOL (M2-CLOSE): every report_provider_exhausted call, recorded for assertions.
@@ -149,6 +151,8 @@ class FakeControlPlane:
     def report_provider_exhausted(
         self, provider: str, *, reset_at_ms: int, reason: str | None = None
     ) -> None:
+        if self._report_error:
+            raise ControlPlaneError(f"transient error reporting {provider} exhausted")
         with self._lock:
             self.exhausted_reports.append((provider, reset_at_ms, reason))
 
