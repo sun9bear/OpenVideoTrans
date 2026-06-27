@@ -53,6 +53,45 @@ class FakeRunPipeline:
         return paths.dubbed_video if job.output_mode != "subtitle_only" else paths.subtitles
 
 
+class _FakeInnerResolver:
+    """A resolver whose select() returns a dummy for any real provider (the fake run never uses the
+    returned ProviderInfo) — so _FreePoolSelectResolver can delegate non-sentinel selects to it."""
+
+    def __init__(self) -> None:
+        self.selected: list[tuple[str, str | None]] = []
+
+    def select(self, kind: str, provider: str | None = None, *, allow_paid: bool = False) -> object:
+        self.selected.append((kind, provider))
+        return object()
+
+
+class _SelectingRun:
+    """Stands in for run_pipeline but, unlike FakeRunPipeline, simulates the kernel CALLING
+    resolver.select for the stages it actually needs (``needs``) — so a sentinel-routed stage that
+    is reached raises FreePoolExhausted (the kernel's translate()/tts() resolve a provider only when
+    there is work), while a stage the kernel skips (no-speech) never does."""
+
+    def __init__(self, needs: tuple[str, ...]) -> None:
+        self.needs = needs
+        self.calls: list[dict[str, str | None]] = []
+
+    def __call__(
+        self, paths: Any, resolver: Any, *, source: str, target_lang: str,
+        job: Any, **_kw: object,
+    ) -> Path:
+        assert target_lang == job.target_lang
+        plan = {"asr": job.plan.asr, "mt": job.plan.mt, "tts": job.plan.tts}
+        self.calls.append(plan)
+        for kind in ("asr", "mt", "tts"):
+            if kind in self.needs:
+                resolver.select(kind, plan[kind], allow_paid=False)  # sentinel -> FreePoolExhausted
+        if job.output_mode in ("dub_only", "both"):
+            paths.dubbed_video.write_bytes(b"DUBBED-VIDEO")
+        if job.output_mode in ("subtitle_only", "both"):
+            paths.subtitles.write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n", encoding="utf-8")
+        return paths.dubbed_video if job.output_mode != "subtitle_only" else paths.subtitles
+
+
 # ── inject_provider_env (Piece 3) ─────────────────────────────────────────────
 def test_inject_provider_env_maps_payload_fields_to_adapter_env_vars() -> None:
     # CodeX P1: the credentials payload uses GENERIC field names (apiKey/accountId/apiToken,
@@ -169,8 +208,10 @@ def test_429_reports_exhausted_and_reroutes_only_the_failed_stage(tmp_path: Path
     assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}
 
 
-def test_all_free_exhausted_for_a_stage_raises_free_pool_exhausted(tmp_path: Path) -> None:
-    # deepl is the only configured MT, and the shared snapshot marks it circuit-broken -> no MT.
+def test_all_free_exhausted_for_a_needed_stage_raises_free_pool_exhausted(tmp_path: Path) -> None:
+    # deepl is the only configured MT and the shared snapshot marks it circuit-broken -> no MT. The
+    # job HAS speech (the kernel reaches translate -> select(mt)), so the sentinel-routed MT stage
+    # fails closed with free_pool_exhausted lazily AT THE CALL — never re-hitting the broken one.
     cp = FakeControlPlane(
         availability=ProviderSnapshot(now_ms=1000, exhausted_until={"deepl": 9_999_999})
     )
@@ -178,14 +219,35 @@ def test_all_free_exhausted_for_a_stage_raises_free_pool_exhausted(tmp_path: Pat
     job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
     in_path = tmp_path / "input"
     in_path.write_bytes(b"src")
+    run = _SelectingRun(needs=("asr", "mt"))  # speech present -> the kernel needs MT
     with pytest.raises(FreePoolExhausted) as ei:
         run_real_pipeline(
             cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
-            resolver=object(), run_pipeline_fn=FakeRunPipeline(),
+            resolver=_FakeInnerResolver(), run_pipeline_fn=run,
             available_providers=_avail({"asr": {"cloudflare"}, "mt": {"deepl"}}),
             now_ms=lambda: 1000,
         )
     assert ei.value.kind == "mt"
+    assert run.calls[0]["mt"] == "__free_pool_exhausted__"  # MT was routed to the sentinel
+
+
+def test_no_speech_skips_unavailable_mt_and_completes(tmp_path: Path) -> None:
+    # @CodeX bot M2-CLOSE P2: a no-speech upload -> the kernel skips translate()/select(mt), so an
+    # MT pool that is unconfigured/circuit-broken must NOT fail the job up front. MT routes to the
+    # sentinel and, never reached, the job completes (here an empty-but-valid subtitle deliverable).
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = _SelectingRun(needs=("asr",))  # no speech -> the kernel never resolves MT
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=_FakeInnerResolver(), run_pipeline_fn=run,
+        available_providers=_avail({"asr": {"cloudflare"}, "mt": set()}),  # MT pool empty
+        now_ms=lambda: 1000,
+    )
+    assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}  # completed despite empty MT
+    assert run.calls[0]["mt"] == "__free_pool_exhausted__"  # MT was deferred to the sentinel
 
 
 def test_fails_closed_on_unsupported_dub_language(tmp_path: Path) -> None:

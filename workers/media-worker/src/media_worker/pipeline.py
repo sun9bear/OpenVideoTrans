@@ -55,6 +55,12 @@ _STAGE_KINDS = ("asr", "mt", "tts")
 # Default circuit-break window when a 429 carried no Retry-After: hold the provider down ~1h so we
 # don't immediately re-hit a quota'd API (the control plane clamps to its own max). 429 不复撞.
 _DEFAULT_RESET_SEC = 3600.0
+# Sentinel plan value for an MT/TTS stage with NO free provider available up front. The kernel SKIPS
+# translate()/tts() entirely for a no-speech / nothing-to-synth job (autodub-core stages.py), so
+# failing such a stage up front would wrongly reject a job the kernel could complete. Routing it to
+# this sentinel makes _FreePoolSelectResolver fail closed (FreePoolExhausted) ONLY if the kernel
+# actually reaches the stage — never re-hitting a circuit-broken provider (@CodeX bot M2-CLOSE).
+_FREE_POOL_EXHAUSTED = "__free_pool_exhausted__"
 
 # The /internal/credentials provider payload uses GENERIC field names (apiKey/accountId/apiToken —
 # apps/control-plane/src/credentials.ts ProviderCredentials); provider-adapters' adapters read
@@ -239,6 +245,45 @@ def _collect(
     return artifacts
 
 
+class _FreePoolSelectResolver:
+    """Wraps the kernel's Resolver so a stage routed to the FREE-POOL sentinel fails closed at the
+    MOMENT the kernel calls ``select()`` for it — not up front. ASR always runs (routed eagerly),
+    but MT/TTS are data-dependent: the kernel skips ``translate()``/``tts()`` for an empty
+    transcript, so a sentinel-routed MT/TTS stage that's never reached doesn't fail the job. Every
+    other call delegates to the wrapped resolver unchanged (@CodeX bot M2-CLOSE)."""
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+
+    def select(self, kind: str, provider: str | None = None, *, allow_paid: bool = False) -> object:
+        if provider == _FREE_POOL_EXHAUSTED:
+            raise FreePoolExhausted(kind)
+        return self._inner.select(kind, provider, allow_paid=allow_paid)  # type: ignore[attr-defined]
+
+    def __getattr__(self, name: str) -> object:
+        # Delegate anything else the kernel / pin_resolver needs to the real resolver.
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+
+def _route_plan(
+    kind: str,
+    snapshot: ProviderAvailability,
+    excluded: set[str],
+    avail_fn: Callable[[str], frozenset[str]],
+    on_telemetry: Callable[..., None] | None,
+) -> str:
+    """Plan value for ``kind``: a picked free provider, else fail-closed handling. ASR always runs,
+    so no free provider fails the job NOW; MT/TTS may be skipped by the kernel (no-speech), so they
+    defer to the sentinel and fail closed only if the kernel actually reaches them."""
+    chosen = _pick(kind, snapshot, excluded, avail_fn)
+    if chosen is not None:
+        return chosen
+    if kind == "asr":
+        _emit_exhausted(on_telemetry)
+        raise FreePoolExhausted(kind)
+    return _FREE_POOL_EXHAUSTED
+
+
 def run_real_pipeline(
     cp: ControlPlane,
     storage: Storage,
@@ -263,6 +308,10 @@ def run_real_pipeline(
     injected so the routing/rotation logic is testable in CI without ffmpeg; the real ffmpeg run is
     proved by ``just dev`` (DEVLOOP) + autodub-core's e2e smoke."""
     resolver = resolver if resolver is not None else Resolver()
+    # The kernel calls resolver.select() per stage only when it actually needs that provider
+    # (translate()/tts() skip it for an empty job). Wrap so a sentinel-routed stage fails closed
+    # lazily, at the call, rather than up front (@CodeX bot M2-CLOSE).
+    kernel_resolver = _FreePoolSelectResolver(resolver)
     run_fn: Callable[..., Path] = run_pipeline_fn if run_pipeline_fn is not None else _run_pipeline
     avail_fn: Callable[[str], frozenset[str]] = (
         available_providers
@@ -285,19 +334,21 @@ def run_real_pipeline(
     # Initial route: ONE shared availability snapshot for all stages (re-routes refetch fresh).
     snapshot = _snapshot(cp, clock)
     for kind in kinds:
-        chosen = _pick(kind, snapshot, excluded[kind], avail_fn)
-        if chosen is None:
-            _emit_exhausted(on_telemetry)
-            raise FreePoolExhausted(kind)
-        plan[kind] = chosen
+        plan[kind] = _route_plan(kind, snapshot, excluded[kind], avail_fn, on_telemetry)
     _emit(on_telemetry, provider=plan[kinds[0]])
     for _ in range(max_reroutes + 1):
         routed = job.model_copy(update={"plan": job.plan.model_copy(update=plan)})
         try:
             # target_lang is a REQUIRED kwarg of autodub_core.run_pipeline (it derives the rest from
             # `job`, but the signature still requires it) — omitting it raises TypeError (CodeX P1).
-            run_fn(paths, resolver, source=str(in_path), target_lang=routed.target_lang, job=routed)
+            run_fn(paths, kernel_resolver, source=str(in_path),
+                   target_lang=routed.target_lang, job=routed)
             return _collect(storage, job, claim_version, paths, make_key)
+        except FreePoolExhausted:
+            # A sentinel-routed MT/TTS stage the kernel actually REACHED (the job had speech /
+            # needed a dub) — fail closed now and emit the real routing outcome (@CodeX bot).
+            _emit_exhausted(on_telemetry)
+            raise
         except QuotaExhausted as exc:
             # The circuit-breaker state is PER-PROVIDER (shared), not per-stage: when a provider
             # serving several kinds (cloudflare = asr/mt/tts, groq = asr/mt) 429s, exclude it and
@@ -331,11 +382,10 @@ def run_real_pipeline(
                 # uniform across the whole deliverable (no mixed-timbre output across segments).
                 if k == "tts":
                     _clear_dir(paths.tts)
-                chosen = _pick(k, snapshot, excluded[k], avail_fn)
-                if chosen is None:
-                    _emit_exhausted(on_telemetry)
-                    raise FreePoolExhausted(k) from exc
-                plan[k] = chosen
+                # Same lazy-fail rule as the initial route: ASR re-route with no provider fails the
+                # job now; MT/TTS defer to the sentinel (the kernel may still skip them if the
+                # re-run ASR yields no speech) and fail closed only when actually reached.
+                plan[k] = _route_plan(k, snapshot, excluded[k], avail_fn, on_telemetry)
             _emit(on_telemetry, provider=plan[kinds[0]])
     _emit_exhausted(on_telemetry)
     raise FreePoolExhausted("max_reroutes")  # bounded backstop (sized above so this is unreachable)
