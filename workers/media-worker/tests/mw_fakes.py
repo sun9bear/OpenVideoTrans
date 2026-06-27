@@ -10,7 +10,7 @@ import threading
 from collections.abc import Mapping
 
 from media_worker.config import WorkerConfig
-from media_worker.control_plane import Claim, ControlPlaneError, StaleClaimError
+from media_worker.control_plane import Claim, ControlPlaneError, ProgressTelemetry, StaleClaimError
 from media_worker.storage import SourceTooLargeError
 from ovt_schemas import AigcMarking, Job, JobArtifacts, JobPlan
 
@@ -83,6 +83,9 @@ class FakeControlPlane:
         self._fail_error = fail_error
         self._lock = threading.Lock()
         self.heartbeats: list[tuple[str, int, str | None]] = []
+        # OBS (#24): the telemetry passed alongside each heartbeat, recorded in parallel so the
+        # existing 3-tuple `heartbeats` unpacks stay intact.
+        self.telemetry: list[ProgressTelemetry | None] = []
         self.completed: list[tuple[str, int, dict[str, str]]] = []
         self.failed: list[tuple[str, int, str, str | None]] = []
 
@@ -95,9 +98,17 @@ class FakeControlPlane:
         with self._lock:
             return self._claims.pop(0) if self._claims else None
 
-    def heartbeat(self, job_id: str, claim_version: int, *, stage: str | None = None) -> None:
+    def heartbeat(
+        self,
+        job_id: str,
+        claim_version: int,
+        *,
+        stage: str | None = None,
+        telemetry: ProgressTelemetry | None = None,
+    ) -> None:
         with self._lock:
             self.heartbeats.append((job_id, claim_version, stage))
+            self.telemetry.append(telemetry)
         if self._stale:
             raise StaleClaimError(f"job {job_id} claim {claim_version} superseded")
 

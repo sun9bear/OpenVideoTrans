@@ -128,7 +128,8 @@ export async function recoverLeases(
   // create-time wake is long gone). worker_lost rows are terminal, so they get no wake.
   const requeue = await db
     .prepare(
-      `UPDATE jobs SET status = 'queued', lease_expires_at = NULL, current_stage = 'requeued'
+      `UPDATE jobs SET status = 'queued', lease_expires_at = NULL, current_stage = 'requeued',
+                       progress_meta = NULL
          WHERE job_id IN (
            SELECT job_id FROM jobs
              WHERE status = 'running' AND lease_expires_at <= ? AND attempt < ?

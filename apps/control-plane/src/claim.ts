@@ -63,7 +63,11 @@ SET status = 'running',
     attempt = attempt + 1,
     lease_expires_at = ? + ?,
     started_at = COALESCE(started_at, ?),
-    current_stage = 'claimed'
+    current_stage = 'claimed',
+    -- Clear any progress telemetry left by a SUPERSEDED attempt (OBS #24): on reclaim of an expired
+    -- running job the bumped claim_version starts fresh, so the dead attempt's progress_meta must not
+    -- be aggregated into the metrics view for the new claim until its first heartbeat. Literal (no '?').
+    progress_meta = NULL
 WHERE job_id = (
     SELECT job_id FROM jobs
     WHERE (status = 'queued' OR (status = 'running' AND lease_expires_at <= ?))

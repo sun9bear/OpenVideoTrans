@@ -47,6 +47,13 @@ jobs:
       - name: FREE-POOL §23 red-line invariant
         run: pnpm --filter @open-video-trans/control-plane exec vitest run test/providers.guard.test.ts
 
+      # OBS §24 redaction guard: a named, visible gate asserting the observability surface (structured
+      # logs, the /internal/admin/metrics payload, and stored progress_meta) never carries a provider
+      # key / raw body / plaintext IP / original filename (脱敏, backlog §OBS line 144) — the log +
+      # progress_meta allowlists hold. Fails loudly if a leak channel opens. (Also covered by `pnpm test`.)
+      - name: OBS §24 redaction invariant
+        run: pnpm --filter @open-video-trans/control-plane exec vitest run test/obs.test.ts
+
   # ── Python job ─────────────────────────────────────────────────────────────
   py:
     name: Py (ruff + pytest + typecheck)
