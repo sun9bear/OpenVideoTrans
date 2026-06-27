@@ -12,8 +12,10 @@ from .control_plane import (
     ControlPlane,
     ControlPlaneError,
     HttpControlPlane,
+    ProgressTelemetry,
     StaleClaimError,
     WorkerCredentials,
+    build_progress_body,
     parse_credentials,
 )
 from .storage import R2Settings, S3Storage, Storage, StorageError
@@ -38,8 +40,10 @@ __all__ = [
     "ControlPlane",
     "ControlPlaneError",
     "HttpControlPlane",
+    "ProgressTelemetry",
     "StaleClaimError",
     "WorkerCredentials",
+    "build_progress_body",
     "parse_credentials",
     "R2Settings",
     "S3Storage",

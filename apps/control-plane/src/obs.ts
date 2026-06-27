@@ -1,7 +1,7 @@
 import type { Ctx, Env } from "./core";
 import { json } from "./core";
 import type { RuntimeConfig } from "./config";
-import { getProviderAvailability } from "./providers";
+import { FREE_PROVIDERS, PAID_PROVIDER_NAMES, getProviderAvailability } from "./providers";
 
 // OBS (#24) — the observability baseline (backlog §OBS, §12 gap). Three concerns live here:
 //   1. structured JSON logging keyed by job_id (logEvent) — an ALLOWLIST, never a denylist;
@@ -33,6 +33,15 @@ export function isValidStage(value: string): boolean {
   return SLUG_RE.test(value);
 }
 
+// A telemetry/log `provider` must be a KNOWN provider name, not merely slug-shaped: a real API key
+// (e.g. a Groq "gsk_..." token) or a filename stem can be lowercase-slug-shaped and would otherwise
+// be stored/logged verbatim under the allowed `provider` key, defeating the redaction boundary. The
+// known set is the public FREE ∪ PAID provider names (providers.ts) — identifiers, never secrets.
+const KNOWN_PROVIDERS = new Set<string>([...FREE_PROVIDERS, ...PAID_PROVIDER_NAMES]);
+export function isKnownProvider(value: string): boolean {
+  return KNOWN_PROVIDERS.has(value);
+}
+
 // The canonical worker-progress fields (mirror media_worker ProgressTelemetry). free_pool_result is
 // the routing outcome enum (matches provider-adapters route_free kinds + the ok success case).
 const FREE_POOL_RESULTS = new Set(["ok", "free_pool_exhausted", "no_free_provider"]);
@@ -52,7 +61,7 @@ export function parseProgressMeta(raw: unknown): string | null {
   if (typeof b.stage === "string" && isValidStage(b.stage)) out.stage = b.stage;
   const elapsed = intOrUndef(b.stage_elapsed_ms);
   if (elapsed !== undefined) out.stage_elapsed_ms = elapsed;
-  if (typeof b.provider === "string" && SLUG_RE.test(b.provider)) out.provider = b.provider;
+  if (typeof b.provider === "string" && isKnownProvider(b.provider)) out.provider = b.provider;
   const ci = intOrUndef(b.chunk_index);
   if (ci !== undefined) out.chunk_index = ci;
   const cc = intOrUndef(b.chunk_count);
@@ -66,24 +75,25 @@ export function parseProgressMeta(raw: unknown): string | null {
 // Field-name allowlist for structured logs, partitioned by how each value is validated. A value that
 // fails its partition's check is DROPPED (never truncated-and-logged), and any key not listed is
 // dropped — so neither a leaky value under an allowed key nor a leaky new key reaches the log sink.
-const SLUG_KEYS = new Set(["stage", "provider"]);
 const TOKEN_KEYS = new Set([
-  "job_id", "status", "code", "error_code", "method", "route", "alert", "severity",
-  "free_pool_result", "name",
+  "job_id", "code", "error_code", "method", "route", "alert", "severity", "free_pool_result", "name",
 ]);
 const NUMERIC_KEYS = new Set([
-  "stage_elapsed_ms", "claim_latency_ms", "attempt", "claim_version", "chunk_index", "chunk_count",
-  "count", "n", "running_overdue", "configured_total", "exhausted", "available",
+  "status", "stage_elapsed_ms", "claim_latency_ms", "attempt", "claim_version", "chunk_index",
+  "chunk_count", "count", "n", "running_overdue", "configured_total", "exhausted", "available",
 ]);
 
 // Build one structured JSON log line. ALLOWLIST: start from {event}, then admit only known fields
-// whose value passes its check. error_detail, request bodies, IPs, filenames, tokens, and presigned
-// URLs are not on any list, so they never appear — by name OR value.
+// whose value passes its check. `stage` must be a slug and `provider` a KNOWN provider name (so a
+// slug-shaped token can't ride the provider key); error_detail, request bodies, IPs, filenames,
+// tokens, and presigned URLs are not on any list, so they never appear — by name OR value.
 export function buildLogLine(event: string, fields: Record<string, unknown>): string {
   const out: Record<string, unknown> = { event };
   for (const [k, v] of Object.entries(fields)) {
-    if (SLUG_KEYS.has(k)) {
-      if (typeof v === "string" && SLUG_RE.test(v)) out[k] = v;
+    if (k === "stage") {
+      if (typeof v === "string" && isValidStage(v)) out[k] = v;
+    } else if (k === "provider") {
+      if (typeof v === "string" && isKnownProvider(v)) out[k] = v;
     } else if (TOKEN_KEYS.has(k)) {
       if (typeof v === "string" && TOKEN_RE.test(v)) out[k] = v;
     } else if (NUMERIC_KEYS.has(k)) {
@@ -163,7 +173,14 @@ export interface MetricsSnapshot {
   stages: { by_stage: Record<string, number>; elapsed_ms: Summary | null };
   free_pool: FreePoolMetrics;
   global_minutes: { window_ms: number; advisory_consumed_ms: number };
-  worker: { last_lease_renewal_at: number | null; running_overdue: number };
+  worker: {
+    // The EXACT latest lease expiry across running jobs (no config coupling) — the unskewable
+    // liveness anchor. last_heartbeat_estimate_at derives the renewal instant from it but is an
+    // ESTIMATE (see computeMetrics). running_overdue is the actionable per-job lapse count.
+    last_lease_expires_at: number | null;
+    last_heartbeat_estimate_at: number | null;
+    running_overdue: number;
+  };
   window_ms: number;
 }
 
@@ -252,12 +269,19 @@ export async function computeMetrics(
   )
     .bind(now)
     .first<{ c: number }>();
-  // last_lease_renewal_at: heartbeat AND claim both set lease_expires_at = renewal + leaseTtlMs, so
-  // the most-recent renewal across running jobs is MAX(lease_expires_at) - leaseTtlMs. A single global
-  // liveness timestamp (no worker_id in schema -> per-worker attribution is out of OBS scope); the
-  // per-job lapse signal is running_overdue. COUPLED to the heartbeat lease formula by design.
+  // Worker liveness. last_lease_expires_at is the EXACT MAX(lease_expires_at) over running jobs — the
+  // raw stored value, with NO config coupling, the unskewable anchor (if it is far past `now`, every
+  // running job's lease has lapsed; running_overdue counts exactly those). last_heartbeat_estimate_at
+  // reconstructs the renewal instant as mx - leaseTtlMs and is an ESTIMATE: heartbeat AND claim set
+  // lease_expires_at = now + leaseTtlMs, so the subtraction is exact ONLY while the current leaseTtlMs
+  // equals the one in force at that renewal. A hot leaseTtlMs change (CFG-GUARD) between the renewal
+  // and this read skews the estimate by the delta until the next heartbeat self-corrects (~one
+  // heartbeat interval); the `_estimate_` name signals this, and the exact anchor + running_overdue
+  // are unaffected. A single global timestamp (no worker_id column -> per-worker attribution is out of
+  // OBS scope). Recording a real lease_renewed_at column is routed to M2-CLOSE if exactness is needed.
   const mx = leaseRow?.mx ?? null;
-  const last_lease_renewal_at = typeof mx === "number" ? mx - config.leaseTtlMs : null;
+  const last_lease_expires_at = typeof mx === "number" ? mx : null;
+  const last_heartbeat_estimate_at = typeof mx === "number" ? mx - config.leaseTtlMs : null;
 
   return {
     jobs,
@@ -268,7 +292,7 @@ export async function computeMetrics(
       window_ms: METRICS_WINDOW_MS,
       advisory_consumed_ms: typeof minutesRow?.s === "number" ? minutesRow.s : 0,
     },
-    worker: { last_lease_renewal_at, running_overdue: overdueRow?.c ?? 0 },
+    worker: { last_lease_expires_at, last_heartbeat_estimate_at, running_overdue: overdueRow?.c ?? 0 },
     window_ms: METRICS_WINDOW_MS,
   };
 }

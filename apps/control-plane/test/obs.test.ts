@@ -73,6 +73,17 @@ describe("OBS redaction — buildLogLine is an ALLOWLIST (key-name denylist is i
     expect(line).not.toContain("10.0.0.7");
     expect(line).not.toContain("1.2.3.4");
   });
+
+  it("admits provider only as a KNOWN name and logs numeric status (CodeX P2/P3)", () => {
+    const ok = buildLogLine("request_error", {
+      provider: "groq", status: 503, code: "admin_unconfigured", method: "GET", route: "/y",
+    });
+    expect(JSON.parse(ok)).toMatchObject({ provider: "groq", status: 503, code: "admin_unconfigured" });
+    // a slug-shaped but UNKNOWN provider (e.g. a lowercase Groq "gsk_..." token) is dropped
+    const leak = buildLogLine("x", { provider: "gsk_abcdef0123456789supersecret" });
+    expect(JSON.parse(leak)).not.toHaveProperty("provider");
+    expect(leak).not.toContain("gsk_abcdef");
+  });
 });
 
 describe("OBS redaction — parseProgressMeta is an ALLOWLIST over the raw heartbeat body", () => {
@@ -109,6 +120,11 @@ describe("OBS redaction — parseProgressMeta is an ALLOWLIST over the raw heart
     expect(parseProgressMeta({})).toBeNull();
     expect(parseProgressMeta(null)).toBeNull();
     expect(parseProgressMeta("a string")).toBeNull();
+  });
+
+  it("drops a slug-shaped but UNKNOWN provider (a lowercase api token); keeps a known one (CodeX P2)", () => {
+    expect(parseProgressMeta({ provider: "gsk_abcdef0123456789supersecret" })).toBeNull();
+    expect(parseProgressMeta({ provider: "groq", stage: "asr" })).toContain("groq");
   });
 
   it("accepts a partial telemetry (just stage + elapsed) — the stub-forced common case", () => {
@@ -211,8 +227,10 @@ describe("OBS computeMetrics — derived read-view over D1", () => {
     insertJob(raw, { job_id: "g2", enqueue_at: NOW, advisory_duration_ms: 120_000, status: "running", lease_expires_at: NOW + 180_000 });
     const m = await computeMetrics(env, NOW + 1000, DEFAULT_CONFIG);
     expect(m.global_minutes.advisory_consumed_ms).toBe(180_000);
-    // last_lease_renewal_at = MAX(lease_expires_at over running) - leaseTtlMs
-    expect(m.worker.last_lease_renewal_at).toBe(NOW + 180_000 - DEFAULT_CONFIG.leaseTtlMs);
+    // last_lease_expires_at = exact MAX(lease_expires_at over running) (no config coupling)
+    expect(m.worker.last_lease_expires_at).toBe(NOW + 180_000);
+    // last_heartbeat_estimate_at = that minus leaseTtlMs (an estimate; exact under a static config)
+    expect(m.worker.last_heartbeat_estimate_at).toBe(NOW + 180_000 - DEFAULT_CONFIG.leaseTtlMs);
     expect(m.worker.running_overdue).toBe(0);
   });
 
