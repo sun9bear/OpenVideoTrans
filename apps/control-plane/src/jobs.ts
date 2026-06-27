@@ -3,7 +3,7 @@ import type { Ctx } from "./core";
 import { HttpError, asObject, json, optInt, optString, readJson, reqEnum, reqInt, reqString } from "./core";
 import { admitJob } from "./abuse";
 import { claimOne } from "./claim";
-import { isValidStage, logEvent, parseProgressMeta } from "./obs";
+import { isKnownStage, logEvent, parseProgressMeta } from "./obs";
 import { presignR2Url } from "./sigv4";
 import { requireR2, verifyUpload } from "./uploads";
 
@@ -250,12 +250,14 @@ export async function heartbeat(ctx: Ctx): Promise<Response> {
   const body = asObject(await readJson(ctx.request));
   const claimVersion = reqInt(body, "claim_version");
   const stage = optString(body, "stage");
-  if (stage !== undefined && !isValidStage(stage)) {
-    throw new HttpError(400, "invalid_field", "stage must be a lowercase slug ([a-z][a-z0-9_]{0,63})");
-  }
+  // Only a KNOWN stage updates current_stage / is logged; an unknown value (incl. a slug-shaped secret
+  // or a not-yet-registered pipeline stage) is DROPPED at this closed-enum boundary. Crucially the
+  // heartbeat still renews the lease regardless of stage — lease renewal must NEVER depend on the
+  // stage vocabulary, or an unrecognized stage would strand the job (lost-worker footgun).
+  const knownStage = stage !== undefined && isKnownStage(stage) ? stage : null;
   // Allowlist the raw body into canonical telemetry JSON (or null) — an injected filename / IP / key
-  // as extra body keys is dropped here, never stored. COALESCE keeps prior telemetry when a heartbeat
-  // carries none (a bare lease renewal must not wipe the last reported stage data).
+  // (or an unknown stage) is dropped here, never stored. COALESCE keeps prior telemetry when a
+  // heartbeat carries none (a bare lease renewal must not wipe the last reported stage data).
   const progressMeta = parseProgressMeta(body);
   const now = ctx.deps.now();
   const leaseExpiresAt = now + ctx.config.leaseTtlMs;
@@ -264,7 +266,7 @@ export async function heartbeat(ctx: Ctx): Promise<Response> {
        progress_meta = COALESCE(?, progress_meta)
        WHERE job_id = ? AND status = 'running' AND claim_version = ?`,
   )
-    .bind(leaseExpiresAt, stage ?? null, progressMeta, jobId, claimVersion)
+    .bind(leaseExpiresAt, knownStage, progressMeta, jobId, claimVersion)
     .run();
   if (res.meta.changes === 0) {
     const exists = await getJobRow(ctx, jobId);
@@ -273,8 +275,8 @@ export async function heartbeat(ctx: Ctx): Promise<Response> {
     // is stale and must stop (do not extend a lease it no longer holds).
     throw new HttpError(409, "stale_claim", "claim superseded or job not running");
   }
-  // job_id-keyed structured log (allowlisted; never error_detail/body). stage is already slug-validated.
-  logEvent("job_progress", { job_id: jobId, claim_version: claimVersion, ...(stage ? { stage } : {}) });
+  // job_id-keyed structured log (allowlisted; only a known stage is echoed; never error_detail/body).
+  logEvent("job_progress", { job_id: jobId, claim_version: claimVersion, ...(knownStage ? { stage: knownStage } : {}) });
   return json({ lease_expires_at: leaseExpiresAt });
 }
 

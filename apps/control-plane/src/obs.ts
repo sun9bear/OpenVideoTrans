@@ -22,15 +22,21 @@ import { FREE_PROVIDERS, PAID_PROVIDER_NAMES, getProviderAvailability } from "./
 
 // ── redaction primitives ────────────────────────────────────────────────────────────────────────
 
-// A stage / provider identifier: a lowercase slug. Closed enough that an injected path, IP, filename,
-// or "two words ip=1.2.3.4" can never be a valid value (so it is dropped, not stored or logged).
-const SLUG_RE = /^[a-z][a-z0-9_]{0,63}$/;
 // A short server-generated token (job_id, status, code, route template, alert name, ...). Permissive
 // charset for route templates (`/api/jobs/:id`) but length-capped; never a free-text value sink.
 const TOKEN_RE = /^[A-Za-z0-9_./:?=-]{1,128}$/;
 
-export function isValidStage(value: string): boolean {
-  return SLUG_RE.test(value);
+// `stage` is a CLOSED enum, not an arbitrary slug: a slug-shaped secret (e.g. a Groq "gsk_..." token)
+// must not survive into current_stage / progress_meta / logs just because it has a slug shape — the
+// redaction contract rejects an unknown stage the same way it rejects an unknown provider. The set is
+// the control-plane lifecycle stages + the worker pipeline phases; M2-CLOSE EXTENDS it as the real
+// pipeline adds stages. An unknown stage is simply DROPPED (never stored/logged) and the heartbeat
+// still renews the lease — so the stage vocabulary never gates job liveness (no lost-worker footgun).
+const KNOWN_STAGES = new Set<string>([
+  "claimed", "processing", "ingest", "asr", "mt", "tts", "mux", "done", "failed", "requeued",
+]);
+export function isKnownStage(value: string): boolean {
+  return KNOWN_STAGES.has(value);
 }
 
 // A telemetry/log `provider` must be a KNOWN provider name, not merely slug-shaped: a real API key
@@ -58,7 +64,7 @@ export function parseProgressMeta(raw: unknown): string | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const b = raw as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  if (typeof b.stage === "string" && isValidStage(b.stage)) out.stage = b.stage;
+  if (typeof b.stage === "string" && isKnownStage(b.stage)) out.stage = b.stage;
   const elapsed = intOrUndef(b.stage_elapsed_ms);
   if (elapsed !== undefined) out.stage_elapsed_ms = elapsed;
   if (typeof b.provider === "string" && isKnownProvider(b.provider)) out.provider = b.provider;
@@ -91,7 +97,7 @@ export function buildLogLine(event: string, fields: Record<string, unknown>): st
   const out: Record<string, unknown> = { event };
   for (const [k, v] of Object.entries(fields)) {
     if (k === "stage") {
-      if (typeof v === "string" && isValidStage(v)) out[k] = v;
+      if (typeof v === "string" && isKnownStage(v)) out[k] = v;
     } else if (k === "provider") {
       if (typeof v === "string" && isKnownProvider(v)) out[k] = v;
     } else if (TOKEN_KEYS.has(k)) {
@@ -219,8 +225,11 @@ export async function computeMetrics(
     jobs.total += c;
   }
 
+  // Window by started_at (the CLAIM event we measure), NOT created_at: a job that sat queued longer
+  // than the window and is claimed now is exactly the starvation case this metric must surface —
+  // filtering on created_at would drop it. claim latency = started_at - enqueue_at (first-claim wait).
   const latRows = await env.DB.prepare(
-    "SELECT started_at, enqueue_at FROM jobs WHERE started_at IS NOT NULL AND created_at >= ?",
+    "SELECT started_at, enqueue_at FROM jobs WHERE started_at IS NOT NULL AND started_at >= ?",
   )
     .bind(windowStart)
     .all<LatencyRow>();
@@ -237,9 +246,9 @@ export async function computeMetrics(
   const by_stage: Record<string, number> = {};
   const elapsed: number[] = [];
   for (const r of stageRows.results) {
-    // Only surface a current_stage that is a valid slug — a poisoned/legacy free-text value is never
-    // echoed into the served snapshot (defense-in-depth with the heartbeat write-boundary guard).
-    if (typeof r.current_stage === "string" && isValidStage(r.current_stage)) {
+    // Only surface a KNOWN stage — a poisoned/legacy free-text value (or a slug-shaped secret) is
+    // never echoed into the served snapshot (defense-in-depth with the heartbeat write-boundary guard).
+    if (typeof r.current_stage === "string" && isKnownStage(r.current_stage)) {
       by_stage[r.current_stage] = (by_stage[r.current_stage] ?? 0) + 1;
     }
     if (typeof r.progress_meta === "string") {

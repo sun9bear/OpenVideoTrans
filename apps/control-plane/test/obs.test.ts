@@ -7,7 +7,7 @@ import {
   configuredFreeProviders,
   evaluateAlerts,
   freePoolMetrics,
-  isValidStage,
+  isKnownStage,
   parseProgressMeta,
 } from "../src/obs";
 import { call, insertJob, makeClock, makeEnv } from "./helpers/bindings";
@@ -133,13 +133,16 @@ describe("OBS redaction — parseProgressMeta is an ALLOWLIST over the raw heart
   });
 });
 
-describe("OBS isValidStage slug", () => {
-  it("accepts lowercase slugs and rejects spaces/paths/uppercase/over-length", () => {
-    for (const ok of ["asr", "mt", "tts", "processing", "claimed", "done", "free_pool_route"]) {
-      expect(isValidStage(ok)).toBe(true);
+describe("OBS isKnownStage closed enum (a slug shape is NOT enough — @codex P2)", () => {
+  it("accepts known lifecycle/pipeline stages and rejects unknown / slug-shaped-secret values", () => {
+    for (const ok of ["claimed", "processing", "ingest", "asr", "mt", "tts", "mux", "done", "failed", "requeued"]) {
+      expect(isKnownStage(ok)).toBe(true);
     }
-    for (const bad of ["", "ASR", "two words", "a/b", "../x", "ip=1.2.3.4", "x".repeat(65)]) {
-      expect(isValidStage(bad)).toBe(false);
+    for (const bad of [
+      "", "ASR", "two words", "a/b", "../x", "ip=1.2.3.4", "x".repeat(65),
+      "free_pool_route", "gsk_abcdef0123456789", "unknown_stage",
+    ]) {
+      expect(isKnownStage(bad)).toBe(false);
     }
   });
 });
@@ -165,6 +168,20 @@ describe("OBS computeMetrics — derived read-view over D1", () => {
     expect(m.claim_latency_ms?.n).toBe(2);
     expect(m.claim_latency_ms?.max).toBe(500);
     expect([100, 500]).toContain(m.claim_latency_ms?.p50);
+  });
+
+  it("claim latency windows by started_at — surfaces a long-queued job claimed recently (@codex P2)", async () => {
+    const { env, raw } = makeEnv({ adminToken: ADMIN });
+    const enqueued = NOW - 30 * 60 * 60 * 1000; // created 30h ago (outside any created_at window)
+    const claimedAt = NOW - 60 * 60 * 1000; // but CLAIMED 1h ago — exactly the starvation case
+    insertJob(raw, {
+      job_id: "old", enqueue_at: enqueued, created_at: enqueued, started_at: claimedAt,
+      status: "running", lease_expires_at: NOW + 180_000,
+    });
+    const m = await computeMetrics(env, NOW, DEFAULT_CONFIG);
+    // a created_at filter would DROP this; a started_at filter keeps it (latency = started - enqueue)
+    expect(m.claim_latency_ms?.n).toBe(1);
+    expect(m.claim_latency_ms?.max).toBe(claimedAt - enqueued); // 29h
   });
 
   it("aggregates running-job stages + progress_meta elapsed; never echoes a hostile current_stage", async () => {
@@ -333,21 +350,26 @@ describe("OBS GET /internal/admin/metrics — operator-only (admin auth)", () =>
 });
 
 describe("OBS heartbeat boundary — stage validated, telemetry allowlisted into progress_meta", () => {
-  it("rejects a non-slug stage (400) so current_stage cannot carry a path/IP/filename", async () => {
+  it("drops an unknown/hostile stage (NO 400) — lease still renews, current_stage stays clean", async () => {
     const { env, raw } = makeEnv({ internalToken: WORKER });
     insertJob(raw, { job_id: "j1", enqueue_at: NOW });
     const clock = makeClock(NOW);
     const claim = await call(env, clock.deps, "POST", "/internal/jobs/claim", { worker: WORKER, body: {} });
     const cv = claim.json.claim_version;
-    const bad = await call(env, clock.deps, "POST", "/internal/jobs/j1/progress", {
+    const hb = await call(env, clock.deps, "POST", "/internal/jobs/j1/progress", {
       worker: WORKER,
       body: { claim_version: cv, stage: "transcode /work/My_Video.mp4 ip=10.0.0.7" },
     });
-    expect(bad.status).toBe(400);
-    expect(bad.json.error.code).toBe("invalid_field");
-    // current_stage was NOT overwritten with the hostile value (claim left it 'claimed')
-    const row = raw.prepare("SELECT current_stage FROM jobs WHERE job_id = 'j1'").get() as { current_stage: string };
+    // lease renewal must NEVER depend on stage content -> 200, lease extended
+    expect(hb.status).toBe(200);
+    expect(hb.json.lease_expires_at).toBeGreaterThan(NOW);
+    // the hostile/unknown stage is dropped: current_stage stays 'claimed', telemetry not stored
+    const row = raw
+      .prepare("SELECT current_stage, progress_meta FROM jobs WHERE job_id = 'j1'")
+      .get() as { current_stage: string; progress_meta: string | null };
+    expect(row.current_stage).toBe("claimed");
     expect(row.current_stage).not.toContain("My_Video");
+    expect(row.progress_meta).toBeNull();
   });
 
   it("stores ONLY allowlisted telemetry into progress_meta; injected filename/ip/key are dropped", async () => {
