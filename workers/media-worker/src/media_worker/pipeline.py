@@ -27,6 +27,7 @@ import os
 import shutil
 import time
 from collections.abc import Callable, Mapping, MutableMapping
+from functools import partial
 from pathlib import Path
 
 from autodub_core import JobPaths
@@ -39,6 +40,7 @@ from provider_adapters import (
     QuotaExhausted,
     Resolver,
     assert_language_pair,
+    get_capability,
     probe,
     route_free,
 )
@@ -113,19 +115,29 @@ def inject_provider_env(
     return sorted(configured)
 
 
-def _available_free_providers(kind: str) -> frozenset[str]:
+def _locale_commercial_safe_tts(target_lang: str) -> frozenset[str]:
+    """Commercial-safe TTS providers that COVER ``target_lang`` (the capability's tts_models ∩
+    COMMERCIAL_SAFE_TTS). CloudflareTTS/MeloTTS covers 6 languages, so routing must not offer it
+    for a piper-only locale (de/pt-BR/ru/it) — that would raise in voices_for -> internal_error."""
+    cap = get_capability(target_lang)
+    if cap is None:
+        return frozenset()
+    return frozenset(m for m in cap.tts_models if m in COMMERCIAL_SAFE_TTS)
+
+
+def _available_free_providers(kind: str, target_lang: str) -> frozenset[str]:
     """Free provider names whose adapter is currently available (key/binary present) for ``kind``.
     Reads provider-adapters' registry probe — which checks os.environ AFTER inject_provider_env — so
     an unconfigured provider is never routed to. Paid names are excluded defensively (red line).
 
-    For ``tts`` the set is further restricted to COMMERCIAL-SAFE voices (piper/cloudflare): tts is
-    only routed for dub output, and edge_tts is the experimental non-commercial lane that must NEVER
-    be a default dub voice (T1.3f / AD-6). Without this filter, routing on a host where piper is
-    absent but edge_tts is installed would pick edge_tts and bypass the commercial-safe gate that
-    assert_language_pair enforces at admission (CodeX P1)."""
+    For ``tts`` the set is restricted to COMMERCIAL-SAFE voices that COVER ``target_lang``: tts is
+    only routed for dub output; edge_tts is the non-commercial lane (never a default dub voice,
+    T1.3f / AD-6), and a commercial-safe provider that does NOT serve the locale (Cloudflare
+    MeloTTS for de/pt-BR/ru/it) must not be picked — else routing bypasses the commercial-safe gate
+    or fails internal_error at voices_for (CodeX P1/P2)."""
     free = frozenset(name for name, avail, info in probe(kind) if avail and not info.paid)
     if kind == "tts":
-        free &= COMMERCIAL_SAFE_TTS
+        free &= _locale_commercial_safe_tts(target_lang)
     return free
 
 
@@ -245,7 +257,11 @@ def run_real_pipeline(
     proved by ``just dev`` (DEVLOOP) + autodub-core's e2e smoke."""
     resolver = resolver if resolver is not None else Resolver()
     run_fn: Callable[..., Path] = run_pipeline_fn if run_pipeline_fn is not None else _run_pipeline
-    avail_fn = available_providers if available_providers is not None else _available_free_providers
+    avail_fn: Callable[[str], frozenset[str]] = (
+        available_providers
+        if available_providers is not None
+        else partial(_available_free_providers, target_lang=job.target_lang)
+    )
     clock = now_ms if now_ms is not None else _now_ms
     # Fail-closed language gate (T1.3f) BEFORE any provider/transcode work.
     assert_language_pair(job.source_lang_hint, job.target_lang, job.output_mode)
@@ -274,28 +290,33 @@ def run_real_pipeline(
             run_fn(paths, resolver, source=str(in_path), job=routed)
             return _collect(storage, job, claim_version, paths, make_key)
         except QuotaExhausted as exc:
-            # Circuit-break THIS stage's provider and re-route just that stage. The kernel's
-            # resumable skip-gates reuse the completed stages on the re-run, so only the failed
-            # stage onward repeats with the new provider (429 不复撞).
+            # The circuit-breaker state is PER-PROVIDER (shared), not per-stage: when a provider
+            # serving several kinds (cloudflare = asr/mt/tts, groq = asr/mt) 429s, exclude it and
+            # re-route EVERY not-yet-completed stage planned on it. Stages BEFORE the failed one
+            # already produced cached output, so their plan is moot; re-routing the failed stage
+            # onward stops the 429'd provider being re-hit elsewhere (429 不复撞). A transient
+            # report blip must NOT abort the re-route (exclusion still prevents re-picking).
             kind = exc.kind if exc.kind in _STAGE_KINDS else _infer_kind(exc.provider, plan, kinds)
             reported = plan.get(kind) or exc.provider  # the FREE provider we routed (never paid)
             reset_ms = clock() + int((exc.retry_after_sec or _DEFAULT_RESET_SEC) * 1000)
-            # A transient report blip must NOT abort the local re-route — excluded[kind] already
-            # prevents re-picking the 429'd provider, so the rotation proceeds either way.
             try:
                 cp.report_provider_exhausted(reported, reset_at_ms=reset_ms, reason="429")
             except Exception:
-                logger.warning("provider-exhausted report failed; re-routing %s locally", kind)
-            excluded[kind].add(reported)
-            # TTS persists per-segment raws; clear them on a provider switch so the new voice is
-            # uniform across the whole deliverable (no mixed-timbre output across segments).
-            if kind == "tts":
-                _clear_dir(paths.tts)
-            chosen = _pick(kind, _snapshot(cp, clock), excluded[kind], avail_fn)
-            if chosen is None:
-                _emit_exhausted(on_telemetry)
-                raise FreePoolExhausted(kind) from exc
-            plan[kind] = chosen
-            _emit(on_telemetry, provider=chosen)  # report the rotated provider (per-stage fidelity)
+                logger.warning("provider-exhausted report failed; re-routing locally")
+            snapshot = _snapshot(cp, clock)
+            for k in kinds[kinds.index(kind):]:
+                if plan.get(k) != reported:
+                    continue
+                excluded[k].add(reported)
+                # TTS persists per-segment raws; clear them on a provider switch so the new voice is
+                # uniform across the whole deliverable (no mixed-timbre output across segments).
+                if k == "tts":
+                    _clear_dir(paths.tts)
+                chosen = _pick(k, snapshot, excluded[k], avail_fn)
+                if chosen is None:
+                    _emit_exhausted(on_telemetry)
+                    raise FreePoolExhausted(k) from exc
+                plan[k] = chosen
+            _emit(on_telemetry, provider=plan[kinds[0]])
     _emit_exhausted(on_telemetry)
     raise FreePoolExhausted("max_reroutes")  # bounded backstop (sized above so this is unreachable)

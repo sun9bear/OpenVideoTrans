@@ -86,8 +86,8 @@ def test_inject_provider_env_skips_unknown_provider_and_field() -> None:
 def test_available_free_providers_filters_tts_to_commercial_safe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # CodeX P1: on a host where piper is absent but edge_tts is available, tts must NOT offer
-    # edge_tts (the non-commercial experimental lane) for dub output — only commercial-safe voices.
+    # CodeX P1/P2: tts routing offers ONLY commercial-safe providers covering the locale — edge_tts
+    # (non-commercial) is dropped, and a commercial-safe provider that doesn't serve the locale too.
     import media_worker.pipeline as pl
 
     class _Info:
@@ -106,8 +106,11 @@ def test_available_free_providers_filters_tts_to_commercial_safe(
         }.get(kind, [])
 
     monkeypatch.setattr(pl, "probe", fake_probe)
-    assert pl._available_free_providers("tts") == frozenset({"cloudflare"})  # edge_tts filtered out
-    assert pl._available_free_providers("asr") == frozenset({"cloudflare"})  # non-tts not filtered
+    # en: cloudflare covers it + commercial-safe -> {cloudflare}; edge_tts (non-commercial) dropped.
+    assert pl._available_free_providers("tts", "en") == frozenset({"cloudflare"})
+    # de: commercial-safe is piper-only; cloudflare doesn't cover de + piper absent -> {} (closed).
+    assert pl._available_free_providers("tts", "de") == frozenset()
+    assert pl._available_free_providers("asr", "en") == frozenset({"cloudflare"})  # non-tts
 
 
 # ── run_real_pipeline routing (Piece 4) ───────────────────────────────────────
@@ -298,10 +301,37 @@ def test_tts_reroute_clears_tts_scratch(tmp_path: Path) -> None:
         cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
         resolver=object(), run_pipeline_fn=run,
         available_providers=_avail({
-            "asr": {"cloudflare"}, "mt": {"deepl"}, "tts": {"piper", "edge_tts"},
+            "asr": {"cloudflare"}, "mt": {"deepl"}, "tts": {"piper", "cloudflare"},
         }),
         now_ms=lambda: 1000,
     )
     assert artifacts == {"video_key": "artifacts/job_x/1/output.mp4"}
-    assert seen["empty"] is True  # the stale piper raw was cleared before edge_tts re-synth
+    assert seen["empty"] is True  # the stale piper raw was cleared before the cloudflare re-synth
     assert run.n == 2
+
+
+def test_429_reroutes_all_stages_sharing_the_exhausted_provider(tmp_path: Path) -> None:
+    # CodeX P2: a provider serving multiple stages (cloudflare = asr + mt) that 429s is excluded
+    # provider-WIDE — the not-yet-run stage planned on it is re-routed in the same catch, never
+    # re-hit (the circuit-breaker state is per-provider, not per-kind).
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = FakeRunPipeline(quota_fail=(("asr", "cloudflare"),))
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=object(), run_pipeline_fn=run,
+        available_providers=_avail({
+            "asr": {"cloudflare", "faster_whisper"}, "mt": {"cloudflare", "deepl"},
+        }),
+        now_ms=lambda: 1000,
+    )
+    # both stages route cloudflare first; the asr 429 excludes cloudflare provider-wide so mt (also
+    # planned on cloudflare) is pre-emptively re-routed to deepl in the same catch.
+    assert run.calls[0]["asr"] == "cloudflare"
+    assert run.calls[0]["mt"] == "cloudflare"
+    assert run.calls[1]["asr"] == "faster_whisper"
+    assert run.calls[1]["mt"] == "deepl"
+    assert cp.exhausted_reports == [("cloudflare", 1000 + 30_000, "429")]
+    assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}
