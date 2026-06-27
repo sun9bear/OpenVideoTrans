@@ -148,9 +148,18 @@ def run() -> int:
         worker_env = {**os.environ, "OVT_CONTROL_PLANE_URL": cp_url, "OVT_INTERNAL_TOKEN": token,
                       "OVT_R2_ENDPOINT": s3.url, "OVT_WORKDIR": str(tmp / "jobs"),
                       "PYTHONUNBUFFERED": "1"}
+        # Launch the worker via uv's workspace-member context so `media_worker` resolves even on a
+        # fresh checkout / direct run (not only via `just dev`'s install); fall back to the current
+        # interpreter when uv isn't on PATH (it always is via `just dev` / `uv run`).
+        uv = shutil.which("uv")
+        worker_cmd = (
+            [uv, "run", "--package", "media-worker", "python", "-m", "media_worker"]
+            if uv
+            else [sys.executable, "-m", "media_worker"]
+        )
         with worker_log.open("wb") as fh:
-            worker_proc = subprocess.Popen([sys.executable, "-m", "media_worker"],
-                                           env=worker_env, stdout=fh, stderr=subprocess.STDOUT)
+            worker_proc = subprocess.Popen(worker_cmd, env=worker_env, stdout=fh,
+                                           stderr=subprocess.STDOUT)
         print("[*] media-worker  started")
 
         clip = tmp / "source.mp4"

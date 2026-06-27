@@ -65,11 +65,12 @@ build-ts:
 
 # Run the full local dev loop (DEVLOOP #25): one command, upload→claim→complete, no cloud.
 # Spins up a local S3 stub + the control-plane (tsx) + the real media-worker and drives one job
-# through. Prereqs: ffmpeg/ffprobe + node + pnpm (else it SKIPs loudly). See dev/README.md.
-# Sync FIRST so the spawned `python -m media_worker` finds the workspace member in a fresh checkout
-# (the root project has no deps; a bare `uv run` would not install the members — mirrors CI).
-dev:
-    uv sync --all-packages
+# through. Prereqs: ffmpeg/ffprobe (else it SKIPs loudly). See dev/README.md.
+# Depends on BOTH installs so a FRESH checkout works end to end: install-ts brings the pnpm deps
+# (tsx + better-sqlite3 for the control-plane server), install-py installs the editable workspace
+# members (so the spawned `python -m media_worker` resolves). A bare `uv run` / `pnpm exec` on a
+# clean clone would otherwise fail (root project has no deps; node_modules absent).
+dev: install-ts install-py
     uv run python dev/dev_loop.py
 
 # ── Schema codegen ───────────────────────────────────────────────────────────
