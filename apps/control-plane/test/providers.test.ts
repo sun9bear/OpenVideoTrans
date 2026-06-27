@@ -59,9 +59,10 @@ describe("POST /internal/providers/exhausted + GET /internal/providers/availabil
     expect(avail.json.exhausted).toEqual({ cloudflare: cfReset });
   });
 
-  it("re-reporting a provider extends (overwrites) its reset time", async () => {
+  it("re-reporting extends the reset window monotonically (a shorter later report never shrinks it)", async () => {
     const { env } = makeEnv({ internalToken: WORKER });
     const { deps } = makeClock(1_000_000);
+    // A later, LONGER reset wins (the window extends upward).
     await call(env, deps, "POST", "/internal/providers/exhausted", {
       worker: WORKER,
       body: { provider: "deepl", resetAt: 1_000_000 + 1_000 },
@@ -70,7 +71,15 @@ describe("POST /internal/providers/exhausted + GET /internal/providers/availabil
       worker: WORKER,
       body: { provider: "deepl", resetAt: 1_000_000 + 50_000 },
     });
-    const avail = await call(env, deps, "GET", "/internal/providers/availability", { worker: WORKER });
+    let avail = await call(env, deps, "GET", "/internal/providers/availability", { worker: WORKER });
+    expect(avail.json.exhausted).toEqual({ deepl: 1_000_000 + 50_000 });
+    // A later, SHORTER reset must NOT shrink the window: two boxes can report different Retry-After
+    // hints for the same provider, and the shorter one landing last must not cause a premature re-hit.
+    await call(env, deps, "POST", "/internal/providers/exhausted", {
+      worker: WORKER,
+      body: { provider: "deepl", resetAt: 1_000_000 + 2_000 },
+    });
+    avail = await call(env, deps, "GET", "/internal/providers/availability", { worker: WORKER });
     expect(avail.json.exhausted).toEqual({ deepl: 1_000_000 + 50_000 });
   });
 

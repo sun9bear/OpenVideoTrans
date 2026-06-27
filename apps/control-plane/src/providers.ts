@@ -79,9 +79,16 @@ function validateResetAt(resetAt: number, now: number): void {
   }
 }
 
+// On a re-report the circuit window is MONOTONIC: keep the LATER of the stored and incoming reset
+// (scalar MAX), never shrink it. Two boxes can report different Retry-After hints for the same
+// provider; if the shorter one landed last an unconditional overwrite would re-open the provider
+// early and let every box re-hit it (undercutting 429 不复撞). MAX makes "stay down at least until
+// the longest reset anyone has seen" the rule; the now-filter on READ still auto-recovers once that
+// passes. reason/updated_at track the most recent report (a transient telemetry tag).
 const UPSERT_QUOTA =
   "INSERT INTO provider_quota (provider, exhausted_until, reason, updated_at) VALUES (?, ?, ?, ?) " +
-  "ON CONFLICT(provider) DO UPDATE SET exhausted_until = excluded.exhausted_until, " +
+  "ON CONFLICT(provider) DO UPDATE SET " +
+  "exhausted_until = MAX(provider_quota.exhausted_until, excluded.exhausted_until), " +
   "reason = excluded.reason, updated_at = excluded.updated_at";
 
 export async function loadQuotaFromD1(env: Env): Promise<Record<string, number>> {
