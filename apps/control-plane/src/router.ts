@@ -2,6 +2,7 @@ import type { Ctx, Deps, Env, QueueProducer, TurnstileVerifier } from "./core";
 import { HttpError, apiError, json, realDeps } from "./core";
 import { realTurnstileVerifier } from "./abuse";
 import { credentials } from "./credentials";
+import { providerAvailability, reportProviderExhausted } from "./providers";
 import { selectProducer } from "./queue";
 import { adminSetSetting, configEndpoint, getConfig, getSettingsAudit } from "./settings";
 import { signUpload } from "./uploads";
@@ -46,6 +47,11 @@ const ROUTES: Route[] = [
   // SECRETS (#21): the worker's bootstrap pull — R2 storage creds + configured free-provider keys,
   // over the authed /internal channel, fail-closed when storage is unset (see credentials.ts).
   route("GET", "/internal/credentials", "worker", credentials),
+  // FREE-POOL (#23): shared per-provider circuit-breaker. A worker reports a 429/quota-exhausted free
+  // provider; every box pulls the snapshot so none re-hits an exhausted provider. Worker-auth; a paid
+  // provider name is rejected 403 at the handler (a paid API has no free-pool state — red line §1).
+  route("POST", "/internal/providers/exhausted", "worker", reportProviderExhausted),
+  route("GET", "/internal/providers/availability", "worker", providerAvailability),
   // CFG-GUARD (#22): operator config changes go THROUGH the guard (validation + audit + version bump)
   // — never a raw D1 edit. ADMIN auth (a SEPARATE ADMIN_TOKEN, not the shared worker bearer) so a
   // media-worker compromise can't mutate config; the named operator rides in X-OVT-Actor for audit.
