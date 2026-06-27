@@ -8,6 +8,11 @@
 // R2_S3_ENDPOINT (presigned URLs + verifyUpload HEAD/delete route there), so the MEDIA binding is
 // unused here. NOT for production — this file lives under dev/, never in the Worker bundle.
 //
+// It is intentionally OUTSIDE the Worker tsconfig (include = src + test): it runs on the Node runtime
+// (node:http / Buffer / process), and loading @types/node alongside @cloudflare/workers-types collides
+// on shared globals (Request/Response/fetch). tsx type-strips it at runtime, and `just dev` exercises
+// it behaviorally end-to-end — so a type error here surfaces as a failing dev loop, not a silent ship.
+//
 // Env (process.env): PORT, INTERNAL_TOKEN (worker bearer), R2_S3_ENDPOINT, R2_BUCKET.
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync, readdirSync } from "node:fs";
