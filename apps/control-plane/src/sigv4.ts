@@ -70,12 +70,23 @@ export interface PresignOpts {
   now: number;
   expiresSec: number;
   region?: string;
+  // DEVLOOP (#25): NON-secret base override (scheme://host[:port]) for the local dev S3 stub. When
+  // omitted (prod) the URL targets the real R2 host exactly as before; when set, scheme+host point at
+  // the local stub (path-style {bucket}/{key} is unchanged, so the signature still binds host+path).
+  // `| undefined` so a caller may forward env.R2_S3_ENDPOINT directly under exactOptionalPropertyTypes.
+  endpoint?: string | undefined;
 }
 
 export async function presignR2Url(o: PresignOpts): Promise<string> {
   const region = o.region ?? "auto";
   const service = "s3";
-  const host = `${o.accountId}.r2.cloudflarestorage.com`;
+  let scheme = "https";
+  let host = `${o.accountId}.r2.cloudflarestorage.com`;
+  if (o.endpoint) {
+    const u = new URL(o.endpoint);
+    scheme = u.protocol.replace(/:$/, "");
+    host = u.host; // host:port — what the dev client sends as Host, so the signed host matches
+  }
   const { amzDate, dateStamp } = amzDates(o.now);
   const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
   const canonicalUri = `/${uriEncode(o.bucket, false)}/${uriEncode(o.key, false)}`;
@@ -114,5 +125,5 @@ export async function presignR2Url(o: PresignOpts): Promise<string> {
   const kSigning = await hmac(kService, "aws4_request");
   const signature = hex(new Uint8Array(await hmac(kSigning, stringToSign)));
 
-  return `https://${host}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`;
+  return `${scheme}://${host}${canonicalUri}?${canonicalQuery}&X-Amz-Signature=${signature}`;
 }

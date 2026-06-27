@@ -39,6 +39,15 @@ export interface Env {
   // D1-claim backend, in which case the producer falls back to D1-claim (jobs table is the
   // authoritative worklist, so a missing queue never strands a job). Wired in wrangler.jsonc.
   JOB_QUEUE?: Queue<WakeMessage>;
+  // DEVLOOP (#25): a NON-secret S3 endpoint override for the local dev loop, e.g. "http://127.0.0.1:9000".
+  // When set (ONLY by `just dev`, NEVER in prod wrangler.jsonc), the presigned upload/download URLs
+  // (sigv4.ts) AND the verifyUpload HEAD/delete (media.ts) target this base — a local S3 stub — instead
+  // of the real R2 host / the MEDIA binding, so the whole upload→claim→complete loop runs against one
+  // local object store with no cloud. ABSENT in prod ⇒ every object op uses the R2 host / MEDIA binding
+  // exactly as before (byte-identical). It is operator-set deploy config (same trust as R2_ACCOUNT_ID),
+  // never client-controlled, and the worker's default-drop egress (nftables) blocks any non-R2 host in
+  // prod regardless — so it opens no SSRF surface.
+  R2_S3_ENDPOINT?: string;
 }
 
 // The CF Queues message body (T2.5). Deliberately just the job id: the authoritative job state lives

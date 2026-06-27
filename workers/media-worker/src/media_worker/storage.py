@@ -69,19 +69,30 @@ class S3Storage:
         self,
         settings: R2Settings,
         *,
+        endpoint: str | None = None,
         opener: Any = None,
         clock: Callable[[], datetime] | None = None,
         timeout: float = 60.0,
     ) -> None:
         self._s = settings
+        # DEVLOOP (#25): a NON-secret S3 base override (scheme://host[:port]) for the dev loop,
+        # from OVT_R2_ENDPOINT. When set the worker signs + sends to a local S3 stub (path-style
+        # {bucket}/{key}); when None (prod) it targets the real R2 host exactly as before. The box's
+        # default-drop egress (nftables) blocks any non-R2 host in prod regardless of this value.
+        self._endpoint = endpoint.rstrip("/") if endpoint else None
         self._opener = opener if opener is not None else urllib.request.build_opener()
         self._clock = clock if clock is not None else _utcnow
         self._timeout = timeout
 
+    def _url_for(self, key: str) -> str:
+        if self._endpoint:
+            return f"{self._endpoint}/{self._s.bucket}/{key}"
+        return self._s.url_for(key)
+
     def _sign(
         self, method: str, key: str, payload: bytes, extra: Mapping[str, str] | None = None
     ) -> tuple[str, dict[str, str]]:
-        url = self._s.url_for(key)
+        url = self._url_for(key)
         headers = sign_request(
             method=method,
             url=url,

@@ -51,7 +51,7 @@ typecheck-ts:
     pnpm typecheck
 
 typecheck-py:
-    uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner packages/schemas
+    uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner packages/schemas dev
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
@@ -63,9 +63,15 @@ build-ts:
 
 # ── Dev ──────────────────────────────────────────────────────────────────────
 
-# Start local dev (placeholder — individual packages define their own dev targets)
-dev:
-    @echo "Run 'just dev-web' or 'just dev-control-plane' for individual services"
+# Run the full local dev loop (DEVLOOP #25): one command, upload→claim→complete, no cloud.
+# Spins up a local S3 stub + the control-plane (tsx) + the real media-worker and drives one job
+# through. Prereqs: ffmpeg/ffprobe (else it SKIPs loudly). See dev/README.md.
+# Depends on BOTH installs so a FRESH checkout works end to end: install-ts brings the pnpm deps
+# (tsx + better-sqlite3 for the control-plane server), install-py installs the editable workspace
+# members (so the spawned `python -m media_worker` resolves). A bare `uv run` / `pnpm exec` on a
+# clean clone would otherwise fail (root project has no deps; node_modules absent).
+dev: install-ts install-py
+    uv run python dev/dev_loop.py
 
 # ── Schema codegen ───────────────────────────────────────────────────────────
 
