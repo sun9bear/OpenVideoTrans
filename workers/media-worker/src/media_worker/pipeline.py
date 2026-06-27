@@ -287,7 +287,9 @@ def run_real_pipeline(
     for _ in range(max_reroutes + 1):
         routed = job.model_copy(update={"plan": job.plan.model_copy(update=plan)})
         try:
-            run_fn(paths, resolver, source=str(in_path), job=routed)
+            # target_lang is a REQUIRED kwarg of autodub_core.run_pipeline (it derives the rest from
+            # `job`, but the signature still requires it) — omitting it raises TypeError (CodeX P1).
+            run_fn(paths, resolver, source=str(in_path), target_lang=routed.target_lang, job=routed)
             return _collect(storage, job, claim_version, paths, make_key)
         except QuotaExhausted as exc:
             # The circuit-breaker state is PER-PROVIDER (shared), not per-stage: when a provider
@@ -305,9 +307,12 @@ def run_real_pipeline(
                 logger.warning("provider-exhausted report failed; re-routing locally")
             snapshot = _snapshot(cp, clock)
             for k in kinds[kinds.index(kind):]:
+                # Exclude the 429'd provider from EVERY active stage (not only those currently using
+                # it) so a later 429 can't re-route a stage back onto it even if the shared snapshot
+                # is stale or the report failed — local circuit-break, never re-hit (CodeX P2).
+                excluded[k].add(reported)
                 if plan.get(k) != reported:
                     continue
-                excluded[k].add(reported)
                 # TTS persists per-segment raws; clear them on a provider switch so the new voice is
                 # uniform across the whole deliverable (no mixed-timbre output across segments).
                 if k == "tts":
