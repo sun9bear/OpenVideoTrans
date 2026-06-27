@@ -5,6 +5,8 @@ Config from env (secrets are read from env ONLY — never logged or passed on a 
   OVT_INTERNAL_TOKEN       worker bootstrap shared secret (the /internal bearer)
   OVT_INTERNAL_TOKEN_NEXT  optional staged next bootstrap secret (zero-downtime rotation)
   OVT_WORKDIR              jobs scratch dir (default /var/lib/ovt/jobs)
+  OVT_R2_ENDPOINT          optional NON-secret S3 base override for the local dev loop
+                           (DEVLOOP #25); unset in prod ⇒ the real R2 host
 
 The box holds ONLY the bootstrap secret(s) (SECRETS #21): the R2 storage creds and the free-provider
 API keys are pulled from the control plane's /internal/credentials at startup and kept in memory —
@@ -32,10 +34,14 @@ def main() -> int:
     token = os.environ["OVT_INTERNAL_TOKEN"]
     next_token = os.environ.get("OVT_INTERNAL_TOKEN_NEXT") or None
     workdir = Path(os.environ.get("OVT_WORKDIR", "/var/lib/ovt/jobs"))
+    # DEVLOOP (#25): NON-secret S3 endpoint override for the local dev loop (points at a local
+    # S3 stub so the box needs no real R2). Unset in prod ⇒ the real R2 host; the box's egress
+    # allowlist gates it regardless. R2 ACCESS creds still come from /internal/credentials.
+    r2_endpoint = os.environ.get("OVT_R2_ENDPOINT") or None
     cp = HttpControlPlane(base_url, token, next_token=next_token)
     # Pull R2 + free-provider creds over the authed /internal channel and keep them in memory only.
     creds = cp.get_credentials()
-    storage = S3Storage(creds.r2)
+    storage = S3Storage(creds.r2, endpoint=r2_endpoint)
     # Log provider NAMES only — never a key value.
     logger.info(
         "pulled worker credentials: storage configured; providers available: %s",

@@ -385,6 +385,7 @@ export async function download(ctx: Ctx): Promise<Response> {
     secretAccessKey: creds.secretAccessKey,
     now,
     expiresSec,
+    endpoint: ctx.env.R2_S3_ENDPOINT, // DEVLOOP: local S3 stub in dev; undefined ⇒ real R2 host
   });
   return json({ url, expires_at: now + expiresSec * 1000 });
 }

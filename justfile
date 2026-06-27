@@ -51,7 +51,7 @@ typecheck-ts:
     pnpm typecheck
 
 typecheck-py:
-    uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner packages/schemas
+    uv run pyright packages/autodub-core packages/provider-adapters workers/media-worker cli/local-runner packages/schemas dev
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
@@ -63,9 +63,11 @@ build-ts:
 
 # ── Dev ──────────────────────────────────────────────────────────────────────
 
-# Start local dev (placeholder — individual packages define their own dev targets)
+# Run the full local dev loop (DEVLOOP #25): one command, upload→claim→complete, no cloud.
+# Spins up a local S3 stub + the control-plane (tsx) + the real media-worker and drives one job
+# through. Prereqs: ffmpeg/ffprobe + node + pnpm (else it SKIPs loudly). See dev/README.md.
 dev:
-    @echo "Run 'just dev-web' or 'just dev-control-plane' for individual services"
+    uv run python dev/dev_loop.py
 
 # ── Schema codegen ───────────────────────────────────────────────────────────
 

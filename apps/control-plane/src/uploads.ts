@@ -1,5 +1,6 @@
 import type { Ctx, Env } from "./core";
 import { HttpError, asObject, json, readJson, reqInt, reqString } from "./core";
+import { mediaDelete, mediaHead } from "./media";
 import { presignR2Url } from "./sigv4";
 
 export interface R2Creds {
@@ -60,6 +61,7 @@ export async function signUpload(ctx: Ctx): Promise<Response> {
     secretAccessKey: creds.secretAccessKey,
     now,
     expiresSec: ctx.config.uploadPresignTtlSec,
+    endpoint: ctx.env.R2_S3_ENDPOINT, // DEVLOOP: local S3 stub in dev; undefined ⇒ real R2 host
   });
 
   return json({
@@ -115,12 +117,12 @@ export async function verifyUpload(
     throw new HttpError(410, "upload_expired", "upload session expired");
   }
 
-  const obj = await ctx.env.MEDIA.head(row.source_key);
+  const obj = await mediaHead(ctx.env, row.source_key);
   if (!obj) {
     throw new HttpError(422, "source_verify_failed", "uploaded object not found");
   }
   if (obj.size > ctx.config.maxUploadBytes) {
-    await ctx.env.MEDIA.delete(row.source_key);
+    await mediaDelete(ctx.env, row.source_key);
     await ctx.env.DB.prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ?`)
       .bind(uploadSessionId)
       .run();
@@ -131,9 +133,9 @@ export async function verifyUpload(
   // that omits Content-Type cannot bypass the type gate). Note: R2's content-type is client-set, so
   // the authoritative format gate remains the worker's ffprobe admission (T2.4); this rejects the
   // honest-mismatch / wrong-extension / no-type case cheaply at admission.
-  const actualType = obj.httpMetadata?.contentType;
+  const actualType = obj.contentType;
   if (actualType === undefined || actualType !== row.declared_type) {
-    await ctx.env.MEDIA.delete(row.source_key);
+    await mediaDelete(ctx.env, row.source_key);
     await ctx.env.DB.prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ?`)
       .bind(uploadSessionId)
       .run();

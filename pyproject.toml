@@ -35,7 +35,7 @@ reportMissingModuleSource = "none"
 # workflow's working-directory put it on sys.path; this pins it for the typecheck step too).
 # `tooling/guardrails` is a non-package script dir; its tests import it via a conftest sys.path
 # insert, so pin it as an import root for the typecheck step too.
-extraPaths = ["apps/control-plane", "tooling/guardrails"]
+extraPaths = ["apps/control-plane", "tooling/guardrails", "dev"]
 
 [tool.pytest.ini_options]
 testpaths = [
