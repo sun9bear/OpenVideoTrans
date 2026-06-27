@@ -2,11 +2,13 @@ import BetterSqlite3 from "better-sqlite3";
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import migration0001 from "../../migrations/0001_init.sql?raw";
 import migration0002 from "../../migrations/0002_upload_session_source_purged.sql?raw";
+import migration0003 from "../../migrations/0003_settings.sql?raw";
 
 // Apply EVERY migration in filename order (not just 0001), so the harness matches a real D1 that has
 // run `wrangler d1 migrations apply` over the full migrations/ dir — including additive forward
-// migrations like 0002 (source_purged_at). New migrations must be appended here in order.
-const migrationSqls = [migration0001, migration0002];
+// migrations like 0002 (source_purged_at) and 0003 (settings + settings_audit). New migrations must
+// be appended here in order.
+const migrationSqls = [migration0001, migration0002, migration0003];
 
 // A better-sqlite3-backed stand-in for D1. D1 IS SQLite with a single primary, so the real CLAIM_SQL
 // (UPDATE ... RETURNING) runs here on a real SQLite engine; the synchronous single connection models
@@ -67,6 +69,14 @@ export function makeD1(): { d1: D1Database; raw: RawDb } {
   for (const sql of migrationSqls) raw.exec(sql);
   const d1 = {
     prepare: (sql: string) => new FakeStmt(raw, sql) as unknown as D1PreparedStatement,
+    // Model D1.batch: run each prepared statement in order. The single better-sqlite3 connection
+    // serializes writes (like D1's single primary), so an in-order replay matches D1's batch
+    // semantics for these tests (CFG-GUARD writes the settings upsert + audit insert as one batch).
+    batch: async (stmts: D1PreparedStatement[]) => {
+      const out: unknown[] = [];
+      for (const s of stmts) out.push(await (s as unknown as FakeStmt).run());
+      return out;
+    },
   } as unknown as D1Database;
   return { d1, raw };
 }

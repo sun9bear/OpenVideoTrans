@@ -34,6 +34,12 @@ jobs:
       - name: Test
         run: pnpm test
 
+      # CFG-GUARD §14 guard: a named, visible gate asserting no red-line key is runtime-mutable
+      # (paid-API gating §1 / AIGC legal marking §3). Fails loudly if a red-line key ever enters the
+      # operator-mutable settings allowlist. (Also covered by `pnpm test`; this makes it explicit.)
+      - name: CFG-GUARD §14 red-line invariant
+        run: pnpm --filter @open-video-trans/control-plane exec vitest run test/settings.guard.test.ts
+
   # ── Python job ─────────────────────────────────────────────────────────────
   py:
     name: Py (ruff + pytest + typecheck)
