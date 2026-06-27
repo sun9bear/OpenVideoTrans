@@ -22,7 +22,9 @@ _CIRCUIT = Path(__file__).resolve().parent.parent / "src" / "provider_adapters" 
 # circuit.py may import ONLY these (pure stdlib for the dataclasses/types + the in-package
 # ladder for the free/paid sets). Anything else — requests/urllib/http/socket/os/json, or a
 # reach into media_worker/apps/control_plane — is a seam violation.
-_ALLOWED_ABSOLUTE = {"__future__", "dataclasses", "collections", "collections.abc", "typing", "enum"}
+_ALLOWED_ABSOLUTE = {
+    "__future__", "dataclasses", "collections", "collections.abc", "typing", "enum",
+}
 _ALLOWED_RELATIVE = {"ladder"}
 
 # Names that, if imported, prove the routing module has left its lane (IO / control-plane reach).
@@ -60,7 +62,11 @@ def test_circuit_imports_are_pure() -> None:
     assert not forbidden_hits, f"circuit.py imports forbidden modules: {sorted(forbidden_hits)}"
 
     extra_absolute = absolute - _ALLOWED_ABSOLUTE
-    assert not extra_absolute, f"circuit.py imports unexpected absolute modules: {sorted(extra_absolute)}"
+    assert not extra_absolute, (
+        f"circuit.py imports unexpected absolute modules: {sorted(extra_absolute)}"
+    )
 
     extra_relative = relative - _ALLOWED_RELATIVE
-    assert not extra_relative, f"circuit.py imports unexpected in-package modules: {sorted(extra_relative)}"
+    assert not extra_relative, (
+        f"circuit.py imports unexpected in-package modules: {sorted(extra_relative)}"
+    )

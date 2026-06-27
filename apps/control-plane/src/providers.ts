@@ -3,11 +3,12 @@ import { HttpError, asObject, json, optString, readJson, reqInt, reqString } fro
 
 // FREE-POOL (#23) — the shared per-provider circuit-breaker STATE half of the seam (the pure ROUTING
 // half is packages/provider-adapters/circuit.py). When a free provider returns 429/quota-exhausted,
-// a worker reports it here; the state is authoritative in D1 (`provider_quota`), hot-cached in KV
-// (`provider_availability`), and served as a snapshot so EVERY worker box stops routing to an
-// exhausted provider — not just the box that saw the 429. A provider auto-recovers at its reset (the
-// snapshot filters by now). Red line §1/§14: only FREE provider names are ever admitted here; a paid
-// name is rejected 403 (a paid API has no free-pool state — it is never auto-invoked).
+// a worker reports it here; the state is authoritative in D1 (`provider_quota`), mirrored to KV
+// (`provider_availability`) as a fail-soft fallback, and served as a snapshot so EVERY worker box
+// stops routing to an exhausted provider — not just the box that saw the 429. The snapshot is read
+// from D1 (authoritative; see getQuotaMap for why not KV-first) and a provider auto-recovers at its
+// reset (the snapshot filters by now). Red line §1/§14: only FREE provider names are ever admitted
+// here; a paid name is rejected 403 (a paid API has no free-pool state — it is never auto-invoked).
 
 // FREE provider names the circuit-breaker may record/serve. MIRRORS the $0 names in the
 // provider-adapters AUTO_LADDER (packages/provider-adapters/src/provider_adapters/ladder.py — the
@@ -100,30 +101,35 @@ export async function loadQuotaFromD1(env: Env): Promise<Record<string, number>>
   return out;
 }
 
-// Re-project the full quota map into the KV hot cache (KV is a projection of D1). The raw map is
-// stored — the now-filter is applied on READ — so a provider recovering between writes still drops.
+// Mirror the full quota map into the KV FALL-SOFT cache (a projection of D1). The raw map is stored —
+// the now-filter is applied on READ. NOTE: under concurrent multi-box reports two refreshes can put
+// their full-map snapshots to this single key out of order (an older map landing last), so this
+// mirror is NOT authoritative — the read path reads D1 first and only falls back to KV on a D1 blip,
+// which bounds any stale projection to that window (see getQuotaMap).
 async function projectAvailabilityToKV(env: Env, map: Record<string, number>): Promise<void> {
   await env.CONFIG.put(AVAILABILITY_KEY, JSON.stringify(map));
 }
 
-// The full exhausted-until map: KV hot cache, reading THROUGH to D1 (authoritative) on a cold/evicted
-// cache (then warming KV). Returns the raw map; callers apply the now-filter.
+// The full exhausted-until map. D1 (`provider_quota`) is AUTHORITATIVE and read FIRST: availability is
+// polled at job-claim frequency (not per-HTTP-request like getConfig), so a direct D1 read is cheap
+// and avoids serving a stale KV projection. Concurrent multi-box reports are NORMAL here, and the
+// single KV key can be overwritten out of order (an older full-map landing last) — which would
+// silently drop/shorten an exhausted provider and re-route workers into a 429'd API. Reading D1 first
+// means such a reordered KV write is never SERVED while D1 is reachable; KV is only a FAIL-SOFT
+// fallback for a brief D1 blip, and if both fail the worker still has its per-box ladder.
 async function getQuotaMap(env: Env): Promise<Record<string, number>> {
+  try {
+    return await loadQuotaFromD1(env);
+  } catch {
+    // D1 blip -> fall back to the last-known KV mirror (possibly slightly stale; fail-soft).
+  }
   try {
     const cached = await env.CONFIG.get(AVAILABILITY_KEY, "json");
     if (cached && typeof cached === "object") return cached as Record<string, number>;
   } catch {
-    // KV unavailable -> fall through to D1 truth.
+    // KV also unavailable.
   }
-  try {
-    const map = await loadQuotaFromD1(env);
-    await projectAvailabilityToKV(env, map);
-    return map;
-  } catch {
-    // D1 also unavailable -> serve an empty snapshot (fail-open on AVAILABILITY: the worker still
-    // routes via its per-box ladder; it just lacks the shared circuit-breaker hint this read).
-    return {};
-  }
+  return {};
 }
 
 export interface ProviderAvailabilitySnapshot {
@@ -151,9 +157,10 @@ export interface ProviderExhaustion {
   reason?: string;
 }
 
-// Persist a provider's exhaustion (validated) and re-project the KV hot cache from D1 truth so other
-// boxes observe it on their next read. Throws (no write) on a paid/unknown provider or an out-of-range
-// reset. `reason` is truncated defensively — it is a short tag for telemetry, never a secret/body.
+// Persist a provider's exhaustion (validated) to the authoritative D1 store. Throws (no write) on a
+// paid/unknown provider or an out-of-range reset. `reason` is truncated defensively — it is a short
+// tag for telemetry, never a secret/body. The KV mirror refresh is BEST-EFFORT: D1 is authoritative
+// and the read path reads it first, so a KV blip must not fail an already-committed report.
 export async function recordProviderExhausted(
   env: Env,
   now: number,
@@ -163,7 +170,11 @@ export async function recordProviderExhausted(
   validateResetAt(change.resetAt, now);
   const reason = change.reason !== undefined ? change.reason.slice(0, 64) : null;
   await env.DB.prepare(UPSERT_QUOTA).bind(change.provider, change.resetAt, reason, now).run();
-  await projectAvailabilityToKV(env, await loadQuotaFromD1(env));
+  try {
+    await projectAvailabilityToKV(env, await loadQuotaFromD1(env));
+  } catch {
+    // Best-effort: the next report (or a D1-first read) refreshes/bypasses the mirror.
+  }
 }
 
 // ── Route handlers (worker-auth; wired in router.ts) ─────────────────────────────────────────────

@@ -14,7 +14,6 @@ control-plane owns in D1/KV) and returns a routing RESULT. No I/O, no control-pl
 from __future__ import annotations
 
 import pytest
-
 from provider_adapters import (
     FREE_LADDER_PROVIDERS,
     FREE_POOL_EXHAUSTED,
