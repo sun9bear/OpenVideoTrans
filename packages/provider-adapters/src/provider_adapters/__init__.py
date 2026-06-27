@@ -39,6 +39,7 @@ from .circuit import (
 from .ladder import AUTO_LADDER, PAID_PROVIDERS, is_paid_provider
 from .languages import (
     CAPABILITIES,
+    COMMERCIAL_SAFE_TTS,
     LanguageError,
     assert_language_pair,
     deepl_target_code,
@@ -68,6 +69,7 @@ REGISTRY: dict[str, ProviderInfo] = build_registry()
 __all__ = [
     "AUTO_LADDER",
     "CAPABILITIES",
+    "COMMERCIAL_SAFE_TTS",
     "FREE_LADDER_PROVIDERS",
     "FREE_POOL_EXHAUSTED",
     "NO_FREE_PROVIDER",

@@ -52,13 +52,16 @@ class FakeRunPipeline:
 
 
 # ── inject_provider_env (Piece 3) ─────────────────────────────────────────────
-def test_inject_provider_env_sets_keys_verbatim_and_returns_names() -> None:
+def test_inject_provider_env_maps_payload_fields_to_adapter_env_vars() -> None:
+    # CodeX P1: the credentials payload uses GENERIC field names (apiKey/accountId/apiToken,
+    # see credentials.ts ProviderCredentials); the worker must translate them to the env vars
+    # provider-adapters reads, else probe() sees the providers as unconfigured despite valid keys.
     env: dict[str, str] = {}
     names = inject_provider_env(
         {
-            "groq": {"GROQ_API_KEY": "gsk_x"},
-            "cloudflare": {"CLOUDFLARE_ACCOUNT_ID": "acct", "CLOUDFLARE_API_TOKEN": "tok"},
-            "deepl": {"DEEPL_API_KEY": "k:fx"},
+            "groq": {"apiKey": "gsk_x"},
+            "cloudflare": {"accountId": "acct", "apiToken": "tok"},
+            "deepl": {"apiKey": "k:fx"},
         },
         environ=env,
     )
@@ -69,10 +72,42 @@ def test_inject_provider_env_sets_keys_verbatim_and_returns_names() -> None:
     assert names == ["cloudflare", "deepl", "groq"]  # sorted NAMES only (redaction-safe log)
 
 
-def test_inject_provider_env_skips_provider_with_no_fields() -> None:
+def test_inject_provider_env_skips_unknown_provider_and_field() -> None:
     env: dict[str, str] = {}
-    out = inject_provider_env({"groq": {"GROQ_API_KEY": "x"}, "empty": {}}, environ=env)
-    assert out == ["groq"]  # a provider with no fields is not reported
+    out = inject_provider_env(
+        {"groq": {"apiKey": "x"}, "openai": {"apiKey": "paid"}, "deepl": {"bogus": "v"}},
+        environ=env,
+    )
+    # unknown provider (openai) + unknown field (deepl.bogus) are skipped — never set blindly.
+    assert env == {"GROQ_API_KEY": "x"}
+    assert out == ["groq"]
+
+
+def test_available_free_providers_filters_tts_to_commercial_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # CodeX P1: on a host where piper is absent but edge_tts is available, tts must NOT offer
+    # edge_tts (the non-commercial experimental lane) for dub output — only commercial-safe voices.
+    import media_worker.pipeline as pl
+
+    class _Info:
+        def __init__(self, name: str, paid: bool) -> None:
+            self.name = name
+            self.paid = paid
+
+    def fake_probe(kind: str) -> list[tuple[str, bool, _Info]]:
+        return {
+            "tts": [
+                ("piper", False, _Info("piper", False)),  # absent on this host
+                ("edge_tts", True, _Info("edge_tts", False)),  # present but non-commercial
+                ("cloudflare", True, _Info("cloudflare", False)),  # commercial-safe
+            ],
+            "asr": [("cloudflare", True, _Info("cloudflare", False))],
+        }.get(kind, [])
+
+    monkeypatch.setattr(pl, "probe", fake_probe)
+    assert pl._available_free_providers("tts") == frozenset({"cloudflare"})  # edge_tts filtered out
+    assert pl._available_free_providers("asr") == frozenset({"cloudflare"})  # non-tts not filtered
 
 
 # ── run_real_pipeline routing (Piece 4) ───────────────────────────────────────

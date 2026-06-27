@@ -33,6 +33,7 @@ from autodub_core import JobPaths
 from autodub_core import run_pipeline as _run_pipeline
 from ovt_schemas import Job
 from provider_adapters import (
+    COMMERCIAL_SAFE_TTS,
     ProviderAvailability,
     ProviderResult,
     QuotaExhausted,
@@ -51,6 +52,17 @@ _STAGE_KINDS = ("asr", "mt", "tts")
 # Default circuit-break window when a 429 carried no Retry-After: hold the provider down ~1h so we
 # don't immediately re-hit a quota'd API (the control plane clamps to its own max). 429 不复撞.
 _DEFAULT_RESET_SEC = 3600.0
+
+# The /internal/credentials provider payload uses GENERIC field names (apiKey/accountId/apiToken —
+# apps/control-plane/src/credentials.ts ProviderCredentials); provider-adapters' adapters read
+# ADAPTER-SPECIFIC env vars. This bridges (provider, payload field) -> the env var the adapter reads
+# so an injected key actually configures the provider. A provider/field absent here can't be
+# consumed by the Tier-1 free pool and is skipped (so a typo can't silently configure nothing).
+_PROVIDER_ENV_MAP: dict[str, dict[str, str]] = {
+    "groq": {"apiKey": "GROQ_API_KEY"},
+    "cloudflare": {"accountId": "CLOUDFLARE_ACCOUNT_ID", "apiToken": "CLOUDFLARE_API_TOKEN"},
+    "deepl": {"apiKey": "DEEPL_API_KEY"},
+}
 
 
 class FreePoolExhausted(RuntimeError):
@@ -76,19 +88,26 @@ def inject_provider_env(
     *,
     environ: MutableMapping[str, str] | None = None,
 ) -> list[str]:
-    """Set each free provider's keys into the environment (SECRETS -> the env-keyed
-    provider-adapters ``select`` seam). The control plane sends inner keys ALREADY NAMED as the env
-    vars provider-adapters reads (``GROQ_API_KEY`` / ``CLOUDFLARE_ACCOUNT_ID`` /
-    ``CLOUDFLARE_API_TOKEN`` / ``DEEPL_API_KEY`` / ...), so the worker sets them verbatim.
-    Returns the configured provider NAMES (sorted, names only — never key values) for a
-    redaction-safe startup log. The keys live in-process env only; SECRETS keeps them off disk."""
+    """Translate the SECRETS ``/internal/credentials`` provider payload into the environment so the
+    env-keyed provider-adapters ``select`` seam resolves the providers. The payload uses GENERIC
+    field names (``apiKey`` / ``accountId`` / ``apiToken`` — see credentials.ts); provider-adapters
+    reads ADAPTER-SPECIFIC env vars (``GROQ_API_KEY`` / ``CLOUDFLARE_ACCOUNT_ID`` /
+    ``CLOUDFLARE_API_TOKEN`` / ``DEEPL_API_KEY``), so ``_PROVIDER_ENV_MAP`` bridges the two. A
+    provider/field the Tier-1 free pool can't consume is skipped. Returns the configured provider
+    NAMES (sorted, names only — never key values) for a redaction-safe startup log. The keys live
+    in-process env only; SECRETS keeps them off the box disk."""
     env = environ if environ is not None else os.environ
     configured: list[str] = []
     for name, fields in providers.items():
+        field_map = _PROVIDER_ENV_MAP.get(str(name))
+        if field_map is None:
+            continue  # not a Tier-1 free provider the worker can configure
         wrote = False
-        for env_name, value in fields.items():
-            env[str(env_name)] = str(value)
-            wrote = True
+        for field, value in fields.items():
+            env_name = field_map.get(str(field))
+            if env_name is not None:
+                env[env_name] = str(value)
+                wrote = True
         if wrote:
             configured.append(str(name))
     return sorted(configured)
@@ -97,8 +116,17 @@ def inject_provider_env(
 def _available_free_providers(kind: str) -> frozenset[str]:
     """Free provider names whose adapter is currently available (key/binary present) for ``kind``.
     Reads provider-adapters' registry probe — which checks os.environ AFTER inject_provider_env — so
-    an unconfigured provider is never routed to. Paid names are excluded defensively (red line)."""
-    return frozenset(name for name, avail, info in probe(kind) if avail and not info.paid)
+    an unconfigured provider is never routed to. Paid names are excluded defensively (red line).
+
+    For ``tts`` the set is further restricted to COMMERCIAL-SAFE voices (piper/cloudflare): tts is
+    only routed for dub output, and edge_tts is the experimental non-commercial lane that must NEVER
+    be a default dub voice (T1.3f / AD-6). Without this filter, routing on a host where piper is
+    absent but edge_tts is installed would pick edge_tts and bypass the commercial-safe gate that
+    assert_language_pair enforces at admission (CodeX P1)."""
+    free = frozenset(name for name, avail, info in probe(kind) if avail and not info.paid)
+    if kind == "tts":
+        free &= COMMERCIAL_SAFE_TTS
+    return free
 
 
 def _stage_kinds(output_mode: str) -> tuple[str, ...]:
