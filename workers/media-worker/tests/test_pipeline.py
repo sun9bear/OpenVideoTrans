@@ -100,8 +100,11 @@ class _RejectingRun:
     (so the resolver records last_select, exactly as transcribe/translate/tts do) and rejects the
     FIRST provider it sees for ``reject_kind``, once, so the test is ladder-order-independent."""
 
-    def __init__(self, reject_kind: str | None = None) -> None:
+    def __init__(
+        self, reject_kind: str | None = None, exc_class: type[Exception] = ProviderUnavailable
+    ) -> None:
         self.reject_kind = reject_kind
+        self.exc_class = exc_class  # ProviderUnavailable class to raise (adapters' or kernel's)
         self.calls: list[dict[str, str | None]] = []
         self._rejected = False
 
@@ -117,7 +120,7 @@ class _RejectingRun:
             resolver.select(kind, plan[kind], allow_paid=False)  # a sentinel raises FreePool here
             if kind == self.reject_kind and not self._rejected:
                 self._rejected = True
-                raise ProviderUnavailable(f"{plan[kind]} cannot serve this input (auto source)")
+                raise self.exc_class(f"{plan[kind]} cannot serve this input (auto source)")
         if job.output_mode in ("dub_only", "both"):
             paths.dubbed_video.write_bytes(b"DUBBED-VIDEO")
         if job.output_mode in ("subtitle_only", "both"):
@@ -320,6 +323,56 @@ def test_provider_unavailable_reroutes_locally_without_reporting_exhausted(tmp_p
     assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}
     assert run.calls[1]["mt"] != run.calls[0]["mt"]  # rerouted to a DIFFERENT free MT provider
     assert cp.exhausted_reports == []  # input rejection != 429 -> NEVER reported globally exhausted
+
+
+def test_input_rejection_excludes_only_the_failed_stage(tmp_path: Path) -> None:
+    # @CodeX bot R5 P1: an input-specific ProviderUnavailable (CF MT rejecting an 'auto' source)
+    # must exclude ONLY the failed stage, NOT provider-wide. If Cloudflare is also the only
+    # commercial-safe TTS for the target, excluding it from TTS too would wrongly fail the dub.
+    # Here MT reroutes off the rejecting provider, but TTS keeps Cloudflare and the job completes.
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="dub_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = _RejectingRun(reject_kind="mt")
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=_FakeInnerResolver(), run_pipeline_fn=run,
+        available_providers=_avail({
+            "asr": {"cloudflare"}, "mt": {"cloudflare", "deepl"}, "tts": {"cloudflare"},
+        }),
+        now_ms=lambda: 1000,
+    )
+    assert artifacts == {"video_key": "artifacts/job_x/1/output.mp4"}
+    assert run.calls[1]["mt"] != run.calls[0]["mt"]   # MT rerouted off the rejecting provider
+    assert run.calls[1]["tts"] == "cloudflare"        # TTS KEPT cloudflare (not excluded with MT)
+    assert cp.exhausted_reports == []
+
+
+def test_kernel_class_provider_unavailable_also_reroutes(tmp_path: Path) -> None:
+    # Self-review P3: the kernel raises its OWN ProviderUnavailable (autodub_core.providers, from
+    # _assign_voices on a TTS voice gap) — a DIFFERENT class from the adapters' ProviderUnavailable
+    # the worker imports (the kernel<->adapters seam keeps them unrelated). The reroute handler must
+    # catch BOTH classes, else a kernel-raised voice gap silently becomes internal_error instead of
+    # rerouting to the next free TTS provider.
+    from autodub_core import ProviderUnavailable as KernelPU
+
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="dub_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = _RejectingRun(reject_kind="tts", exc_class=KernelPU)  # the KERNEL's class, not adapters'
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=_FakeInnerResolver(), run_pipeline_fn=run,
+        available_providers=_avail(
+            {"asr": {"cloudflare"}, "mt": {"deepl"}, "tts": {"piper", "cloudflare"}}
+        ),
+        now_ms=lambda: 1000,
+    )
+    assert artifacts == {"video_key": "artifacts/job_x/1/output.mp4"}
+    assert run.calls[1]["tts"] != run.calls[0]["tts"]  # TTS rerouted off the voice-gap provider
+    assert cp.exhausted_reports == []  # voice gap is an input rejection, not a 429 -> no report
 
 
 def test_provider_unavailable_with_no_alternative_fails_closed(tmp_path: Path) -> None:

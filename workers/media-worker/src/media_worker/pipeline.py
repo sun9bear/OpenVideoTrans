@@ -31,6 +31,7 @@ from functools import partial
 from pathlib import Path
 
 from autodub_core import JobPaths
+from autodub_core import ProviderUnavailable as KernelProviderUnavailable
 from autodub_core import run_pipeline as _run_pipeline
 from ovt_schemas import Job
 from provider_adapters import (
@@ -317,14 +318,21 @@ def _exclude_and_reroute(
     avail_fn: Callable[[str], frozenset[str]],
     on_telemetry: Callable[..., None] | None,
     paths: JobPaths,
+    provider_wide: bool,
 ) -> None:
-    """Exclude ``failed`` from every active stage from ``kind`` onward (provider-WIDE local
-    circuit-break) and re-pick each stage currently planned on it. Stages before ``kind`` already
-    produced cached output, so their plan is moot. Shared by the 429 (QuotaExhausted) and the
-    input-rejection (ProviderUnavailable) reroute paths; mutates ``plan`` / ``excluded``."""
-    for k in kinds[kinds.index(kind):]:
-        # Exclude the failed provider from EVERY active stage (not only those using it now) so a
-        # later failure can't re-route a stage back onto it even if the shared snapshot is stale.
+    """Exclude ``failed`` and re-pick each affected stage currently planned on it. Mutates
+    ``plan`` / ``excluded``.
+
+    ``provider_wide`` selects the exclusion SCOPE by failure type:
+      * 429 (``QuotaExhausted``, ``provider_wide=True``): the provider is GLOBALLY rate-limited,
+        so exclude it from every active stage from ``kind`` onward (stages before ``kind`` already
+        produced cached output, so their plan is moot) — never re-hit anywhere (429 不复撞).
+      * input rejection (``ProviderUnavailable``, ``provider_wide=False``): the provider is HEALTHY
+        and only THIS capability rejected the input (e.g. Cloudflare MT on an 'auto' source), so
+        exclude/reroute ONLY the failed stage — a sibling stage it could still serve (e.g. the same
+        provider's TTS) must keep using it (@CodeX bot R5 P1)."""
+    affected = kinds[kinds.index(kind):] if provider_wide else (kind,)
+    for k in affected:
         excluded[k].add(failed)
         if plan.get(k) != failed:
             continue
@@ -416,8 +424,8 @@ def run_real_pipeline(
             snapshot = _refresh_snapshot(cp, clock, snapshot)
             _exclude_and_reroute(kind, reported, kinds=kinds, plan=plan, excluded=excluded,
                                  snapshot=snapshot, avail_fn=avail_fn, on_telemetry=on_telemetry,
-                                 paths=paths)
-        except ProviderUnavailable:
+                                 paths=paths, provider_wide=True)
+        except (ProviderUnavailable, KernelProviderUnavailable):
             # A provider that is HEALTHY but can't serve THIS input (e.g. Cloudflare MT rejecting an
             # 'auto' source, a TTS voice gap) raises ProviderUnavailable — NOT a 429. Reroute it
             # like a quota hit, but exclude it LOCALLY (this job only): NEVER
@@ -425,12 +433,19 @@ def run_real_pipeline(
             # wrong (@CodeX bot R4 P1). The kernel selects a provider then uses it, so last_select
             # attributes the failure to the right stage+provider. If it isn't attributable to a
             # selected stage (no select preceded it), surface it (-> internal_error), don't reroute.
+            # Catch BOTH the adapters' ProviderUnavailable (provider_adapters.base) AND the kernel's
+            # OWN ProviderUnavailable (autodub_core.providers, raised by _assign_voices on a TTS
+            # voice gap): the kernel<->adapters seam keeps the two classes unrelated, so a single
+            # bind would silently miss the kernel-raised voice-gap reroute (self-review P3).
             sel = kernel_resolver.last_select
             if sel is None or sel[0] not in _STAGE_KINDS or not sel[1]:
                 raise
             snapshot = _refresh_snapshot(cp, clock, snapshot)
+            # provider_wide=False: a healthy provider rejected only THIS capability's input, so
+            # exclude/reroute the failed stage ALONE (don't strip it from sibling stages it can
+            # still serve) — @CodeX bot R5 P1.
             _exclude_and_reroute(sel[0], sel[1], kinds=kinds, plan=plan, excluded=excluded,
                                  snapshot=snapshot, avail_fn=avail_fn, on_telemetry=on_telemetry,
-                                 paths=paths)
+                                 paths=paths, provider_wide=False)
     _emit_exhausted(on_telemetry)
     raise FreePoolExhausted("max_reroutes")  # bounded backstop (sized above so this is unreachable)
