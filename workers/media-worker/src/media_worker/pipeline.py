@@ -37,6 +37,7 @@ from provider_adapters import (
     COMMERCIAL_SAFE_TTS,
     ProviderAvailability,
     ProviderResult,
+    ProviderUnavailable,
     QuotaExhausted,
     Resolver,
     assert_language_pair,
@@ -254,6 +255,10 @@ class _FreePoolSelectResolver:
 
     def __init__(self, inner: object) -> None:
         self._inner = inner
+        # The (kind, provider) of the most recent real selection. The kernel selects a provider
+        # then immediately uses it, so on a provider rejection (ProviderUnavailable) this attributes
+        # the failure to the right stage+provider for a local reroute (@CodeX bot R4 P1).
+        self.last_select: tuple[str, str | None] | None = None
 
     def select(self, kind: str, requested: str | None = None, allow_paid: bool = False) -> object:
         # Signature MIRRORS the kernel's Resolver.select (kind, requested, allow_paid — all
@@ -261,6 +266,7 @@ class _FreePoolSelectResolver:
         # keyword-only param here would TypeError on the first real selection (@CodeX bot R3 P1).
         if requested == _FREE_POOL_EXHAUSTED:
             raise FreePoolExhausted(kind)
+        self.last_select = (kind, requested)
         return self._inner.select(kind, requested, allow_paid)  # type: ignore[attr-defined]
 
     def __getattr__(self, name: str) -> object:
@@ -285,6 +291,49 @@ def _route_plan(
         _emit_exhausted(on_telemetry)
         raise FreePoolExhausted(kind)
     return _FREE_POOL_EXHAUSTED
+
+
+def _refresh_snapshot(
+    cp: ControlPlane, clock: Callable[[], int], prior: ProviderAvailability
+) -> ProviderAvailability:
+    """Re-fetch the FREE-POOL availability snapshot for a reroute; a transient blip on the GET must
+    not abort the reroute, so fall back to the prior snapshot (the local ``excluded`` set still
+    prevents re-picking the failed provider) — @CodeX bot M2-CLOSE."""
+    try:
+        return _snapshot(cp, clock)
+    except Exception:
+        logger.warning("availability refresh failed; reusing prior snapshot for reroute")
+        return prior
+
+
+def _exclude_and_reroute(
+    kind: str,
+    failed: str,
+    *,
+    kinds: tuple[str, ...],
+    plan: dict[str, str | None],
+    excluded: dict[str, set[str]],
+    snapshot: ProviderAvailability,
+    avail_fn: Callable[[str], frozenset[str]],
+    on_telemetry: Callable[..., None] | None,
+    paths: JobPaths,
+) -> None:
+    """Exclude ``failed`` from every active stage from ``kind`` onward (provider-WIDE local
+    circuit-break) and re-pick each stage currently planned on it. Stages before ``kind`` already
+    produced cached output, so their plan is moot. Shared by the 429 (QuotaExhausted) and the
+    input-rejection (ProviderUnavailable) reroute paths; mutates ``plan`` / ``excluded``."""
+    for k in kinds[kinds.index(kind):]:
+        # Exclude the failed provider from EVERY active stage (not only those using it now) so a
+        # later failure can't re-route a stage back onto it even if the shared snapshot is stale.
+        excluded[k].add(failed)
+        if plan.get(k) != failed:
+            continue
+        # TTS persists per-segment raws; clear them on a provider switch so the new voice is uniform
+        # across the whole deliverable (no mixed-timbre output across segments).
+        if k == "tts":
+            _clear_dir(paths.tts)
+        plan[k] = _route_plan(k, snapshot, excluded[k], avail_fn, on_telemetry)
+    _emit(on_telemetry, provider=plan[kinds[0]])
 
 
 def run_real_pipeline(
@@ -353,12 +402,10 @@ def run_real_pipeline(
             _emit_exhausted(on_telemetry)
             raise
         except QuotaExhausted as exc:
-            # The circuit-breaker state is PER-PROVIDER (shared), not per-stage: when a provider
-            # serving several kinds (cloudflare = asr/mt/tts, groq = asr/mt) 429s, exclude it and
-            # re-route EVERY not-yet-completed stage planned on it. Stages BEFORE the failed one
-            # already produced cached output, so their plan is moot; re-routing the failed stage
-            # onward stops the 429'd provider being re-hit elsewhere (429 不复撞). A transient
-            # report blip must NOT abort the re-route (exclusion still prevents re-picking).
+            # A FREE provider returned 429: the circuit-breaker state is PER-PROVIDER (shared), so
+            # REPORT it exhausted (global circuit-break, clamped control-plane side) and re-route
+            # every not-yet-completed stage planned on it — never re-hit (429 不复撞). A transient
+            # report/refresh blip must NOT abort the re-route (exclusion still prevents re-picking).
             kind = exc.kind if exc.kind in _STAGE_KINDS else _infer_kind(exc.provider, plan, kinds)
             reported = plan.get(kind) or exc.provider  # the FREE provider we routed (never paid)
             reset_ms = clock() + int((exc.retry_after_sec or _DEFAULT_RESET_SEC) * 1000)
@@ -366,29 +413,24 @@ def run_real_pipeline(
                 cp.report_provider_exhausted(reported, reset_at_ms=reset_ms, reason="429")
             except Exception:
                 logger.warning("provider-exhausted report failed; re-routing locally")
-            try:
-                snapshot = _snapshot(cp, clock)
-            except Exception:
-                # The post-429 availability refresh sits OUTSIDE the report guard above; a transient
-                # control-plane blip on THIS GET must not abort the reroute either. The local
-                # `excluded` set already prevents re-picking the 429'd provider, so reuse the prior
-                # snapshot and let the local circuit-break complete (@CodeX bot M2-CLOSE).
-                logger.warning("availability refresh failed; reusing prior snapshot for reroute")
-            for k in kinds[kinds.index(kind):]:
-                # Exclude the 429'd provider from EVERY active stage (not only those currently using
-                # it) so a later 429 can't re-route a stage back onto it even if the shared snapshot
-                # is stale or the report failed — local circuit-break, never re-hit (CodeX P2).
-                excluded[k].add(reported)
-                if plan.get(k) != reported:
-                    continue
-                # TTS persists per-segment raws; clear them on a provider switch so the new voice is
-                # uniform across the whole deliverable (no mixed-timbre output across segments).
-                if k == "tts":
-                    _clear_dir(paths.tts)
-                # Same lazy-fail rule as the initial route: ASR re-route with no provider fails the
-                # job now; MT/TTS defer to the sentinel (the kernel may still skip them if the
-                # re-run ASR yields no speech) and fail closed only when actually reached.
-                plan[k] = _route_plan(k, snapshot, excluded[k], avail_fn, on_telemetry)
-            _emit(on_telemetry, provider=plan[kinds[0]])
+            snapshot = _refresh_snapshot(cp, clock, snapshot)
+            _exclude_and_reroute(kind, reported, kinds=kinds, plan=plan, excluded=excluded,
+                                 snapshot=snapshot, avail_fn=avail_fn, on_telemetry=on_telemetry,
+                                 paths=paths)
+        except ProviderUnavailable:
+            # A provider that is HEALTHY but can't serve THIS input (e.g. Cloudflare MT rejecting an
+            # 'auto' source, a TTS voice gap) raises ProviderUnavailable — NOT a 429. Reroute it
+            # like a quota hit, but exclude it LOCALLY (this job only): NEVER
+            # report_provider_exhausted, since circuit-breaking a healthy provider globally would be
+            # wrong (@CodeX bot R4 P1). The kernel selects a provider then uses it, so last_select
+            # attributes the failure to the right stage+provider. If it isn't attributable to a
+            # selected stage (no select preceded it), surface it (-> internal_error), don't reroute.
+            sel = kernel_resolver.last_select
+            if sel is None or sel[0] not in _STAGE_KINDS or not sel[1]:
+                raise
+            snapshot = _refresh_snapshot(cp, clock, snapshot)
+            _exclude_and_reroute(sel[0], sel[1], kinds=kinds, plan=plan, excluded=excluded,
+                                 snapshot=snapshot, avail_fn=avail_fn, on_telemetry=on_telemetry,
+                                 paths=paths)
     _emit_exhausted(on_telemetry)
     raise FreePoolExhausted("max_reroutes")  # bounded backstop (sized above so this is unreachable)

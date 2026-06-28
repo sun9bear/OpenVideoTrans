@@ -15,7 +15,7 @@ import pytest
 from media_worker.control_plane import ProviderSnapshot
 from media_worker.pipeline import FreePoolExhausted, inject_provider_env, run_real_pipeline
 from mw_fakes import FakeControlPlane, FakeStorage, make_job
-from provider_adapters import LanguageError, QuotaExhausted
+from provider_adapters import LanguageError, ProviderUnavailable, QuotaExhausted
 
 
 def _make_key(job_id: str, cv: int, name: str) -> str:
@@ -87,6 +87,37 @@ class _SelectingRun:
         for kind in ("asr", "mt", "tts"):
             if kind in self.needs:
                 resolver.select(kind, plan[kind], allow_paid=False)  # sentinel -> FreePoolExhausted
+        if job.output_mode in ("dub_only", "both"):
+            paths.dubbed_video.write_bytes(b"DUBBED-VIDEO")
+        if job.output_mode in ("subtitle_only", "both"):
+            paths.subtitles.write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n", encoding="utf-8")
+        return paths.dubbed_video if job.output_mode != "subtitle_only" else paths.subtitles
+
+
+class _RejectingRun:
+    """Simulates the kernel SELECTING a provider then the provider rejecting THIS input with a plain
+    ProviderUnavailable (e.g. Cloudflare MT on an 'auto' source) — NOT a 429. It calls select first
+    (so the resolver records last_select, exactly as transcribe/translate/tts do) and rejects the
+    FIRST provider it sees for ``reject_kind``, once, so the test is ladder-order-independent."""
+
+    def __init__(self, reject_kind: str | None = None) -> None:
+        self.reject_kind = reject_kind
+        self.calls: list[dict[str, str | None]] = []
+        self._rejected = False
+
+    def __call__(
+        self, paths: Any, resolver: Any, *, source: str, target_lang: str,
+        job: Any, **_kw: object,
+    ) -> Path:
+        assert target_lang == job.target_lang
+        plan = {"asr": job.plan.asr, "mt": job.plan.mt, "tts": job.plan.tts}
+        self.calls.append(plan)
+        stages = ("asr", "mt") if job.output_mode == "subtitle_only" else ("asr", "mt", "tts")
+        for kind in stages:
+            resolver.select(kind, plan[kind], allow_paid=False)  # a sentinel raises FreePool here
+            if kind == self.reject_kind and not self._rejected:
+                self._rejected = True
+                raise ProviderUnavailable(f"{plan[kind]} cannot serve this input (auto source)")
         if job.output_mode in ("dub_only", "both"):
             paths.dubbed_video.write_bytes(b"DUBBED-VIDEO")
         if job.output_mode in ("subtitle_only", "both"):
@@ -268,6 +299,70 @@ def test_no_speech_skips_unavailable_mt_and_completes(tmp_path: Path) -> None:
     )
     assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}  # completed despite empty MT
     assert run.calls[0]["mt"] == "__free_pool_exhausted__"  # MT was deferred to the sentinel
+
+
+def test_provider_unavailable_reroutes_locally_without_reporting_exhausted(tmp_path: Path) -> None:
+    # @CodeX bot R4 P1 + owner directive: a provider that is HEALTHY but can't serve THIS input
+    # (Cloudflare MT rejecting an 'auto' source) raises ProviderUnavailable, NOT a 429. Reroute to
+    # the next free MT, but LOCAL-exclude only — NEVER report_provider_exhausted (the provider isn't
+    # globally down; circuit-breaking it would wrongly deny it to other jobs).
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = _RejectingRun(reject_kind="mt")  # the first MT provider rejects this input, once
+    artifacts = run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=_FakeInnerResolver(), run_pipeline_fn=run,
+        available_providers=_avail({"asr": {"cloudflare"}, "mt": {"cloudflare", "deepl"}}),
+        now_ms=lambda: 1000,
+    )
+    assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}
+    assert run.calls[1]["mt"] != run.calls[0]["mt"]  # rerouted to a DIFFERENT free MT provider
+    assert cp.exhausted_reports == []  # input rejection != 429 -> NEVER reported globally exhausted
+
+
+def test_provider_unavailable_with_no_alternative_fails_closed(tmp_path: Path) -> None:
+    # When the rejecting provider is the ONLY free one for the stage, the reroute finds none -> the
+    # stage routes to the sentinel and fails closed as free_pool_exhausted (still never reported).
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = _RejectingRun(reject_kind="mt")
+    with pytest.raises(FreePoolExhausted) as ei:
+        run_real_pipeline(
+            cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+            resolver=_FakeInnerResolver(), run_pipeline_fn=run,
+            available_providers=_avail({"asr": {"cloudflare"}, "mt": {"cloudflare"}}),
+            now_ms=lambda: 1000,
+        )
+    assert ei.value.kind == "mt"
+    assert cp.exhausted_reports == []  # input rejection -> local fail-closed, no global report
+
+
+def test_unattributable_provider_unavailable_surfaces_as_internal_error(tmp_path: Path) -> None:
+    # A ProviderUnavailable with no preceding select (not attributable to a routed stage — e.g. an
+    # ffmpeg/ingest-style failure surfaced as ProviderUnavailable) must NOT be rerouted blindly; it
+    # surfaces (the worker maps it to internal_error) instead of silently rotating providers.
+    class _RaiseNoSelect:
+        def __call__(
+            self, paths: Any, resolver: Any, *, source: str, target_lang: str,
+            job: Any, **_kw: object,
+        ) -> Path:
+            raise ProviderUnavailable("failure with no provider selected")
+
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    with pytest.raises(ProviderUnavailable):
+        run_real_pipeline(
+            cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+            resolver=_FakeInnerResolver(), run_pipeline_fn=_RaiseNoSelect(),
+            available_providers=_avail({"asr": {"cloudflare"}, "mt": {"deepl"}}),
+            now_ms=lambda: 1000,
+        )
 
 
 def test_fails_closed_on_unsupported_dub_language(tmp_path: Path) -> None:
