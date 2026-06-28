@@ -18,7 +18,15 @@ import subprocess
 from pathlib import Path
 
 from ._env import env, require_env
-from .base import ProviderInfo, ProviderUnavailable, TTSProvider, has_binary, has_module, register
+from .base import (
+    ProviderInfo,
+    ProviderUnavailable,
+    TTSProvider,
+    has_binary,
+    has_module,
+    raise_quota_if_429,
+    register,
+)
 
 _VOICES_PATH = Path(__file__).resolve().parent / "assets" / "voices.json"
 
@@ -106,6 +114,7 @@ class CloudflareTTS(TTSProvider):
             url, headers={"Authorization": f"Bearer {token}"},
             json={"prompt": text, "lang": voice_id}, timeout=120,
         )
+        raise_quota_if_429(resp, "cloudflare", kind="tts")  # 429 -> circuit-break (FREE-POOL)
         if resp.status_code >= 400:
             raise ProviderUnavailable(f"cloudflare TTS HTTP {resp.status_code}: {resp.text[:300]}")
         audio_b64 = resp.json().get("result", {}).get("audio", "")
@@ -117,6 +126,37 @@ class CloudflareTTS(TTSProvider):
 
 
 # --------------------------------------------------------------------------- #
+def piper_model_language() -> str | None:
+    """Base language subtag of the installed Piper voice, or None if it can't be determined.
+
+    Piper's official voices follow ``<lang>_<REGION>-<voice>-<quality>.onnx`` (e.g.
+    ``de_DE-thorsten-medium.onnx`` -> ``de``), so the language is the filename's leading subtag
+    before ``_``. ``FVD_PIPER_LANG`` overrides for a non-standard model name. A name we can't parse
+    a plausible language out of returns None — the caller then can't *prove* a mismatch and trusts
+    the operator; the standard-named cross-language case (the actual reported bug) IS parseable."""
+    override = env("FVD_PIPER_LANG")
+    if override:
+        return override.strip().replace("_", "-").split("-")[0].lower() or None
+    model = env("FVD_PIPER_MODEL")
+    if not model:
+        return None
+    head = Path(model).name.split("-")[0]  # "en_US-amy-medium.onnx" -> "en_US"
+    if "_" not in head:  # Piper's convention is "<lang>_<REGION>"; no underscore -> non-standard
+        return None
+    lang = head.split("_")[0].strip().lower()
+    return lang if lang.isalpha() and 2 <= len(lang) <= 3 else None
+
+
+def piper_model_covers(lang: str) -> bool:
+    """Whether the installed Piper model can serve ``lang`` (base-subtag match). True when the
+    model's language is undeterminable (operator-trusted, non-standard name) — we never *block* a
+    model we can't classify, only one we can prove is the wrong language."""
+    model_lang = piper_model_language()
+    if model_lang is None:
+        return True
+    return model_lang == lang.strip().replace("_", "-").split("-")[0].lower()
+
+
 class PiperTTS(TTSProvider):
     info = ProviderInfo(
         "piper", "tts", paid=False,
@@ -134,6 +174,17 @@ class PiperTTS(TTSProvider):
 
     def voices_for(self, lang: str) -> list[str]:
         self._ensure_available()
+        # Piper has ONE configured model and voices_for used to ignore `lang` — so a `de` job on an
+        # `en_US` model would synthesize German text with the English voice (a silent broken
+        # artifact). Fail closed on a language the model can't serve, mirroring CloudflareTTS's
+        # per-language gate. Routing also drops piper for an uncovered locale; this is the adapter
+        # boundary's defense-in-depth (@CodeX bot M2-CLOSE).
+        if not piper_model_covers(lang):
+            raise ProviderUnavailable(
+                f"the installed Piper model (language {piper_model_language()!r}) does not cover "
+                f"{lang!r}: piper synthesizes only its single configured model's language. Point "
+                f"FVD_PIPER_MODEL at a {lang!r} voice (or FVD_PIPER_LANG for a non-standard name)."
+            )
         return [require_env("FVD_PIPER_MODEL")]
 
     def synthesize(self, text: str, voice_id: str, lang: str, out_path: str) -> str:

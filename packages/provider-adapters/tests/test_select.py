@@ -195,6 +195,44 @@ def test_piper_unavailable_when_model_file_missing(
     assert PiperTTS().available() is True
 
 
+def test_piper_voices_for_fails_closed_on_language_mismatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # @CodeX bot M2-CLOSE: PiperTTS has ONE configured model and voices_for ignored `lang`, so a de
+    # job on an en model would synthesize German text with the English voice (a silent broken
+    # artifact). voices_for now fails closed on a language the model can't serve (mirrors CF).
+    monkeypatch.setattr("provider_adapters.tts.has_binary", lambda _name: True)
+    monkeypatch.delenv("FVD_PIPER_LANG", raising=False)
+    real = tmp_path / "en_US-amy-medium.onnx"
+    real.write_bytes(b"\x00")
+    monkeypatch.setenv("FVD_PIPER_MODEL", str(real))
+    # the en model serves en, including region/script variants that fold to the base subtag...
+    assert PiperTTS().voices_for("en") == [str(real)]
+    assert PiperTTS().voices_for("en-GB") == [str(real)]
+    # ...but fails closed for a different language instead of voicing it with the wrong model.
+    with pytest.raises(ProviderUnavailable, match="does not cover"):
+        PiperTTS().voices_for("de")
+
+
+def test_piper_model_language_parsing_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The model language is inferred from Piper's "<lang>_<REGION>-..." naming; FVD_PIPER_LANG
+    # overrides for a non-standard name, and an unparseable name trusts the operator (covers any).
+    from provider_adapters.tts import piper_model_covers, piper_model_language
+
+    monkeypatch.delenv("FVD_PIPER_LANG", raising=False)
+    monkeypatch.setenv("FVD_PIPER_MODEL", "/m/pt_BR-faber-medium.onnx")
+    assert piper_model_language() == "pt"
+    assert piper_model_covers("pt-BR") is True  # base-subtag match (pt == pt)
+    assert piper_model_covers("de") is False
+    monkeypatch.setenv("FVD_PIPER_MODEL", "/m/myvoice.onnx")  # non-standard -> undeterminable
+    assert piper_model_language() is None
+    assert piper_model_covers("de") is True  # can't prove a mismatch -> operator-trusted
+    monkeypatch.setenv("FVD_PIPER_LANG", "ja")  # ...unless declared explicitly
+    assert piper_model_language() == "ja"
+    assert piper_model_covers("ja") is True
+    assert piper_model_covers("ko") is False
+
+
 def test_asr_normalizes_detected_language_name_to_iso() -> None:
     # CodeX round-4 P2: Whisper (OpenAI/groq) returns a language NAME ("english"); the
     # transcript must store an ISO code so the default ASR->CloudflareMT handoff doesn't

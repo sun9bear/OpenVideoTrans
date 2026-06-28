@@ -13,7 +13,14 @@ import json
 import re
 
 from ._env import env, require_env
-from .base import MTProvider, ProviderInfo, ProviderUnavailable, has_module, register
+from .base import (
+    MTProvider,
+    ProviderInfo,
+    ProviderUnavailable,
+    has_module,
+    raise_quota_if_429,
+    register,
+)
 from .ladder import DEFAULT_CHARS_PER_SEC
 from .languages import deepl_target_code
 
@@ -88,6 +95,7 @@ class CloudflareMT(MTProvider):
                 url, headers={"Authorization": f"Bearer {token}"},
                 json={"text": t, "source_lang": src, "target_lang": tgt}, timeout=120,
             )
+            raise_quota_if_429(resp, "cloudflare", kind="mt")  # 429 -> circuit-break (FREE-POOL)
             if resp.status_code >= 400:
                 raise ProviderUnavailable(
                     f"cloudflare MT HTTP {resp.status_code}: {resp.text[:300]}"
@@ -134,6 +142,8 @@ class DeepLMT(MTProvider):
                 data=[("text", t) for t in batch] + [("target_lang", deepl_code)],
                 timeout=120,
             )
+            # DeepL Free signals quota exhaustion with HTTP 456 (not 429).
+            raise_quota_if_429(resp, "deepl", kind="mt", extra=(456,))
             if resp.status_code >= 400:
                 raise ProviderUnavailable(f"deepl HTTP {resp.status_code}: {resp.text[:300]}")
             out.extend(tr.get("text", "") for tr in resp.json().get("translations", []))
@@ -224,6 +234,7 @@ class _OpenAICompatMT(_LLMTranslator):
             },
             timeout=180,
         )
+        raise_quota_if_429(resp, self.info.name, kind="mt")  # 429 -> circuit-break (FREE-POOL)
         if resp.status_code >= 400:
             raise ProviderUnavailable(
                 f"{self.info.name} MT HTTP {resp.status_code}: {resp.text[:300]}"
@@ -303,6 +314,7 @@ class OllamaMT(_LLMTranslator):
             },
             timeout=300,
         )
+        raise_quota_if_429(resp, "ollama", kind="mt")  # 429 -> circuit-break (FREE-POOL)
         if resp.status_code >= 400:
             raise ProviderUnavailable(f"ollama HTTP {resp.status_code}: {resp.text[:300]}")
         return resp.json().get("message", {}).get("content", "")

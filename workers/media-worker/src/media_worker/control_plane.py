@@ -81,6 +81,18 @@ class StaleClaimError(ControlPlaneError):
 
 
 @dataclass(frozen=True)
+class ProviderSnapshot:
+    """The shared FREE-POOL circuit-breaker snapshot the worker pulls from the control plane
+    (GET /internal/providers/availability). Field names mirror the control-plane JSON AND the
+    provider-adapters ``ProviderAvailability`` dataclass (now_ms / exhausted_until) so the routing
+    layer hydrates it directly — but it is defined HERE (transport-owned, stdlib-only) so this
+    client keeps no provider-adapters import edge."""
+
+    now_ms: int
+    exhausted_until: Mapping[str, int]
+
+
+@dataclass(frozen=True)
 class WorkerCredentials:
     """Secrets pulled from the control plane at startup and held in MEMORY ONLY — never written to
     the worker box's disk (SECRETS #21). ``r2`` drives the storage client; ``providers`` carries
@@ -158,6 +170,10 @@ class ControlPlane(Protocol):
     ) -> None: ...
     def fail(
         self, job_id: str, claim_version: int, *, error_code: str, error_detail: str | None = None
+    ) -> None: ...
+    def get_provider_availability(self) -> ProviderSnapshot: ...
+    def report_provider_exhausted(
+        self, provider: str, *, reset_at_ms: int, reason: str | None = None
     ) -> None: ...
 
 
@@ -279,3 +295,30 @@ class HttpControlPlane:
         if error_detail is not None:
             body["error_detail"] = error_detail
         self._call("POST", f"/internal/jobs/{job_id}/fail", body)
+
+    def get_provider_availability(self) -> ProviderSnapshot:
+        # FREE-POOL (#23): pull the shared circuit-breaker snapshot so routing skips a provider that
+        # ANOTHER box already saw 429 on. A partial/garbled field hydrates safe defaults (no
+        # exhaustion) rather than crashing the claim loop on a malformed control-plane response.
+        resp = self._call("GET", "/internal/providers/availability")
+        raw = resp.get("exhausted_until")
+        exhausted: dict[str, int] = {}
+        if isinstance(raw, Mapping):
+            for name, until in raw.items():
+                if isinstance(until, (int, float)) and not isinstance(until, bool):
+                    exhausted[str(name)] = int(until)
+        now = resp.get("now_ms")
+        now_ms = int(now) if isinstance(now, (int, float)) and not isinstance(now, bool) else 0
+        return ProviderSnapshot(now_ms=now_ms, exhausted_until=exhausted)
+
+    def report_provider_exhausted(
+        self, provider: str, *, reset_at_ms: int, reason: str | None = None
+    ) -> None:
+        # Report a 429/quota-exhausted FREE provider so EVERY box circuit-breaks it (429 不复撞).
+        # The control plane validates: a paid name is rejected 403 (a paid API is never
+        # auto-invoked), so the worker only ever reports the FREE provider it routed. `reason` is a
+        # short telemetry tag.
+        body: dict[str, Any] = {"provider": provider, "resetAt": reset_at_ms}
+        if reason is not None:
+            body["reason"] = reason
+        self._call("POST", "/internal/providers/exhausted", body)

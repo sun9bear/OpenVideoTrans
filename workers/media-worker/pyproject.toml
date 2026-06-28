@@ -1,15 +1,18 @@
 [project]
 name = "media-worker"
 version = "0.0.1"
-description = "Media worker (T2.2 stub: claim -> copy source to artifact -> complete) for OpenVideoTrans (Tier 1)"
+description = "Media worker (claim -> run autodub-core pipeline with free-pool routing -> complete) for OpenVideoTrans (Tier 1)"
 requires-python = ">=3.11"
-# Zero third-party deps: the worker talks to the control plane and R2 over the Python stdlib only
-# (urllib for HTTP, hmac/hashlib for SigV4), so the deployed box has no extra supply-chain surface.
-# `ovt-schemas` parses the claimed Job (shared contract, no drift); `autodub-core` is reused only for
-# its proven path-isolation guards (safe_component / ensure_within) — the stub does NOT run the
-# kernel pipeline (that is M2-CLOSE). The worker is an orchestrator-side consumer, so importing the
-# kernel is an inbound edge and does not breach the kernel's own no-gateway/no-provider boundary.
-dependencies = ["ovt-schemas", "autodub-core"]
+# The worker talks to the control plane and R2 over the Python stdlib (urllib for HTTP, hmac/hashlib
+# for SigV4). `ovt-schemas` parses the claimed Job (shared contract, no drift); `autodub-core` runs
+# the real pipeline (M2-CLOSE) + provides the path-isolation guards (safe_component / ensure_within);
+# `provider-adapters` supplies the FREE-POOL router (route_free) + the real ASR/MT/TTS adapters, which
+# lazy-import `requests` for the cloud providers (Groq/Cloudflare/DeepL) — so the worker, the
+# deployment that actually RUNS them, declares `requests` even though provider-adapters keeps it
+# optional. The worker is an orchestrator-side consumer: it may import BOTH the kernel AND the
+# adapters, but neither imports the other (the seam stays structural) and neither imports the
+# gateway/billing/control-plane (kernel hard boundary preserved).
+dependencies = ["ovt-schemas", "autodub-core", "provider-adapters", "requests>=2.31"]
 
 [build-system]
 requires = ["hatchling"]
@@ -21,3 +24,4 @@ packages = ["src/media_worker"]
 [tool.uv.sources]
 ovt-schemas = { workspace = true }
 autodub-core = { workspace = true }
+provider-adapters = { workspace = true }

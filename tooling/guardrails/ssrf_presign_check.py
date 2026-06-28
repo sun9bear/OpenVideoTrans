@@ -78,7 +78,7 @@ def admit_before_produce(process_job: str) -> bool:
     delete+fail handler. Pass the process_job body (call sites), not the whole file, so a moved/
     removed call is caught — the `= admit_source` default lives outside this body."""
     a = process_job.find("admit(in_path")
-    p = process_job.find("_produce_artifacts(")
+    p = process_job.find("= produce(")  # the artifact-production seam call (M2-CLOSE)
     handled = "SourceRejected" in process_job and "_delete_source_quietly(" in process_job
     return a != -1 and p != -1 and a < p and handled
 

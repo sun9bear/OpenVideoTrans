@@ -33,7 +33,7 @@ _OUTPUT_MODES = ("subtitle_only", "dub_only", "both")
 # T1.3g) + Cloudflare MeloTTS. edge_tts is kept in the non-commercial *experimental* lane and is
 # NOT a default dub output (plan "目标语言按 output_mode 分层" / AD-6), so a locale whose only
 # voice is edge_tts fails closed for dub with ``no_tts_model_for_language`` (@CodeX bot).
-_COMMERCIAL_SAFE_TTS = frozenset({"piper", "cloudflare"})
+COMMERCIAL_SAFE_TTS = frozenset({"piper", "cloudflare"})
 
 
 class LanguageError(RuntimeError):
@@ -161,7 +161,7 @@ def assert_language_pair(
     if output_mode in _DUB_MODES:
         # A default dub output needs a COMMERCIAL-SAFE voice (piper/CF); an edge_tts-only
         # locale (experimental lane) fails closed here even though a voice technically exists.
-        commercial_safe = [m for m in cap.tts_models if m in _COMMERCIAL_SAFE_TTS]
+        commercial_safe = [m for m in cap.tts_models if m in COMMERCIAL_SAFE_TTS]
         if not (cap.tts_supported and commercial_safe):
             raise LanguageError(
                 "no_tts_model_for_language",

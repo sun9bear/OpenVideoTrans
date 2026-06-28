@@ -94,9 +94,9 @@ def test_egress_ruleset_invariants() -> None:
 
 def test_admit_before_produce() -> None:
     reject = "\nSourceRejected\n_delete_source_quietly("
-    good = "admit(in_path, job, config)\nartifacts = _produce_artifacts(...)" + reject
-    moved = "artifacts = _produce_artifacts(...)\nadmit(in_path, job, config)" + reject
-    neutered = "import admit_source\nadmit: Admitter = admit_source\n_produce_artifacts(...)"
+    good = "admit(in_path, job, config)\nartifacts = produce(...)" + reject
+    moved = "artifacts = produce(...)\nadmit(in_path, job, config)" + reject
+    neutered = "import admit_source\nadmit: Admitter = admit_source\nartifacts = produce(...)"
     assert g.admit_before_produce(good)
     assert not g.admit_before_produce(moved)  # call after produce
     assert not g.admit_before_produce(neutered)  # only the import/default, no real call

@@ -174,3 +174,54 @@ def test_http_control_plane_other_http_error_is_control_plane_error() -> None:
     cp = HttpControlPlane("https://cp.example", "t", opener=_BoomOpener())
     with pytest.raises(ControlPlaneError):
         cp.complete("job_q", 3, artifacts={"video_key": "artifacts/job_q/3/output.mp4"})
+
+
+# ── FREE-POOL client (M2-CLOSE PR-A) ─────────────────────────────────────────
+
+
+def test_get_provider_availability_parses_snapshot_and_authorizes() -> None:
+    payload = {"now_ms": 1_700_000_000_000, "exhausted_until": {"groq": 1_700_000_600_000}}
+    opener = _JsonOpener(payload)
+    cp = HttpControlPlane("https://cp.example", "tok", opener=opener)
+    snap = cp.get_provider_availability()
+    assert snap.now_ms == 1_700_000_000_000
+    assert snap.exhausted_until == {"groq": 1_700_000_600_000}
+    req = opener.requests[0]
+    assert req.get_method() == "GET"
+    assert req.full_url.endswith("/internal/providers/availability")
+    assert req.get_header("Authorization") == "Bearer tok"
+
+
+def test_get_provider_availability_defaults_when_fields_missing() -> None:
+    # A malformed/missing field hydrates safe defaults (no exhaustion) so routing never crashes
+    # on a partial control-plane response.
+    cp = HttpControlPlane("https://cp.example", "t", opener=_JsonOpener({"now_ms": 5}))
+    snap = cp.get_provider_availability()
+    assert snap.now_ms == 5
+    assert snap.exhausted_until == {}
+
+
+def test_report_provider_exhausted_posts_camel_case_body() -> None:
+    opener = _JsonOpener({"ok": True})
+    cp = HttpControlPlane("https://cp.example", "tok", opener=opener)
+    cp.report_provider_exhausted("cloudflare", reset_at_ms=1_700_000_600_000, reason="429")
+    req = opener.requests[0]
+    assert req.get_method() == "POST"
+    assert req.full_url.endswith("/internal/providers/exhausted")
+    assert isinstance(req.data, bytes)
+    assert json.loads(req.data) == {
+        "provider": "cloudflare",
+        "resetAt": 1_700_000_600_000,
+        "reason": "429",
+    }
+
+
+def test_report_provider_exhausted_omits_reason_when_none() -> None:
+    opener = _JsonOpener({"ok": True})
+    cp = HttpControlPlane("https://cp.example", "t", opener=opener)
+    cp.report_provider_exhausted("deepl", reset_at_ms=1_700_000_600_000)
+    data = opener.requests[0].data
+    assert isinstance(data, bytes)
+    body = json.loads(data)
+    assert body == {"provider": "deepl", "resetAt": 1_700_000_600_000}
+    assert "reason" not in body

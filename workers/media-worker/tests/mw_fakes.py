@@ -8,10 +8,18 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Mapping
+from pathlib import Path
 
 from media_worker.config import WorkerConfig
-from media_worker.control_plane import Claim, ControlPlaneError, ProgressTelemetry, StaleClaimError
+from media_worker.control_plane import (
+    Claim,
+    ControlPlaneError,
+    ProgressTelemetry,
+    ProviderSnapshot,
+    StaleClaimError,
+)
 from media_worker.storage import SourceTooLargeError
+from media_worker.worker import artifact_key
 from ovt_schemas import AigcMarking, Job, JobArtifacts, JobPlan
 
 # Production-shaped knobs (30s heartbeat / 180s lease), mirroring the control-plane defaults.
@@ -74,6 +82,9 @@ class FakeControlPlane:
         complete_error: bool = False,
         config_error: bool = False,
         fail_error: bool = False,
+        availability: ProviderSnapshot | None = None,
+        availability_error_on_call: int | None = None,
+        report_error: bool = False,
     ) -> None:
         self._config = config
         self._claims = list(claims or [])
@@ -81,8 +92,16 @@ class FakeControlPlane:
         self._complete_error = complete_error
         self._config_error = config_error
         self._fail_error = fail_error
+        self._availability = availability or ProviderSnapshot(now_ms=0, exhausted_until={})
+        # Raise on the Nth get_provider_availability call (1-based) to simulate a transient refresh
+        # blip — e.g. call 1 = initial routing OK, call 2 = post-429 refresh fails (M2-CLOSE PR-A).
+        self._availability_error_on_call = availability_error_on_call
+        self._availability_calls = 0
+        self._report_error = report_error
         self._lock = threading.Lock()
         self.heartbeats: list[tuple[str, int, str | None]] = []
+        # FREE-POOL (M2-CLOSE): every report_provider_exhausted call, recorded for assertions.
+        self.exhausted_reports: list[tuple[str, int, str | None]] = []
         # OBS (#24): the telemetry passed alongside each heartbeat, recorded in parallel so the
         # existing 3-tuple `heartbeats` unpacks stay intact.
         self.telemetry: list[ProgressTelemetry | None] = []
@@ -131,6 +150,22 @@ class FakeControlPlane:
         with self._lock:
             self.failed.append((job_id, claim_version, error_code, error_detail))
 
+    def get_provider_availability(self) -> ProviderSnapshot:
+        with self._lock:
+            self._availability_calls += 1
+            n = self._availability_calls
+        if self._availability_error_on_call is not None and n == self._availability_error_on_call:
+            raise ControlPlaneError("transient availability refresh blip")
+        return self._availability
+
+    def report_provider_exhausted(
+        self, provider: str, *, reset_at_ms: int, reason: str | None = None
+    ) -> None:
+        if self._report_error:
+            raise ControlPlaneError(f"transient error reporting {provider} exhausted")
+        with self._lock:
+            self.exhausted_reports.append((provider, reset_at_ms, reason))
+
     @property
     def heartbeat_count(self) -> int:
         with self._lock:
@@ -174,3 +209,34 @@ class FakeStorage:
 # separately in test_admission.py + the disguised-playlist integration test in test_worker.py.
 def ALLOW_ADMIT(path: object, job: object, config: object) -> None:  # noqa: N802, ARG001
     return None
+
+
+# A copy-loop artifact producer for the orchestration tests: writes the SOURCE bytes to each
+# output_mode artifact (what the T2.2 stub did), so the heartbeat / cleanup / completion / timeout
+# tests need no ffmpeg or real providers. The REAL producer (run_real_pipeline) is exercised in
+# test_pipeline.py + `just dev`.
+_COPY_ARTIFACTS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "subtitle_only": (("srt_key", "output.srt", "application/x-subrip"),),
+    "dub_only": (("video_key", "output.mp4", "video/mp4"),),
+    "both": (
+        ("video_key", "output.mp4", "video/mp4"),
+        ("srt_key", "output.srt", "application/x-subrip"),
+    ),
+}
+
+
+def COPY_PRODUCE(  # noqa: N802
+    _cp: object,
+    storage: FakeStorage,
+    claim: Claim,
+    _workdir: Path | str,
+    in_path: Path,
+    **_kw: object,
+) -> dict[str, str]:
+    data = in_path.read_bytes()
+    artifacts: dict[str, str] = {}
+    for field, name, content_type in _COPY_ARTIFACTS[claim.job.output_mode]:
+        key = artifact_key(claim.job.job_id, claim.claim_version, name)
+        storage.upload(key, data, content_type=content_type)
+        artifacts[field] = key
+    return artifacts

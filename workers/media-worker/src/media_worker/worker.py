@@ -17,10 +17,12 @@ from pathlib import Path
 
 from autodub_core.isolation import ensure_within, safe_component
 from ovt_schemas import Job
+from provider_adapters import LanguageError
 
 from .admission import SourceRejected, admit_source
 from .config import DEFAULT_CONFIG, WorkerConfig
 from .control_plane import Claim, ControlPlane, ProgressTelemetry, StaleClaimError
+from .pipeline import FreePoolExhausted, run_real_pipeline
 from .storage import SourceTooLargeError, Storage
 
 logger = logging.getLogger("media_worker")
@@ -29,18 +31,6 @@ logger = logging.getLogger("media_worker")
 # SourceRejected on a format/size/duration violation. Injected so the stub copy-loop tests can pass
 # a pass-through; the default is the real ffprobe re-admission.
 Admitter = Callable[[Path, Job, WorkerConfig], None]
-
-# Per output_mode: the artifact(s) to produce, each (Job.artifacts field, output filename,
-# content-type). The stub copies the source bytes into each; `both` emits a video AND an SRT so
-# the download API exposes both. The control plane's complete() requires the claim_version prefix.
-_ARTIFACTS_BY_MODE: dict[str, tuple[tuple[str, str, str], ...]] = {
-    "subtitle_only": (("srt_key", "output.srt", "application/x-subrip"),),
-    "dub_only": (("video_key", "output.mp4", "video/mp4"),),
-    "both": (
-        ("video_key", "output.mp4", "video/mp4"),
-        ("srt_key", "output.srt", "application/x-subrip"),
-    ),
-}
 
 
 def source_key_for(job: Job) -> str:
@@ -125,12 +115,27 @@ class Heartbeat:
         self._clock = clock
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # OBS (#24): the pipeline routing layer pushes the current routed provider + outcome here;
+        # the timer thread folds them into each heartbeat. Guarded (main thread sets, hb reads).
+        self._tele_lock = threading.Lock()
+        self._tele_provider: str | None = None
+        self._tele_free_pool_result: str | None = None
 
     def start(self) -> None:
         self._thread = threading.Thread(
             target=self._run, name=f"heartbeat-{self._job_id}", daemon=True
         )
         self._thread.start()
+
+    def set_telemetry(
+        self, *, provider: str | None = None, free_pool_result: str | None = None
+    ) -> None:
+        """Update the OBS telemetry the heartbeat reports (called by the pipeline routing layer)."""
+        with self._tele_lock:
+            if provider is not None:
+                self._tele_provider = provider
+            if free_pool_result is not None:
+                self._tele_free_pool_result = free_pool_result
 
     def _run(self) -> None:
         # wait() returns True only when stop() is set, so the loop ticks once per interval and exits
@@ -148,14 +153,18 @@ class Heartbeat:
                     self._on_lost()
                 return
             try:
-                # OBS (#24): report stage timing. The stub selects no provider and never touches the
-                # free pool, so provider / chunk_* / free_pool_result stay None until M2-CLOSE.
+                # OBS (#24): report stage timing + (once the pipeline has routed) the current free
+                # provider and routing outcome. build_progress_body omits any field still None.
                 elapsed_ms = max(0, int((tnow - started) * 1000))
+                with self._tele_lock:
+                    provider, fpr = self._tele_provider, self._tele_free_pool_result
                 self._cp.heartbeat(
                     self._job_id,
                     self._claim_version,
                     stage=self._stage,
-                    telemetry=ProgressTelemetry(stage_elapsed_ms=elapsed_ms),
+                    telemetry=ProgressTelemetry(
+                        stage_elapsed_ms=elapsed_ms, provider=provider, free_pool_result=fpr
+                    ),
                 )
             except StaleClaimError:
                 # Lease reclaimed -> this worker is stale; stop renewing. Exactly-once is enforced
@@ -177,6 +186,27 @@ class Heartbeat:
             thread.join(timeout=5.0)
 
 
+# The artifact-production port (M2-CLOSE): (cp, storage, claim, workdir, in_path) -> {field: key}.
+# Default = the real autodub-core pipeline with free-pool routing; injected so the orchestration
+# tests can drive the claim loop with a fake producer (no ffmpeg / no real providers).
+ArtifactProducer = Callable[..., dict[str, str]]
+
+
+def _default_produce(
+    cp: ControlPlane,
+    storage: Storage,
+    claim: Claim,
+    workdir: Path,
+    in_path: Path,
+    *,
+    on_telemetry: Callable[..., None] | None = None,
+) -> dict[str, str]:
+    return run_real_pipeline(
+        cp, storage, claim.job, claim.claim_version,
+        in_path=in_path, workdir=workdir, make_key=artifact_key, on_telemetry=on_telemetry,
+    )
+
+
 def process_job(
     cp: ControlPlane,
     storage: Storage,
@@ -186,8 +216,9 @@ def process_job(
     config: WorkerConfig,
     clock: Callable[[], float] = time.monotonic,
     admit: Admitter = admit_source,
+    produce: ArtifactProducer = _default_produce,
 ) -> None:
-    """Run one claimed job through the stub: fetch -> re-admit -> copy -> complete (or fail)."""
+    """Run one claimed job: fetch -> re-admit -> run the pipeline -> complete (or fail)."""
     job = claim.job
     claim_version = claim.claim_version
     job_id = job.job_id
@@ -227,10 +258,24 @@ def process_job(
             logger.warning("job %s failed (stub)", job_id)
             return
         try:
-            artifacts = _produce_artifacts(storage, job, claim_version, workdir, in_path)
+            artifacts = produce(
+                cp, storage, claim, workdir, in_path, on_telemetry=heartbeat.set_telemetry
+            )
+        except LanguageError as le:
+            # Fail-closed language gate (T1.3f): a coded, user-facing rejection (unsupported pair /
+            # no commercial-safe TTS voice). Record the schema error_code, not internal_error.
+            _report_fail(cp, job_id, claim_version, le.code)
+            logger.info("job %s rejected by the language gate (%s)", job_id, le.code)
+            return
+        except FreePoolExhausted:
+            # Every free provider for a needed stage is exhausted/unconfigured: a coded terminal,
+            # NEVER a paid escalation (red line §1/§14).
+            _report_fail(cp, job_id, claim_version, "free_pool_exhausted")
+            logger.warning("job %s failed: free pool exhausted", job_id)
+            return
         except Exception:
             _report_fail(cp, job_id, claim_version, "internal_error")
-            logger.warning("job %s failed (stub)", job_id)
+            logger.warning("job %s failed (pipeline)", job_id)
             return
         # Hard-timeout gate, checked PRECISELY here (not only on the coarse heartbeat tick): a job
         # that finished after the cap — even within a heartbeat interval — must not be marked done.
@@ -298,22 +343,6 @@ def _report_fail(cp: ControlPlane, job_id: str, claim_version: int, error_code: 
         return False
 
 
-def _produce_artifacts(
-    storage: Storage, job: Job, claim_version: int, workdir: Path, in_path: Path
-) -> dict[str, str]:
-    """STUB: copy the (already re-admitted) source straight to each output artifact for the mode."""
-    artifacts: dict[str, str] = {}
-    for field, name, content_type in _ARTIFACTS_BY_MODE.get(
-        job.output_mode, _ARTIFACTS_BY_MODE["dub_only"]
-    ):
-        out_path = workdir / name
-        shutil.copyfile(in_path, out_path)  # no transcode/translate/tts — that is M2-CLOSE
-        key = artifact_key(job.job_id, claim_version, name)
-        storage.upload(key, out_path.read_bytes(), content_type=content_type)
-        artifacts[field] = key
-    return artifacts
-
-
 def run_once(
     cp: ControlPlane,
     storage: Storage,
@@ -321,12 +350,15 @@ def run_once(
     workdir_base: Path | str,
     config: WorkerConfig,
     admit: Admitter = admit_source,
+    produce: ArtifactProducer = _default_produce,
 ) -> str | None:
     """Claim one job and process it. Returns the job_id, or None if nothing was claimable."""
     claim = cp.claim()
     if claim is None:
         return None
-    process_job(cp, storage, claim, workdir_base=workdir_base, config=config, admit=admit)
+    process_job(
+        cp, storage, claim, workdir_base=workdir_base, config=config, admit=admit, produce=produce
+    )
     return claim.job.job_id
 
 
@@ -339,6 +371,7 @@ def run_forever(
     poll_idle_sec: float = 2.0,
     stop_event: threading.Event | None = None,
     admit: Admitter = admit_source,
+    produce: ArtifactProducer = _default_produce,
 ) -> None:
     """Long-poll the claim loop until stopped. Clears orphan dirs at startup (crash recovery)."""
     base = Path(workdir_base)
@@ -361,7 +394,9 @@ def run_forever(
             if claim is not None:
                 if config is None:
                     cfg = _fetch_config(cp, cfg)
-                process_job(cp, storage, claim, workdir_base=base, config=cfg, admit=admit)
+                process_job(
+                    cp, storage, claim, workdir_base=base, config=cfg, admit=admit, produce=produce
+                )
         except Exception:
             # A single iteration's unexpected error (e.g. a control-plane blip) must not kill the
             # long-running worker. Log generically — no exception text (secret hygiene).

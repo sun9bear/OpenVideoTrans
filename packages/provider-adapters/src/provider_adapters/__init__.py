@@ -17,6 +17,7 @@ from .base import (
     PaidProviderBlocked,
     ProviderInfo,
     ProviderUnavailable,
+    QuotaExhausted,
     Resolver,
     build_registry,
     has_binary,
@@ -38,6 +39,7 @@ from .circuit import (
 from .ladder import AUTO_LADDER, PAID_PROVIDERS, is_paid_provider
 from .languages import (
     CAPABILITIES,
+    COMMERCIAL_SAFE_TTS,
     LanguageError,
     assert_language_pair,
     deepl_target_code,
@@ -55,6 +57,7 @@ from .supply_chain import (
     verify_piper_model,
     verify_sha256,
 )
+from .tts import piper_model_covers, piper_model_language
 
 # Registering all adapters populates the kind→name→factory registry that select()
 # walks; REGISTRY is then flattened from it (name→ProviderInfo).
@@ -67,6 +70,7 @@ REGISTRY: dict[str, ProviderInfo] = build_registry()
 __all__ = [
     "AUTO_LADDER",
     "CAPABILITIES",
+    "COMMERCIAL_SAFE_TTS",
     "FREE_LADDER_PROVIDERS",
     "FREE_POOL_EXHAUSTED",
     "NO_FREE_PROVIDER",
@@ -79,6 +83,7 @@ __all__ = [
     "ProviderInfo",
     "ProviderResult",
     "ProviderUnavailable",
+    "QuotaExhausted",
     "Resolver",
     "SupplyChainError",
     "assert_default_image_allowed",
@@ -93,6 +98,8 @@ __all__ = [
     "route_free",
     "license_for",
     "list_providers",
+    "piper_model_covers",
+    "piper_model_language",
     "probe",
     "resolve_source_language",
     "select",
