@@ -550,6 +550,35 @@ def test_routing_drops_piper_when_installed_model_language_mismatches(
     assert pl._available_free_providers("tts", "de") == frozenset()
 
 
+def test_available_free_providers_drops_deepl_for_unsupported_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # @CodeX bot R6 P2: DeepL fails CLOSED (LanguageError) for targets it doesn't offer (hi/ar/eo).
+    # Unlike other MT providers' input rejections (ProviderUnavailable, which the loop reroutes), a
+    # LanguageError is the fail-closed terminal, so DeepL must be dropped at ROUTING time for an
+    # unsupported target -> route_free then picks the next free MT (e.g. ollama).
+    import media_worker.pipeline as pl
+
+    class _Info:
+        def __init__(self, name: str, paid: bool) -> None:
+            self.name = name
+            self.paid = paid
+
+    def fake_probe(kind: str) -> list[tuple[str, bool, _Info]]:
+        return {
+            "mt": [
+                ("deepl", True, _Info("deepl", False)),
+                ("ollama", True, _Info("ollama", False)),
+            ],
+        }.get(kind, [])
+
+    monkeypatch.setattr(pl, "probe", fake_probe)
+    # zh-Hans: DeepL offers it (-> ZH) -> both MT providers stay routable.
+    assert pl._available_free_providers("mt", "zh-Hans") == frozenset({"deepl", "ollama"})
+    # hi: DeepL has no target code (fails closed) -> dropped; the broad LLM (ollama) remains.
+    assert pl._available_free_providers("mt", "hi") == frozenset({"ollama"})
+
+
 def test_tts_reroute_clears_tts_scratch(tmp_path: Path) -> None:
     # P3 (review): on a mid-stream TTS 429 the per-segment raws are cleared before re-synth, so the
     # new provider re-voices the WHOLE deliverable (no mixed timbre across segments).

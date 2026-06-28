@@ -36,12 +36,14 @@ from autodub_core import run_pipeline as _run_pipeline
 from ovt_schemas import Job
 from provider_adapters import (
     COMMERCIAL_SAFE_TTS,
+    LanguageError,
     ProviderAvailability,
     ProviderResult,
     ProviderUnavailable,
     QuotaExhausted,
     Resolver,
     assert_language_pair,
+    deepl_target_code,
     get_capability,
     piper_model_covers,
     probe,
@@ -134,6 +136,17 @@ def _locale_commercial_safe_tts(target_lang: str) -> frozenset[str]:
     return frozenset(m for m in cap.tts_models if m in COMMERCIAL_SAFE_TTS)
 
 
+def _deepl_supports(target_lang: str) -> bool:
+    """Whether DeepL offers ``target_lang``. DeepL fails CLOSED (LanguageError from
+    deepl_target_code) for targets it doesn't offer (hi/ar/eo), so this lets routing drop it
+    before route_free picks it (@CodeX bot R6 P2)."""
+    try:
+        deepl_target_code(target_lang)
+        return True
+    except LanguageError:
+        return False
+
+
 def _available_free_providers(kind: str, target_lang: str) -> frozenset[str]:
     """Free provider names whose adapter is currently available (key/binary present) for ``kind``.
     Reads provider-adapters' registry probe — which checks os.environ AFTER inject_provider_env — so
@@ -153,6 +166,13 @@ def _available_free_providers(kind: str, target_lang: str) -> frozenset[str]:
         # closed) instead of synthesizing the WRONG language (@CodeX bot M2-CLOSE).
         if "piper" in free and not piper_model_covers(target_lang):
             free -= {"piper"}
+    elif kind == "mt":
+        # DeepL fails CLOSED (LanguageError) for targets it doesn't offer (hi/ar/eo). Unlike the
+        # other MT providers' input rejections (ProviderUnavailable, which the run loop reroutes),
+        # a LanguageError is the product-level fail-closed terminal, so drop DeepL at routing time
+        # when it can't serve the target — route_free then picks the next free MT (@CodeX R6 P2).
+        if "deepl" in free and not _deepl_supports(target_lang):
+            free -= {"deepl"}
     return free
 
 
