@@ -105,4 +105,23 @@ describe("getActor posture (via an actor-authed route)", () => {
     const { deps } = makeClock(1000);
     expect((await call(env, deps, "POST", "/api/uploads/sign", { actor: "anon_raw", body: SIGN_BODY })).status).toBe(200);
   });
+
+  it("rotation overlap: an id signed with the PREVIOUS key still verifies (zero-downtime, CodeX R5)", async () => {
+    const PREV = "old-hmac-key";
+    const { env } = makeEnv({ r2Creds: true, anonHmacKey: KEY, anonHmacKeyPrevious: PREV });
+    const { deps } = makeClock(1000);
+    // an id minted under the OLD key (before the rotation) still validates against the previous key ...
+    const oldSigned = await signAnonId(PREV, "anon_old");
+    expect((await call(env, deps, "POST", "/api/uploads/sign", { actor: oldSigned, body: SIGN_BODY })).status).toBe(200);
+    // ... and a current-key id validates too.
+    const newSigned = await signAnonId(KEY, "anon_new");
+    expect((await call(env, deps, "POST", "/api/uploads/sign", { actor: newSigned, body: SIGN_BODY })).status).toBe(200);
+  });
+
+  it("rotation complete: with no previous key configured, an old-key id no longer verifies (401)", async () => {
+    const { env } = makeEnv({ r2Creds: true, anonHmacKey: KEY }); // previous dropped
+    const { deps } = makeClock(1000);
+    const oldSigned = await signAnonId("old-hmac-key", "anon_old");
+    expect((await call(env, deps, "POST", "/api/uploads/sign", { actor: oldSigned, body: SIGN_BODY })).status).toBe(401);
+  });
 });

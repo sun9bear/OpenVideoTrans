@@ -45,6 +45,11 @@ export interface Env {
   // 401); the per-actor cap + job ownership then key on the unforgeable BASE id. When UNSET the actor
   // identity is unverified — accepted raw ONLY in non-prod (see OVT_ENV); in prod that is fail-closed.
   ANON_ID_HMAC_KEY?: string;
+  // M2-CLOSE PR-B (#26): the PREVIOUS anon HMAC key, for a zero-downtime key rotation overlap (mirrors
+  // INTERNAL_TOKEN/INTERNAL_TOKEN_NEXT, SECRETS). New ids are minted with ANON_ID_HMAC_KEY (current);
+  // getActor verifies against current OR this previous key, so ids signed with the old key keep
+  // validating until the rotation completes (then drop this). A wrangler secret, present only mid-rotation.
+  ANON_ID_HMAC_KEY_PREVIOUS?: string;
   // M2-CLOSE PR-B (#26): the deployment environment, operator deploy config (same trust class as
   // R2_S3_ENDPOINT — NOT client-controlled, NOT a secret). The anon-identity surface accepts a raw
   // (unverified) X-OVT-Anon-Id ONLY when ANON_ID_HMAC_KEY is absent AND OVT_ENV === 'dev' (the explicit

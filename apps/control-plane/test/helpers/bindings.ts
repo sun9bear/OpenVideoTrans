@@ -75,6 +75,9 @@ export interface TestEnvOptions {
   // exercise the signed (key set) / dev-raw (OVT_ENV='dev') / prod-fail-closed (='prod') / forgotten-var
   // fail-closed (='none' ⇒ OVT_ENV omitted) postures. Defaults to 'dev' so existing actor tests pass.
   anonHmacKey?: string;
+  // The PREVIOUS anon HMAC key, to exercise the zero-downtime rotation overlap (getActor accepts an id
+  // signed with current OR previous).
+  anonHmacKeyPrevious?: string;
   ovtEnv?: "dev" | "prod" | "none";
   jobQueue?: FakeQueue;
   // Free-provider secrets served by /internal/credentials (SECRETS). Keys are the exact Env names so
@@ -106,6 +109,9 @@ export function makeEnv(opts: TestEnvOptions = {}): {
     ...(opts.providerSecrets ?? {}),
     ...(opts.turnstileSecret !== undefined ? { TURNSTILE_SECRET_KEY: opts.turnstileSecret } : {}),
     ...(opts.anonHmacKey !== undefined ? { ANON_ID_HMAC_KEY: opts.anonHmacKey } : {}),
+    ...(opts.anonHmacKeyPrevious !== undefined
+      ? { ANON_ID_HMAC_KEY_PREVIOUS: opts.anonHmacKeyPrevious }
+      : {}),
     // Default to the explicit dev posture so existing actor-route tests accept a raw id; ovtEnv:"prod"
     // exercises prod fail-closed, ovtEnv:"none" OMITS the var (the forgotten-deploy-var fail-closed case).
     ...(opts.ovtEnv === "none" ? {} : { OVT_ENV: opts.ovtEnv ?? "dev" }),

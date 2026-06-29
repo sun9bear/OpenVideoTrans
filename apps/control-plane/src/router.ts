@@ -95,7 +95,13 @@ async function getActor(request: Request, env: Env): Promise<string> {
   if (!id) throw new HttpError(401, "unauthenticated", "missing actor identity");
   const key = env.ANON_ID_HMAC_KEY;
   if (key) {
-    const base = await verifyAnonId(key, id);
+    // Verify against the CURRENT key, and (during a rotation overlap) the PREVIOUS key too, so ids signed
+    // with the old key keep validating until rotation completes. Both verifications run unconditionally
+    // (no short-circuit) so which key matched does not leak via timing; the base is preferred from current.
+    const prev = env.ANON_ID_HMAC_KEY_PREVIOUS;
+    const fromCurrent = await verifyAnonId(key, id);
+    const fromPrevious = prev ? await verifyAnonId(prev, id) : null;
+    const base = fromCurrent ?? fromPrevious;
     if (!base) throw new HttpError(401, "unauthenticated", "invalid actor identity");
     return base;
   }
