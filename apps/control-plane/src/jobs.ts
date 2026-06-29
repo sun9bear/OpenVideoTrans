@@ -166,11 +166,14 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   // no burned upload, no orphaned source. The GLOBAL pool is the absolute cost ceiling (red line §1).
   await reserveDualPool(ctx.env.DB, ctx.config, now, actor, ticket.ipKey, minutesMs);
 
-  // From here the reserve has counted this job; ANY failure before the row is committed must give the
-  // count back (verifyUpload rejecting an oversized/mismatched object, or the INSERT throwing).
+  const jobId = ctx.deps.newId("job");
+  // ONLY the pre-commit steps can leave the reserve orphaned: verifyUpload rejecting the object, or the
+  // INSERT throwing. Those compensate (give the count back). Once the INSERT COMMITS (counted_job=1) the
+  // count is CORRECT — the only thing that gives a committed job's count back is a worker_lost refund —
+  // so a later wake/read failure must NOT decrement it. wake + the response read therefore live OUTSIDE
+  // this compensated region (fail-closed: a post-commit blip fails the response, but the count stands).
   try {
     const verified = await verifyUpload(ctx, actor, uploadSessionId);
-    const jobId = ctx.deps.newId("job");
     const plan = defaultPlan(outputMode);
     const aigc = defaultAigcMarking(outputMode);
     const deadlineAt = now + ctx.config.deadlineMaxWaitMs;
@@ -207,21 +210,18 @@ export async function createJob(ctx: Ctx): Promise<Response> {
         minutesMs,
       )
       .run();
-
-    // Emit the queue_adapter wake AFTER the authoritative D1 INSERT (T2.5). This is best-effort: the
-    // producer swallows a Queues blip (cf_queues backend) and is a no-op for the d1 backend, so a lost
-    // wake never fails job creation — D1 holds the queued row and the worker's long-poll claim +
-    // sweeper reconcile are the backstop. The job is fully created regardless of the wake's fate.
-    await ctx.producer.wake(jobId);
-
-    const created = await getJobRow(ctx, jobId);
-    return json({ job: publicJob(rowToJob(created!)) }, 201);
   } catch (e) {
-    // verifyUpload rejected the object, or the INSERT failed, AFTER the reserve counted this job —
-    // give the global/actor/ip counts back so a rejected create leaks no quota.
     await compensateReserve(ctx.env.DB, ctx.config, now, actor, ticket.ipKey, minutesMs);
     throw e;
   }
+
+  // Job committed + counted. Emit the queue_adapter wake AFTER the authoritative D1 INSERT (T2.5):
+  // best-effort (the producer swallows a Queues blip / no-ops for d1), and the worker's long-poll claim
+  // + sweeper reconcile are the backstop. The trailing read just shapes the 201 body; a failure here
+  // fails the response WITHOUT touching the counters (the committed count is correct, never compensated).
+  await ctx.producer.wake(jobId);
+  const created = await getJobRow(ctx, jobId);
+  return json({ job: publicJob(rowToJob(created!)) }, 201);
 }
 
 // GET /jobs/:id — owner-scoped read (404 on missing OR not-owned, so existence is not leaked).

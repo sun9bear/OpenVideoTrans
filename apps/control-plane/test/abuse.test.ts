@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { clientIpKey } from "../src/abuse";
 import { DEFAULT_RESERVE_MINUTES_MS } from "../src/config";
+import { handle } from "../src/router";
 import { call, makeClock, makeEnv } from "./helpers/bindings";
 import type { RawDb } from "./helpers/d1";
 
@@ -199,5 +200,33 @@ describe("dual-pool cap — POST /api/jobs", () => {
     expect(row.status).toBe("pending");
     // and the global pool was NOT left holding a phantom count for the rejected create
     expect(counter(raw, "global", "")!.jobs).toBe(1);
+  });
+
+  it("a post-commit wake failure fails the response but does NOT decrement the committed count (FC-1)", async () => {
+    const { env, r2, raw } = makeEnv({ r2Creds: true });
+    const { deps } = makeClock(1_700_000_000_000);
+    const s = await signFor(env, deps, "u1");
+    r2.putSized(s.source_key, 2048);
+    // a producer whose wake throws AFTER the INSERT has already committed the counted job.
+    const throwingProducer = {
+      backend: "d1" as const,
+      wake: async () => {
+        throw new Error("wake boom");
+      },
+    };
+    const req = new Request("https://cp.test/api/jobs", {
+      method: "POST",
+      headers: { "X-OVT-Anon-Id": "u1", "content-type": "application/json" },
+      body: JSON.stringify({ upload_session_id: s.upload_session_id, ...SUB }),
+    });
+    const res = await handle(req, env, deps, undefined, throwingProducer);
+    expect(res.status).toBe(500); // the post-commit wake threw -> the response fails
+    // BUT the job committed (counted_job=1) and its reservation must STAND (not be given back) — the
+    // count is correct; only a worker_lost refund ever decrements it. (Pre-fix this double-decremented.)
+    const job = raw
+      .prepare("SELECT status, counted_job, refunded FROM jobs WHERE anon_or_user_id='u1'")
+      .get();
+    expect(job).toMatchObject({ status: "queued", counted_job: 1, refunded: 0 });
+    expect(counter(raw, "global", "")).toEqual({ jobs: 1, minutes_ms: DEFAULT_RESERVE_MINUTES_MS });
   });
 });
