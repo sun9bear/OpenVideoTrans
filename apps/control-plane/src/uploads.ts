@@ -119,14 +119,21 @@ export async function verifyUpload(
 
   const obj = await mediaHead(ctx.env, row.source_key);
   if (!obj) {
-    // Expire the session so a missing-object create cannot be REPLAYED to re-charge the daily cap
-    // (createJob counts a source_verify_failed as a user fault; without making the session single-use,
-    // the same pending upload_session_id could be re-POSTed to inflate daily_counters without ever
-    // creating a job — CodeX R3). There is no object to delete (it never landed); just expire the row,
-    // matching the oversized / type-mismatch paths below.
-    await ctx.env.DB.prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ?`)
+    // Expire the session (single-use) so a missing-object create cannot be REPLAYED to re-charge the
+    // daily cap (createJob counts a source_verify_failed as a user fault — CodeX R3). The expire is
+    // GUARDED on status='pending' (the same atomic single-consumer pattern as the consume below,
+    // T2.0-proven on D1): of N concurrent creates for the one pending session, exactly ONE wins
+    // (changes=1) and throws the counted source_verify_failed; the losers see changes=0 and throw 409
+    // (which createJob compensates), so a missing object is charged ONCE, never multiplied by a
+    // concurrent re-POST race (CodeX R4). There is no object to delete (it never landed).
+    const expired = await ctx.env.DB.prepare(
+      `UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ? AND status = 'pending'`,
+    )
       .bind(uploadSessionId)
       .run();
+    if (expired.meta.changes === 0) {
+      throw new HttpError(409, "upload_already_consumed", "upload session already used");
+    }
     throw new HttpError(422, "source_verify_failed", "uploaded object not found");
   }
   if (obj.size > ctx.config.maxUploadBytes) {
