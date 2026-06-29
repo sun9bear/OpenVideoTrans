@@ -167,11 +167,19 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   // no burned upload, no orphaned source. The GLOBAL pool is the absolute cost ceiling (red line §1).
   await reserveDualPool(ctx.env.DB, ctx.config, now, actor, ticket.ipKey, minutesMs);
 
-  // verifyUpload runs OUTSIDE the compensated region: a USER-fault rejection (oversized / wrong type /
-  // missing object) is a failed create that COUNTS against the cap (anti create-fail farming, abuse.ts)
-  // — it is NOT refunded. Only an OUR-fault persistence failure (the INSERT below) gives the count back.
-  // (CodeX R1: compensating user-fault upload failures let an attacker farm bad creates cap-free.)
-  const verified = await verifyUpload(ctx, actor, uploadSessionId);
+  // A USER-fault BAD UPLOAD (oversized object / unverifiable source — upload_too_large / source_verify_
+  // failed) is a failed create that COUNTS against the cap: anti create-fail farming (abuse.ts), NOT
+  // refunded. EVERY OTHER verifyUpload failure — a session race/expiry (409/410/404), or an OUR-fault
+  // infra error (R2 HEAD 5xx, D1 error inside the verify path) — is not a create-fail to farm, so it
+  // REFUNDS the reserve (no phantom count). (CodeX R1 added count-on-failure; R2 carved infra back out.)
+  const verified = await verifyUpload(ctx, actor, uploadSessionId).catch(async (e: unknown) => {
+    const userFault =
+      e instanceof HttpError && (e.code === "upload_too_large" || e.code === "source_verify_failed");
+    if (!userFault) {
+      await compensateReserve(ctx.env.DB, ctx.config, now, actor, ticket.ipKey, minutesMs);
+    }
+    throw e;
+  });
 
   const jobId = ctx.deps.newId("job");
   // Once the INSERT COMMITS (counted_job=1) the count is CORRECT — the only thing that gives a committed

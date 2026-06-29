@@ -7,12 +7,16 @@ import { makeD1, type RawDb } from "./d1";
 // PUT of a given size without allocating the bytes).
 export class FakeR2 {
   private readonly store = new Map<string, { size: number; contentType: string | undefined }>();
+  // M2-CLOSE PR-B (#26): when true, head() THROWS — simulating an R2 HEAD 5xx / binding failure (an
+  // OUR-fault infra error inside verifyUpload, which must compensate the reserve, not count it).
+  headThrows = false;
   // Simulate a browser PUT of a given size + content-type. Pass null to simulate a PUT that omitted
   // Content-Type (so head() returns no httpMetadata.contentType).
   putSized(key: string, size: number, contentType: string | null = "video/mp4"): void {
     this.store.set(key, { size, contentType: contentType ?? undefined });
   }
   async head(key: string): Promise<R2Object | null> {
+    if (this.headThrows) throw new Error("R2 HEAD failed (5xx)");
     const obj = this.store.get(key);
     if (obj === undefined) return null;
     return { key, size: obj.size, httpMetadata: { contentType: obj.contentType } } as unknown as R2Object;

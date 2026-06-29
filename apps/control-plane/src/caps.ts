@@ -185,29 +185,38 @@ const SELECT_REFUNDABLE =
   "SELECT job_id, anon_or_user_id, created_at, reserved_minutes_ms FROM jobs " +
   "WHERE error_code = 'worker_lost' AND counted_job = 1 AND refunded = 0 ORDER BY finished_at ASC LIMIT ?";
 
-// Flag-flip FIRST (idempotency + safe ordering): a crash between the flip and the decrement keeps the
-// count (stricter cap = safe). Decrement-first would risk a double-decrement on re-select (under-count =
-// over-admit = the cardinal sin). changes = 1 iff this call wins the (one-shot) refund.
+// The flip of the job's refunded flag (the one-shot guard).
 const REFUND_FLIP = "UPDATE jobs SET refunded = 1 WHERE job_id = ? AND refunded = 0 AND counted_job = 1";
 
-// Refund ONE worker_lost job: flip refunded 0->1 (guarded), then on success decrement GLOBAL + ACTOR for
-// the job's create-day by (1 job, its snapshotted reserved minutes). per-IP is intentionally NOT refunded
-// (the job row stores no IP; per-IP is best-effort fairness and self-heals at window rollover). Returns
-// true iff this call performed the refund.
+// Decrement guarded by the job STILL being refundable (refunded = 0). Combined with the flip in ONE
+// transactional batch (below), this makes refund ATOMIC + idempotent + crash-safe: the decrements run
+// only while the job reads refunded=0 (the flip is a later statement in the same transaction, so the
+// decrement's EXISTS sees the pre-flip state on the first pass), then the flip sets refunded=1. A re-run
+// finds refunded=1 → EXISTS is false → decrements skip and the flip changes 0 rows (idempotent). A crash
+// mid-batch rolls the whole transaction back → refunded stays 0 → the standing query re-selects and
+// retries cleanly (CodeX R2: a non-atomic flip-then-decrement permanently lost a refund on a crash).
+const REFUND_DECREMENT =
+  "UPDATE daily_counters SET jobs = MAX(0, jobs - 1), minutes_ms = MAX(0, minutes_ms - ?), " +
+  "updated_at = ? WHERE scope_type = ? AND scope_key = ? AND day = ? " +
+  "AND EXISTS (SELECT 1 FROM jobs WHERE job_id = ? AND refunded = 0 AND counted_job = 1)";
+
+// Refund ONE worker_lost job ATOMICALLY: decrement GLOBAL + ACTOR for the job's create-day by (1 job, its
+// snapshotted reserved minutes) AND flip refunded 0->1, all in one transactional batch. per-IP is
+// intentionally NOT refunded (the job row stores no IP; per-IP is best-effort fairness and self-heals at
+// window rollover). Returns true iff this call performed the refund (the flip changed the row).
 export async function refundJob(
   db: D1Database,
   now: number,
   job: { jobId: string; anonId: string; createdAt: number; reservedMinutesMs: number | null },
 ): Promise<boolean> {
-  const flip = await db.prepare(REFUND_FLIP).bind(job.jobId).run();
-  if (flip.meta.changes !== 1) return false; // already refunded, or never counted
   const day = dayBucket(job.createdAt);
   const minutesMs = job.reservedMinutesMs ?? 0;
-  await db.batch([
-    db.prepare(DECREMENT).bind(minutesMs, now, "global", GLOBAL_KEY, day),
-    db.prepare(DECREMENT).bind(minutesMs, now, "actor", job.anonId, day),
-  ]);
-  return true;
+  const results = (await db.batch([
+    db.prepare(REFUND_DECREMENT).bind(minutesMs, now, "global", GLOBAL_KEY, day, job.jobId),
+    db.prepare(REFUND_DECREMENT).bind(minutesMs, now, "actor", job.anonId, day, job.jobId),
+    db.prepare(REFUND_FLIP).bind(job.jobId),
+  ])) as { meta: { changes: number } }[];
+  return results[2]!.meta.changes === 1; // the flip won the one-shot refund
 }
 
 // Sweeper duty: refund every worker_lost job that still owes one (bounded per tick). Per-row isolation so

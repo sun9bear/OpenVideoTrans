@@ -248,4 +248,20 @@ describe("dual-pool cap — POST /api/jobs", () => {
     expect(counter(raw, "global", "")!.jobs).toBe(1);
     expect(counter(raw, "actor", "u1")!.jobs).toBe(1);
   });
+
+  it("an INFRA failure in verifyUpload (R2 HEAD 5xx) COMPENSATES the reserve — no phantom count (CodeX R2)", async () => {
+    const { env, r2, raw } = makeEnv({ r2Creds: true });
+    const { deps } = makeClock(1_700_000_000_000);
+    const s = await signFor(env, deps, "u1");
+    r2.putSized(s.source_key, 2048);
+    r2.headThrows = true; // an OUR-fault R2 5xx inside verifyUpload (a non-HttpError), before any job row
+    const r = await call(env, deps, "POST", "/api/jobs", {
+      actor: "u1",
+      body: { upload_session_id: s.upload_session_id, ...SUB },
+    });
+    expect(r.status).toBe(500); // infra error surfaces as internal_error
+    // the reserve was COMPENSATED — an our-fault failure must NOT leak a cap slot (no false exhaustion).
+    expect(counter(raw, "global", "")).toEqual({ jobs: 0, minutes_ms: 0 });
+    expect(counter(raw, "actor", "u1")).toEqual({ jobs: 0, minutes_ms: 0 });
+  });
 });
