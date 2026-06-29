@@ -224,23 +224,24 @@ describe("refundLostJobs (standing query, exactly-once-eventually)", () => {
       .run(DAY, jobs, minutes, T);
   }
 
-  it("refunds only worker_lost + counted + un-refunded jobs", async () => {
+  it("refunds the OUR-fault terminal set (worker_lost/internal_error/processing_timeout/...) but NOT user-fault", async () => {
     const { env, raw } = makeEnv();
     seedGlobal(raw, 10, 50000);
-    // refundable:
-    insertJob(raw, { job_id: "lost1", enqueue_at: T, created_at: T, status: "failed", error_code: "worker_lost", counted_job: 1, reserved_minutes_ms: 5000, finished_at: T, anon: "a" });
-    insertJob(raw, { job_id: "lost2", enqueue_at: T, created_at: T, status: "failed", error_code: "worker_lost", counted_job: 1, reserved_minutes_ms: 5000, finished_at: T + 1, anon: "b" });
-    // NOT refundable: a done job, an already-refunded worker_lost, a user-fault fail, an uncounted lost.
+    // refundable — OUR-fault terminals (CodeX R3: not just worker_lost):
+    insertJob(raw, { job_id: "lost", enqueue_at: T, created_at: T, status: "failed", error_code: "worker_lost", counted_job: 1, reserved_minutes_ms: 5000, finished_at: T, anon: "a" });
+    insertJob(raw, { job_id: "internal", enqueue_at: T, created_at: T, status: "failed", error_code: "internal_error", counted_job: 1, reserved_minutes_ms: 5000, finished_at: T + 1, anon: "b" });
+    insertJob(raw, { job_id: "timeout", enqueue_at: T, created_at: T, status: "failed", error_code: "processing_timeout", counted_job: 1, reserved_minutes_ms: 5000, finished_at: T + 2, anon: "c" });
+    // NOT refundable: done, already-refunded, a USER-fault fail (over_duration counts), an uncounted job.
     insertJob(raw, { job_id: "done1", enqueue_at: T, created_at: T, status: "done", counted_job: 1, reserved_minutes_ms: 5000, anon: "a" });
     insertJob(raw, { job_id: "already", enqueue_at: T, created_at: T, status: "failed", error_code: "worker_lost", counted_job: 1, refunded: 1, reserved_minutes_ms: 5000, anon: "a" });
     insertJob(raw, { job_id: "userfault", enqueue_at: T, created_at: T, status: "failed", error_code: "over_duration", counted_job: 1, reserved_minutes_ms: 5000, anon: "a" });
     insertJob(raw, { job_id: "uncounted", enqueue_at: T, created_at: T, status: "failed", error_code: "worker_lost", counted_job: 0, reserved_minutes_ms: null, anon: "a" });
 
     const n = await refundLostJobs(env.DB, T, 200);
-    expect(n).toBe(2);
-    expect(counter(raw, "global", "", DAY)).toEqual({ jobs: 8, minutes_ms: 40000 });
-    // every refundable row is now flagged refunded
-    expect(raw.prepare("SELECT refunded FROM jobs WHERE job_id='lost1'").get()).toEqual({ refunded: 1 });
+    expect(n).toBe(3); // worker_lost + internal_error + processing_timeout
+    expect(counter(raw, "global", "", DAY)).toEqual({ jobs: 7, minutes_ms: 35000 });
+    expect(raw.prepare("SELECT refunded FROM jobs WHERE job_id='internal'").get()).toEqual({ refunded: 1 });
+    expect(raw.prepare("SELECT refunded FROM jobs WHERE job_id='userfault'").get()).toEqual({ refunded: 0 }); // user-fault counts
   });
 
   it("re-selects a row stranded by an earlier crash (no permanent leak)", async () => {

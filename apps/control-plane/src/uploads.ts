@@ -119,6 +119,14 @@ export async function verifyUpload(
 
   const obj = await mediaHead(ctx.env, row.source_key);
   if (!obj) {
+    // Expire the session so a missing-object create cannot be REPLAYED to re-charge the daily cap
+    // (createJob counts a source_verify_failed as a user fault; without making the session single-use,
+    // the same pending upload_session_id could be re-POSTed to inflate daily_counters without ever
+    // creating a job — CodeX R3). There is no object to delete (it never landed); just expire the row,
+    // matching the oversized / type-mismatch paths below.
+    await ctx.env.DB.prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ?`)
+      .bind(uploadSessionId)
+      .run();
     throw new HttpError(422, "source_verify_failed", "uploaded object not found");
   }
   if (obj.size > ctx.config.maxUploadBytes) {

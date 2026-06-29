@@ -161,6 +161,13 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   // refund decrements EXACTLY what was reserved.
   const now = ctx.deps.now();
   const minutesMs = reservedMinutesForMode(ctx.config, outputMode);
+  // Reserve uses the CREATE-time per-mode cap. The worker's ffprobe over_duration gate enforces the cap
+  // it reads at claim; if an operator RAISES maxVideoDurationMs while this job is queued, the worker
+  // (which today reads /internal/config LIVE, not ?version=job.settings_version) could admit a longer job
+  // than was reserved, under-counting the minute pool by the delta (CodeX R3 P1). This is bounded by an
+  // operator's deliberate cap raise and is fully resolved by the documented worker-settings_version
+  // pinning deferral (归 M2-CLOSE/DEPLOY): the worker admitting against the job's reserved cap /
+  // settings_version makes enforcement match the reserve exactly. Lowering the cap is the safe direction.
 
   // M2-CLOSE PR-B (#26): the dual-pool reserve. BEFORE verifyUpload (which consumes the one-shot upload
   // session), so a cap-reject (429 daily_cap_reached) leaves the session re-usable for a later retry —

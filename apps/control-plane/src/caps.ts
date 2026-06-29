@@ -178,12 +178,28 @@ interface RefundRow {
   reserved_minutes_ms: number | null;
 }
 
-// Standing query: the jobs whose worker_lost terminal still owes a refund. Driving the refund off THIS
+// Terminal error codes that are OUR fault (infra / worker / pipeline) and therefore REFUND the reserve.
+// The USER-fault terminals (bad input: over_duration, unsupported_format, upload_too_large,
+// unsupported_language_pair, no_tts_model_for_language) are deliberately ABSENT — they COUNT against the
+// cap (anti create-fail farming), consistent with createJob's verifyUpload split (our-fault returns
+// quota, user-fault keeps it). (CodeX R3: a successfully-created job that later fails internal_error /
+// processing_timeout / free_pool_exhausted / source_fetch_failed is our fault and must refund, else it
+// holds its reservation for the rest of the day and false-trips daily_cap_reached.)
+export const REFUNDABLE_ERROR_CODES = [
+  "worker_lost",
+  "internal_error",
+  "processing_timeout",
+  "free_pool_exhausted",
+  "source_fetch_failed",
+] as const;
+
+// Standing query: the jobs whose OUR-fault terminal still owes a refund. Driving the refund off THIS
 // (not the single-tick worker_lost RETURNING set) makes it exactly-once-eventually: a row stranded by a
 // crash / batch-limit truncation between the transition and its decrement is simply re-selected next tick.
 const SELECT_REFUNDABLE =
   "SELECT job_id, anon_or_user_id, created_at, reserved_minutes_ms FROM jobs " +
-  "WHERE error_code = 'worker_lost' AND counted_job = 1 AND refunded = 0 ORDER BY finished_at ASC LIMIT ?";
+  `WHERE error_code IN (${REFUNDABLE_ERROR_CODES.map(() => "?").join(", ")}) ` +
+  "AND counted_job = 1 AND refunded = 0 ORDER BY finished_at ASC LIMIT ?";
 
 // The flip of the job's refunded flag (the one-shot guard).
 const REFUND_FLIP = "UPDATE jobs SET refunded = 1 WHERE job_id = ? AND refunded = 0 AND counted_job = 1";
@@ -219,15 +235,18 @@ export async function refundJob(
   return results[2]!.meta.changes === 1; // the flip won the one-shot refund
 }
 
-// Sweeper duty: refund every worker_lost job that still owes one (bounded per tick). Per-row isolation so
-// one job's D1 failure neither aborts the rest nor strands the others (the standing query re-selects an
-// unfinished row next tick). Returns the count refunded this pass.
+// Sweeper duty: refund every OUR-fault terminal job (REFUNDABLE_ERROR_CODES) that still owes one (bounded
+// per tick). Per-row isolation so one job's D1 failure neither aborts the rest nor strands the others (the
+// standing query re-selects an unfinished row next tick). Returns the count refunded this pass.
 export async function refundLostJobs(
   db: D1Database,
   now: number,
   limit: number,
 ): Promise<number> {
-  const rows = await db.prepare(SELECT_REFUNDABLE).bind(limit).all<RefundRow>();
+  const rows = await db
+    .prepare(SELECT_REFUNDABLE)
+    .bind(...REFUNDABLE_ERROR_CODES, limit)
+    .all<RefundRow>();
   let refunded = 0;
   let firstError: unknown;
   for (const r of rows.results) {

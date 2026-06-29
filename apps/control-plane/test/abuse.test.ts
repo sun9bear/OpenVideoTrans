@@ -264,4 +264,27 @@ describe("dual-pool cap — POST /api/jobs", () => {
     expect(counter(raw, "global", "")).toEqual({ jobs: 0, minutes_ms: 0 });
     expect(counter(raw, "actor", "u1")).toEqual({ jobs: 0, minutes_ms: 0 });
   });
+
+  it("a missing-object create expires the session so it can't be REPLAYED to re-charge (CodeX R3)", async () => {
+    const { env, raw } = makeEnv({ r2Creds: true });
+    const { deps } = makeClock(1_700_000_000_000);
+    const s = await signFor(env, deps, "u1"); // NOTE: no r2.putSized -> the object is missing
+    const r1 = await call(env, deps, "POST", "/api/jobs", {
+      actor: "u1",
+      body: { upload_session_id: s.upload_session_id, ...SUB },
+    });
+    expect(r1.status).toBe(422); // source_verify_failed (user fault) — counts ONCE
+    // the session is now single-use (expired), so the same id can't be re-POSTed to re-charge the cap.
+    expect(
+      raw.prepare("SELECT status FROM upload_sessions WHERE upload_session_id=?").get(s.upload_session_id),
+    ).toEqual({ status: "expired" });
+    expect(counter(raw, "global", "")!.jobs).toBe(1);
+    // a replay of the now-expired session does NOT re-charge: reserve then 409 -> compensated.
+    const r2res = await call(env, deps, "POST", "/api/jobs", {
+      actor: "u1",
+      body: { upload_session_id: s.upload_session_id, ...SUB },
+    });
+    expect(r2res.status).toBe(409);
+    expect(counter(raw, "global", "")!.jobs).toBe(1); // unchanged — no double charge
+  });
 });
