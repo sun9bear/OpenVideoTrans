@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONFIG } from "../src/config";
+import { CAP_WINDOW_MS, DEFAULT_CONFIG } from "../src/config";
 import {
   FREE_POOL_LOW_RATIO,
   buildLogLine,
@@ -321,6 +321,54 @@ describe("OBS alerts — triggerable + the precondition for M2-CLOSE cap/lease v
     insertJob(raw, { job_id: "ok", enqueue_at: NOW, status: "running", lease_expires_at: NOW + 60_000 });
     const m = await computeMetrics(env, NOW, DEFAULT_CONFIG);
     expect(evaluateAlerts(m)).toEqual([]);
+  });
+
+  // M2-CLOSE PR-B (#26): the cost/cap-proximity alert reads TODAY's authoritative global pool.
+  function seedGlobalPool(raw: RawDb, jobs: number, minutes: number): void {
+    raw
+      .prepare(
+        "INSERT INTO daily_counters (scope_type, scope_key, day, jobs, minutes_ms, updated_at) VALUES ('global','',?,?,?,?)",
+      )
+      .run(Math.floor(NOW / CAP_WINDOW_MS), jobs, minutes, NOW);
+  }
+
+  it("global_cap_approaching warns at >=80% of the global job cap (today's pool only)", async () => {
+    const { env, raw } = makeEnv({ adminToken: ADMIN });
+    seedGlobalPool(raw, 8, 0); // 8/10 = 0.8
+    const cfg = { ...DEFAULT_CONFIG, dailyGlobalJobCap: 10, dailyGlobalMinutesMsCap: 100_000 };
+    const m = await computeMetrics(env, NOW, cfg);
+    expect(m.global_pool).toEqual({ jobs: 8, job_cap: 10, minutes_ms: 0, minutes_ms_cap: 100_000 });
+    const a = evaluateAlerts(m).find((x) => x.name === "global_cap_approaching");
+    expect(a).toBeDefined();
+    expect(a!.severity).toBe("warn");
+  });
+
+  it("global_cap_approaching escalates to crit once a cap is reached", async () => {
+    const { env, raw } = makeEnv({ adminToken: ADMIN });
+    seedGlobalPool(raw, 5, 0);
+    const m = await computeMetrics(env, NOW, { ...DEFAULT_CONFIG, dailyGlobalJobCap: 5 });
+    const a = evaluateAlerts(m).find((x) => x.name === "global_cap_approaching");
+    expect(a!.severity).toBe("crit");
+  });
+
+  it("global_cap_approaching does NOT fire below the ratio", async () => {
+    const { env, raw } = makeEnv({ adminToken: ADMIN });
+    seedGlobalPool(raw, 10, 0); // 10/100 = 0.1
+    const m = await computeMetrics(env, NOW, { ...DEFAULT_CONFIG, dailyGlobalJobCap: 100 });
+    expect(evaluateAlerts(m).map((x) => x.name)).not.toContain("global_cap_approaching");
+  });
+
+  it("the cap-proximity alert ignores stale historical-day buckets (reads only today)", async () => {
+    const { env, raw } = makeEnv({ adminToken: ADMIN });
+    // a yesterday row at the cap must NOT trip today's alert.
+    raw
+      .prepare(
+        "INSERT INTO daily_counters (scope_type, scope_key, day, jobs, minutes_ms, updated_at) VALUES ('global','',?,?,0,?)",
+      )
+      .run(Math.floor(NOW / CAP_WINDOW_MS) - 1, 100, NOW);
+    const m = await computeMetrics(env, NOW, { ...DEFAULT_CONFIG, dailyGlobalJobCap: 100 });
+    expect(m.global_pool.jobs).toBe(0); // today's bucket is empty
+    expect(evaluateAlerts(m).map((x) => x.name)).not.toContain("global_cap_approaching");
   });
 });
 

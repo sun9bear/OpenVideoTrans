@@ -2,6 +2,7 @@ import type { ErrorCode, Job } from "../../../packages/schemas/generated/ts/cont
 import type { Ctx } from "./core";
 import { HttpError, asObject, json, optInt, optString, readJson, reqEnum, reqInt, reqString } from "./core";
 import { admitJob } from "./abuse";
+import { compensateReserve, reserveDualPool, reservedMinutesMs } from "./caps";
 import { claimOne } from "./claim";
 import { isKnownStage, logEvent, parseProgressMeta } from "./obs";
 import { presignR2Url } from "./sigv4";
@@ -150,57 +151,77 @@ export async function createJob(ctx: Ctx): Promise<Response> {
     throw new HttpError(400, "unsupported_subtitle_delivery", "burned subtitles are not available yet");
   }
 
-  // Abuse gate (T2.4) BEFORE verifyUpload: a failed bot challenge must not consume the upload
-  // session. The dual-pool reserve keyed by the returned ticket is filled by M2-CLOSE.
-  await admitJob(ctx, body);
+  // Abuse gate (T2.4) BEFORE the reserve: a failed bot challenge must not even touch the counters.
+  const ticket = await admitJob(ctx, body);
 
-  const verified = await verifyUpload(ctx, actor, uploadSessionId);
+  // Pin ONE `now`: it drives the dual-pool reserve's day bucket AND the job's created_at, so the
+  // worker_lost refund (which re-derives the bucket from created_at) always targets the bucket the
+  // reserve incremented (no two-now()-straddling-midnight drift). minutesMs is snapshotted onto the
+  // row so the refund decrements EXACTLY what was reserved regardless of a later default change.
   const now = ctx.deps.now();
-  const jobId = ctx.deps.newId("job");
-  const plan = defaultPlan(outputMode);
-  const aigc = defaultAigcMarking(outputMode);
-  const deadlineAt = now + ctx.config.deadlineMaxWaitMs;
-  const expiresAt = now + ctx.config.jobTtlMs;
+  const minutesMs = reservedMinutesMs(advisoryDurationMs);
 
-  await ctx.env.DB.prepare(
-    `INSERT INTO jobs (
-       job_id, anon_or_user_id, tier, status, source_type, upload_session_id,
-       declared_bytes, verified_bytes, source_lang_hint, target_lang,
-       output_mode, subtitle_delivery, subtitle_lang, plan, settings_version, aigc_marking,
-       priority, advisory_duration_ms, enqueue_at, deadline_at, created_at, expires_at,
-       artifacts, attempt, claim_version, counted_job, counted_minutes, refunded
-     ) VALUES (?, ?, 'tier1', 'queued', 'upload', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, '{}', 0, 0, 0, 0, 0)`,
-  )
-    .bind(
-      jobId,
-      actor,
-      uploadSessionId,
-      verified.declaredBytes,
-      verified.verifiedBytes,
-      sourceLangHint ?? null,
-      targetLang,
-      outputMode,
-      subtitleDelivery,
-      subtitleLang,
-      JSON.stringify(plan),
-      ctx.config.settingsVersion,
-      JSON.stringify(aigc),
-      advisoryDurationMs ?? null,
-      now,
-      deadlineAt,
-      now,
-      expiresAt,
+  // M2-CLOSE PR-B (#26): the dual-pool reserve. BEFORE verifyUpload (which consumes the one-shot upload
+  // session), so a cap-reject (429 daily_cap_reached) leaves the session re-usable for a later retry —
+  // no burned upload, no orphaned source. The GLOBAL pool is the absolute cost ceiling (red line §1).
+  await reserveDualPool(ctx.env.DB, ctx.config, now, actor, ticket.ipKey, minutesMs);
+
+  // From here the reserve has counted this job; ANY failure before the row is committed must give the
+  // count back (verifyUpload rejecting an oversized/mismatched object, or the INSERT throwing).
+  try {
+    const verified = await verifyUpload(ctx, actor, uploadSessionId);
+    const jobId = ctx.deps.newId("job");
+    const plan = defaultPlan(outputMode);
+    const aigc = defaultAigcMarking(outputMode);
+    const deadlineAt = now + ctx.config.deadlineMaxWaitMs;
+    const expiresAt = now + ctx.config.jobTtlMs;
+
+    await ctx.env.DB.prepare(
+      `INSERT INTO jobs (
+         job_id, anon_or_user_id, tier, status, source_type, upload_session_id,
+         declared_bytes, verified_bytes, source_lang_hint, target_lang,
+         output_mode, subtitle_delivery, subtitle_lang, plan, settings_version, aigc_marking,
+         priority, advisory_duration_ms, enqueue_at, deadline_at, created_at, expires_at,
+         artifacts, attempt, claim_version, counted_job, counted_minutes, refunded, reserved_minutes_ms
+       ) VALUES (?, ?, 'tier1', 'queued', 'upload', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, '{}', 0, 0, 1, 1, 0, ?)`,
     )
-    .run();
+      .bind(
+        jobId,
+        actor,
+        uploadSessionId,
+        verified.declaredBytes,
+        verified.verifiedBytes,
+        sourceLangHint ?? null,
+        targetLang,
+        outputMode,
+        subtitleDelivery,
+        subtitleLang,
+        JSON.stringify(plan),
+        ctx.config.settingsVersion,
+        JSON.stringify(aigc),
+        advisoryDurationMs ?? null,
+        now,
+        deadlineAt,
+        now,
+        expiresAt,
+        minutesMs,
+      )
+      .run();
 
-  // Emit the queue_adapter wake AFTER the authoritative D1 INSERT (T2.5). This is best-effort: the
-  // producer swallows a Queues blip (cf_queues backend) and is a no-op for the d1 backend, so a lost
-  // wake never fails job creation — D1 holds the queued row and the worker's long-poll claim +
-  // sweeper reconcile are the backstop. The job is fully created regardless of the wake's fate.
-  await ctx.producer.wake(jobId);
+    // Emit the queue_adapter wake AFTER the authoritative D1 INSERT (T2.5). This is best-effort: the
+    // producer swallows a Queues blip (cf_queues backend) and is a no-op for the d1 backend, so a lost
+    // wake never fails job creation — D1 holds the queued row and the worker's long-poll claim +
+    // sweeper reconcile are the backstop. The job is fully created regardless of the wake's fate.
+    await ctx.producer.wake(jobId);
 
-  const created = await getJobRow(ctx, jobId);
-  return json({ job: publicJob(rowToJob(created!)) }, 201);
+    const created = await getJobRow(ctx, jobId);
+    return json({ job: publicJob(rowToJob(created!)) }, 201);
+  } catch (e) {
+    // verifyUpload rejected the object, or the INSERT failed, AFTER the reserve counted this job —
+    // give the global/actor/ip counts back so a rejected create leaks no quota.
+    await compensateReserve(ctx.env.DB, ctx.config, now, actor, ticket.ipKey, minutesMs);
+    throw e;
+  }
 }
 
 // GET /jobs/:id — owner-scoped read (404 on missing OR not-owned, so existence is not leaked).

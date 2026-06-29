@@ -85,6 +85,14 @@ export const MUTABLE_SETTINGS: Record<string, SettingValidator> = {
   downloadPresignTtlSec: intBound("downloadPresignTtlSec", 60, 24 * 60 * 60),
   maxVideoDurationMs: durationMapBound(),
   queueBackend: enumBound("queueBackend", ["d1", "cf_queues"]),
+  // M2-CLOSE PR-B (#26): the dual-pool daily caps. MUTABLE (operator-tunable) — a cap is an
+  // operational knob, NOT a paid-API/AIGC red-line gate, so it is correctly absent from RED_LINE_KEYS
+  // (the CI invariant RED_LINE ∩ MUTABLE = ∅ still holds). Minutes caps are integer ms.
+  dailyGlobalJobCap: intBound("dailyGlobalJobCap", 1, 10_000_000),
+  dailyGlobalMinutesMsCap: intBound("dailyGlobalMinutesMsCap", 60_000, 10_000_000_000),
+  dailyActorJobCap: intBound("dailyActorJobCap", 1, 1_000_000),
+  dailyActorMinutesMsCap: intBound("dailyActorMinutesMsCap", 60_000, 10_000_000_000),
+  dailyIpJobCap: intBound("dailyIpJobCap", 1, 1_000_000),
 };
 
 // Keys that encode a RED LINE and must never become a runtime config knob. allow_paid/paid_providers

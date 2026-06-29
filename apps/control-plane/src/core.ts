@@ -39,6 +39,18 @@ export interface Env {
   // D1-claim backend, in which case the producer falls back to D1-claim (jobs table is the
   // authoritative worklist, so a missing queue never strands a job). Wired in wrangler.jsonc.
   JOB_QUEUE?: Queue<WakeMessage>;
+  // M2-CLOSE PR-B (#26): the HMAC key that signs/verifies anon ids server-side (getActor). A wrangler
+  // secret injected at deploy — names only here, never in the repo, never logged. When SET, getActor
+  // requires every X-OVT-Anon-Id to be a server-minted `base.sig` (forged/unsigned ids fail closed
+  // 401); the per-actor cap + job ownership then key on the unforgeable BASE id. When UNSET the actor
+  // identity is unverified — accepted raw ONLY in non-prod (see OVT_ENV); in prod that is fail-closed.
+  ANON_ID_HMAC_KEY?: string;
+  // M2-CLOSE PR-B (#26): the deployment environment, operator deploy config (same trust class as
+  // R2_S3_ENDPOINT — NOT client-controlled, NOT a secret). 'prod' makes the anon-identity surface
+  // fail CLOSED when ANON_ID_HMAC_KEY is absent (503, mirroring requireR2/requireWorker/requireAdmin),
+  // so a deploy that forgets the key cannot silently run with forgeable identities. Absent / 'dev'
+  // keeps the raw-accept dev posture (tests / DEVLOOP / pre-deploy) unchanged.
+  OVT_ENV?: "dev" | "prod";
   // DEVLOOP (#25): a NON-secret S3 endpoint override for the local dev loop, e.g. "http://127.0.0.1:9000".
   // When set (ONLY by `just dev`, NEVER in prod wrangler.jsonc), the presigned upload/download URLs
   // (sigv4.ts) AND the verifyUpload HEAD/delete (media.ts) target this base — a local S3 stub — instead

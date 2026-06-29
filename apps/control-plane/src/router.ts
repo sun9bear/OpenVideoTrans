@@ -1,6 +1,7 @@
 import type { Ctx, Deps, Env, QueueProducer, TurnstileVerifier } from "./core";
 import { HttpError, apiError, json, realDeps } from "./core";
 import { realTurnstileVerifier } from "./abuse";
+import { mintAnon, verifyAnonId } from "./anon";
 import { credentials } from "./credentials";
 import { logEvent, metricsEndpoint } from "./obs";
 import { providerAvailability, reportProviderExhausted } from "./providers";
@@ -38,6 +39,10 @@ function route(method: string, path: string, auth: Auth, handler: Handler): Rout
 }
 
 const ROUTES: Route[] = [
+  // M2-CLOSE PR-B (#26): mint a server-signed anon id (no auth — anyone may request an identity; the
+  // GLOBAL dual-pool cap is the cost ceiling that bounds mint-then-create abuse). Returns {anon_id} +
+  // a first-party cookie. Verification of the minted id happens in getActor on every other /api call.
+  route("POST", "/api/anon", "none", mintAnon),
   // Public API surface (documented contract, plan §endpoints): /api prefix, artifact as a path segment.
   route("POST", "/api/uploads/sign", "actor", signUpload),
   route("POST", "/api/jobs", "actor", createJob),
@@ -76,11 +81,25 @@ function safeEqual(a: string, b: string): boolean {
   return r === 0;
 }
 
-function getActor(request: Request): string {
+// M2-CLOSE PR-B (#26): resolve the request's actor (ownership + per-actor cap key) from X-OVT-Anon-Id.
+//   • ANON_ID_HMAC_KEY set (the prod posture): the id MUST be a valid server-minted `base.sig`; an
+//     unsigned/forged id fails closed (401). The returned actor is the BASE id, stable across a key
+//     rollout (so pre-key jobs are not orphaned and the per-actor cap key doesn't shift).
+//   • key unset + OVT_ENV='prod': a misconfigured prod (the key was never injected) — fail CLOSED (503),
+//     mirroring requireR2/requireWorker/requireAdmin, so identities are never silently forgeable.
+//   • key unset + non-prod (dev / DEVLOOP / tests / pre-deploy): accept the raw id (the prior behavior).
+async function getActor(request: Request, env: Env): Promise<string> {
   const id = request.headers.get("X-OVT-Anon-Id");
-  // Signed anon-cookie issuance is the T2.6 UI / abuse-gate concern; here the actor id is the unit
-  // of ownership for presign + job access. Absent -> 401 (fail closed).
   if (!id) throw new HttpError(401, "unauthenticated", "missing actor identity");
+  const key = env.ANON_ID_HMAC_KEY;
+  if (key) {
+    const base = await verifyAnonId(key, id);
+    if (!base) throw new HttpError(401, "unauthenticated", "invalid actor identity");
+    return base;
+  }
+  if (env.OVT_ENV === "prod") {
+    throw new HttpError(503, "anon_unconfigured", "anon identity is not configured");
+  }
   return id;
 }
 
@@ -137,7 +156,7 @@ export async function handle(
       let actor: string | undefined;
       if (r.auth === "worker") requireWorker(request, env);
       else if (r.auth === "admin") requireAdmin(request, env);
-      else if (r.auth === "actor") actor = getActor(request);
+      else if (r.auth === "actor") actor = await getActor(request, env);
       const config = await getConfig(env);
       // The queue_adapter producer is selected from config + bindings (cf_queues vs d1), injectable
       // for tests. Both depend on `config`, so select it here rather than at module load.
