@@ -85,9 +85,11 @@ function safeEqual(a: string, b: string): boolean {
 //   • ANON_ID_HMAC_KEY set (the prod posture): the id MUST be a valid server-minted `base.sig`; an
 //     unsigned/forged id fails closed (401). The returned actor is the BASE id, stable across a key
 //     rollout (so pre-key jobs are not orphaned and the per-actor cap key doesn't shift).
-//   • key unset + OVT_ENV='prod': a misconfigured prod (the key was never injected) — fail CLOSED (503),
-//     mirroring requireR2/requireWorker/requireAdmin, so identities are never silently forgeable.
-//   • key unset + non-prod (dev / DEVLOOP / tests / pre-deploy): accept the raw id (the prior behavior).
+//   • key unset + OVT_ENV='dev' (the EXPLICIT dev opt-in — tests / DEVLOOP / pre-deploy): accept the
+//     raw id (unverified).
+//   • key unset + anything ELSE (prod, OR an unset/forgotten OVT_ENV): FAIL CLOSED (503), mirroring
+//     requireR2/requireWorker/requireAdmin. Fail-closed is the DEFAULT — a deploy that forgets the
+//     ANON_ID_HMAC_KEY secret (and the OVT_ENV var) can never silently accept forgeable identities.
 async function getActor(request: Request, env: Env): Promise<string> {
   const id = request.headers.get("X-OVT-Anon-Id");
   if (!id) throw new HttpError(401, "unauthenticated", "missing actor identity");
@@ -97,10 +99,8 @@ async function getActor(request: Request, env: Env): Promise<string> {
     if (!base) throw new HttpError(401, "unauthenticated", "invalid actor identity");
     return base;
   }
-  if (env.OVT_ENV === "prod") {
-    throw new HttpError(503, "anon_unconfigured", "anon identity is not configured");
-  }
-  return id;
+  if (env.OVT_ENV === "dev") return id; // explicit dev opt-in only
+  throw new HttpError(503, "anon_unconfigured", "anon identity is not configured");
 }
 
 // Admin (operator) auth for the CFG-GUARD settings-mutation routes. A SEPARATE ADMIN_TOKEN from the

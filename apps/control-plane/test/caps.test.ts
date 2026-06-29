@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RuntimeConfig } from "../src/config";
-import { CAP_WINDOW_MS, DEFAULT_CONFIG, DEFAULT_RESERVE_MINUTES_MS } from "../src/config";
+import { CAP_WINDOW_MS, DEFAULT_CONFIG } from "../src/config";
 import { HttpError } from "../src/core";
 import {
   compensateReserve,
@@ -8,7 +8,7 @@ import {
   refundJob,
   refundLostJobs,
   reserveDualPool,
-  reservedMinutesMs,
+  reservedMinutesForMode,
 } from "../src/caps";
 import { insertJob, makeEnv } from "./helpers/bindings";
 import type { RawDb } from "./helpers/d1";
@@ -40,16 +40,12 @@ async function expectCapReject(p: Promise<unknown>): Promise<void> {
   await expect(p).rejects.toBeInstanceOf(HttpError);
 }
 
-describe("reservedMinutesMs", () => {
-  it("uses the advisory hint when a sane non-negative integer (incl. 0)", () => {
-    expect(reservedMinutesMs(5000)).toBe(5000);
-    expect(reservedMinutesMs(0)).toBe(0); // a client may declare 0 (Q5 limitation; job caps backstop)
-  });
-  it("falls back to the default for absent / negative / non-integer", () => {
-    expect(reservedMinutesMs(null)).toBe(DEFAULT_RESERVE_MINUTES_MS);
-    expect(reservedMinutesMs(undefined)).toBe(DEFAULT_RESERVE_MINUTES_MS);
-    expect(reservedMinutesMs(-5)).toBe(DEFAULT_RESERVE_MINUTES_MS);
-    expect(reservedMinutesMs(1.5)).toBe(DEFAULT_RESERVE_MINUTES_MS);
+describe("reservedMinutesForMode", () => {
+  it("reserves the per-output_mode hard duration cap — ungameable, ignores the client advisory", () => {
+    const c = cfg();
+    expect(reservedMinutesForMode(c, "subtitle_only")).toBe(c.maxVideoDurationMs.subtitle_only);
+    expect(reservedMinutesForMode(c, "dub_only")).toBe(c.maxVideoDurationMs.dub_only);
+    expect(reservedMinutesForMode(c, "both")).toBe(c.maxVideoDurationMs.both);
   });
 });
 

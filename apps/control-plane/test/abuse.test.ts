@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { clientIpKey } from "../src/abuse";
-import { DEFAULT_RESERVE_MINUTES_MS } from "../src/config";
+import { DEFAULT_CONFIG } from "../src/config";
 import { handle } from "../src/router";
 import { call, makeClock, makeEnv } from "./helpers/bindings";
 import type { RawDb } from "./helpers/d1";
@@ -121,6 +121,8 @@ describe("dual-pool cap — POST /api/jobs", () => {
     subtitle_delivery: "srt",
     subtitle_lang: "target",
   } as const;
+  // The reserve charges the per-mode HARD duration cap (ungameable), NOT the client advisory hint.
+  const SUB_MINUTES = DEFAULT_CONFIG.maxVideoDurationMs.subtitle_only;
 
   async function signFor(
     env: ReturnType<typeof makeEnv>["env"],
@@ -140,7 +142,7 @@ describe("dual-pool cap — POST /api/jobs", () => {
       .get(t, k) as { jobs: number; minutes_ms: number } | undefined;
   }
 
-  it("a created job marks counted_job/counted_minutes=1 + snapshots reserved minutes + bumps all pools", async () => {
+  it("a created job marks counted flags + reserves the per-mode cap (IGNORES advisory) + bumps all pools", async () => {
     const { env, r2, raw } = makeEnv({ r2Creds: true });
     const { deps } = makeClock(1_700_000_000_000);
     const s = await signFor(env, deps, "u1");
@@ -154,22 +156,23 @@ describe("dual-pool cap — POST /api/jobs", () => {
     const job = raw
       .prepare("SELECT counted_job, counted_minutes, refunded, reserved_minutes_ms FROM jobs WHERE job_id=?")
       .get(r.json.job.job_id);
-    expect(job).toEqual({ counted_job: 1, counted_minutes: 1, refunded: 0, reserved_minutes_ms: 120000 });
-    expect(counter(raw, "global", "")).toEqual({ jobs: 1, minutes_ms: 120000 });
-    expect(counter(raw, "actor", "u1")).toEqual({ jobs: 1, minutes_ms: 120000 });
+    // reserved_minutes_ms is the per-mode cap, NOT the client's advisory_duration_ms (120000).
+    expect(job).toEqual({ counted_job: 1, counted_minutes: 1, refunded: 0, reserved_minutes_ms: SUB_MINUTES });
+    expect(counter(raw, "global", "")).toEqual({ jobs: 1, minutes_ms: SUB_MINUTES });
+    expect(counter(raw, "actor", "u1")).toEqual({ jobs: 1, minutes_ms: SUB_MINUTES });
     expect(counter(raw, "ip", "ip4:198.51.100.7")).toEqual({ jobs: 1, minutes_ms: 0 });
   });
 
-  it("an un-hinted job reserves the default minutes", async () => {
+  it("a client under-declaring advisory_duration_ms=0 still reserves the full per-mode cap (CodeX R1 #2)", async () => {
     const { env, r2, raw } = makeEnv({ r2Creds: true });
     const { deps } = makeClock(1_700_000_000_000);
     const s = await signFor(env, deps, "u1");
     r2.putSized(s.source_key, 2048);
     await call(env, deps, "POST", "/api/jobs", {
       actor: "u1",
-      body: { upload_session_id: s.upload_session_id, ...SUB }, // no advisory_duration_ms
+      body: { upload_session_id: s.upload_session_id, advisory_duration_ms: 0, ...SUB }, // can't dodge the minute cap
     });
-    expect(counter(raw, "global", "")!.minutes_ms).toBe(DEFAULT_RESERVE_MINUTES_MS);
+    expect(counter(raw, "global", "")!.minutes_ms).toBe(SUB_MINUTES);
   });
 
   it("over the per-actor cap -> 429 daily_cap_reached and does NOT burn the 2nd upload session", async () => {
@@ -227,6 +230,22 @@ describe("dual-pool cap — POST /api/jobs", () => {
       .prepare("SELECT status, counted_job, refunded FROM jobs WHERE anon_or_user_id='u1'")
       .get();
     expect(job).toMatchObject({ status: "queued", counted_job: 1, refunded: 0 });
-    expect(counter(raw, "global", "")).toEqual({ jobs: 1, minutes_ms: DEFAULT_RESERVE_MINUTES_MS });
+    expect(counter(raw, "global", "")).toEqual({ jobs: 1, minutes_ms: SUB_MINUTES });
+  });
+
+  it("a user-fault upload failure (oversized) COUNTS the reserve, NOT refunded (CodeX R1 #3)", async () => {
+    const { env, r2, kv, raw } = makeEnv({ r2Creds: true });
+    kv.setJson("runtime_config", { maxUploadBytes: 1000 }); // tiny cap so the actual object is oversized
+    const { deps } = makeClock(1_700_000_000_000);
+    const s = await signFor(env, deps, "u1"); // declared 1000 <= cap (sign ok)
+    r2.putSized(s.source_key, 5000); // actual 5000 > cap -> verifyUpload 413 (user fault)
+    const r = await call(env, deps, "POST", "/api/jobs", {
+      actor: "u1",
+      body: { upload_session_id: s.upload_session_id, ...SUB },
+    });
+    expect(r.status).toBe(413);
+    // the failed (user-fault) create still consumed daily-cap slots — anti create-fail farming.
+    expect(counter(raw, "global", "")!.jobs).toBe(1);
+    expect(counter(raw, "actor", "u1")!.jobs).toBe(1);
   });
 });

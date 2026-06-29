@@ -68,9 +68,10 @@ export interface TestEnvOptions {
   r2Creds?: boolean;
   turnstileSecret?: string;
   // M2-CLOSE PR-B (#26): the server-side anon-id HMAC key + the deployment env, so identity tests can
-  // exercise the signed (key set) / dev-raw (unset) / prod-fail-closed (unset + prod) postures.
+  // exercise the signed (key set) / dev-raw (OVT_ENV='dev') / prod-fail-closed (='prod') / forgotten-var
+  // fail-closed (='none' ⇒ OVT_ENV omitted) postures. Defaults to 'dev' so existing actor tests pass.
   anonHmacKey?: string;
-  ovtEnv?: "dev" | "prod";
+  ovtEnv?: "dev" | "prod" | "none";
   jobQueue?: FakeQueue;
   // Free-provider secrets served by /internal/credentials (SECRETS). Keys are the exact Env names so
   // a test sets exactly the subset it wants configured (an unset provider is omitted from the payload).
@@ -101,7 +102,9 @@ export function makeEnv(opts: TestEnvOptions = {}): {
     ...(opts.providerSecrets ?? {}),
     ...(opts.turnstileSecret !== undefined ? { TURNSTILE_SECRET_KEY: opts.turnstileSecret } : {}),
     ...(opts.anonHmacKey !== undefined ? { ANON_ID_HMAC_KEY: opts.anonHmacKey } : {}),
-    ...(opts.ovtEnv !== undefined ? { OVT_ENV: opts.ovtEnv } : {}),
+    // Default to the explicit dev posture so existing actor-route tests accept a raw id; ovtEnv:"prod"
+    // exercises prod fail-closed, ovtEnv:"none" OMITS the var (the forgotten-deploy-var fail-closed case).
+    ...(opts.ovtEnv === "none" ? {} : { OVT_ENV: opts.ovtEnv ?? "dev" }),
     ...(opts.jobQueue !== undefined
       ? { JOB_QUEUE: opts.jobQueue as unknown as Queue<WakeMessage> }
       : {}),

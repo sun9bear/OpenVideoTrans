@@ -2,7 +2,7 @@ import type { ErrorCode, Job } from "../../../packages/schemas/generated/ts/cont
 import type { Ctx } from "./core";
 import { HttpError, asObject, json, optInt, optString, readJson, reqEnum, reqInt, reqString } from "./core";
 import { admitJob } from "./abuse";
-import { compensateReserve, reserveDualPool, reservedMinutesMs } from "./caps";
+import { compensateReserve, reserveDualPool, reservedMinutesForMode } from "./caps";
 import { claimOne } from "./claim";
 import { isKnownStage, logEvent, parseProgressMeta } from "./obs";
 import { presignR2Url } from "./sigv4";
@@ -156,29 +156,34 @@ export async function createJob(ctx: Ctx): Promise<Response> {
 
   // Pin ONE `now`: it drives the dual-pool reserve's day bucket AND the job's created_at, so the
   // worker_lost refund (which re-derives the bucket from created_at) always targets the bucket the
-  // reserve incremented (no two-now()-straddling-midnight drift). minutesMs is snapshotted onto the
-  // row so the refund decrements EXACTLY what was reserved regardless of a later default change.
+  // reserve incremented (no two-now()-straddling-midnight drift). minutesMs is the per-mode hard
+  // duration ceiling (ungameable; NOT the client advisory hint) and is snapshotted onto the row so the
+  // refund decrements EXACTLY what was reserved.
   const now = ctx.deps.now();
-  const minutesMs = reservedMinutesMs(advisoryDurationMs);
+  const minutesMs = reservedMinutesForMode(ctx.config, outputMode);
 
   // M2-CLOSE PR-B (#26): the dual-pool reserve. BEFORE verifyUpload (which consumes the one-shot upload
   // session), so a cap-reject (429 daily_cap_reached) leaves the session re-usable for a later retry —
   // no burned upload, no orphaned source. The GLOBAL pool is the absolute cost ceiling (red line §1).
   await reserveDualPool(ctx.env.DB, ctx.config, now, actor, ticket.ipKey, minutesMs);
 
-  const jobId = ctx.deps.newId("job");
-  // ONLY the pre-commit steps can leave the reserve orphaned: verifyUpload rejecting the object, or the
-  // INSERT throwing. Those compensate (give the count back). Once the INSERT COMMITS (counted_job=1) the
-  // count is CORRECT — the only thing that gives a committed job's count back is a worker_lost refund —
-  // so a later wake/read failure must NOT decrement it. wake + the response read therefore live OUTSIDE
-  // this compensated region (fail-closed: a post-commit blip fails the response, but the count stands).
-  try {
-    const verified = await verifyUpload(ctx, actor, uploadSessionId);
-    const plan = defaultPlan(outputMode);
-    const aigc = defaultAigcMarking(outputMode);
-    const deadlineAt = now + ctx.config.deadlineMaxWaitMs;
-    const expiresAt = now + ctx.config.jobTtlMs;
+  // verifyUpload runs OUTSIDE the compensated region: a USER-fault rejection (oversized / wrong type /
+  // missing object) is a failed create that COUNTS against the cap (anti create-fail farming, abuse.ts)
+  // — it is NOT refunded. Only an OUR-fault persistence failure (the INSERT below) gives the count back.
+  // (CodeX R1: compensating user-fault upload failures let an attacker farm bad creates cap-free.)
+  const verified = await verifyUpload(ctx, actor, uploadSessionId);
 
+  const jobId = ctx.deps.newId("job");
+  // Once the INSERT COMMITS (counted_job=1) the count is CORRECT — the only thing that gives a committed
+  // job's count back is a worker_lost refund — so a later wake/read failure must NOT decrement it. The
+  // INSERT is the lone OUR-fault step that can orphan the reserve, so ONLY it is wrapped; wake + the
+  // response read live OUTSIDE (fail-closed: a post-commit blip fails the response, but the count stands).
+  const plan = defaultPlan(outputMode);
+  const aigc = defaultAigcMarking(outputMode);
+  const deadlineAt = now + ctx.config.deadlineMaxWaitMs;
+  const expiresAt = now + ctx.config.jobTtlMs;
+
+  try {
     await ctx.env.DB.prepare(
       `INSERT INTO jobs (
          job_id, anon_or_user_id, tier, status, source_type, upload_session_id,

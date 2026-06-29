@@ -26,9 +26,8 @@ CREATE TABLE IF NOT EXISTS daily_counters (
   PRIMARY KEY (scope_type, scope_key, day)
 );
 
--- The minutes amount THIS job reserved against the minute pools, captured at create
--- (advisory_duration_ms ?? DEFAULT_RESERVE_MINUTES_MS) so the worker_lost refund decrements EXACTLY
--- what was reserved — independent of any later change to the code default. NULL until a job reserves
--- (legacy / pre-PR-B rows: counted_job=0, so they are never refunded anyway). advisory_duration_ms is
--- deliberately NOT overwritten — it keeps its NULL-sorts-last semantics in the claim comparator + OBS sum.
+-- The minutes amount THIS job reserved against the minute pools, captured at create (the per-output_mode
+-- HARD duration cap — ungameable, NOT the client advisory hint) so the worker_lost refund decrements
+-- EXACTLY what was reserved — independent of any later cap change. NULL until a job reserves (legacy /
+-- pre-PR-B rows: counted_job=0, so they are never refunded anyway).
 ALTER TABLE jobs ADD COLUMN reserved_minutes_ms INTEGER;

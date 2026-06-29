@@ -36,6 +36,12 @@
     // Non-secret defaults; the authoritative runtime values come from the settings table / KV
     // (CFG-GUARD owns validation). R2 account id + bucket are non-secret deploy vars.
     "R2_ACCOUNT_ID": "0000-set-at-deploy",
-    "R2_BUCKET": "ovt-media"
+    "R2_BUCKET": "ovt-media",
+    // M2-CLOSE PR-B (#26): mark this deploy as production so the anon-identity surface fails CLOSED
+    // (503) until ANON_ID_HMAC_KEY is injected — getActor accepts a raw id only under OVT_ENV='dev'.
+    // ⚠ DEPLOY ORDER: do NOT inject ANON_ID_HMAC_KEY until the web SPA is wired to mint signed ids via
+    // POST /api/anon (apps/web/T2.6 follow-up); until then a prod actor route returns 503 (fail-closed),
+    // which is correct — go-live is gated on (key injected + SPA wired) together.
+    "OVT_ENV": "prod"
   }
 }

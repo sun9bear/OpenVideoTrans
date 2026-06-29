@@ -1,6 +1,6 @@
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import type { RuntimeConfig } from "./config";
-import { CAP_WINDOW_MS, DEFAULT_RESERVE_MINUTES_MS } from "./config";
+import { CAP_WINDOW_MS } from "./config";
 import { HttpError } from "./core";
 import { logEvent } from "./obs";
 
@@ -21,8 +21,9 @@ import { logEvent } from "./obs";
 // pools reserve in ONE batch; if any pool is over, the pools that DID reserve are compensated (decrement)
 // and the create fails 429 daily_cap_reached — so a partial multi-pool reserve never leaks a count.
 //
-// The minutes a job reserves are SNAPSHOTTED onto jobs.reserved_minutes_ms at create, so the refund
-// decrements exactly what was reserved regardless of any later DEFAULT_RESERVE_MINUTES_MS change.
+// The minutes a job reserves (the per-output_mode hard duration cap — ungameable, see
+// reservedMinutesForMode) are SNAPSHOTTED onto jobs.reserved_minutes_ms at create, so the refund
+// decrements exactly what was reserved regardless of any later cap change.
 
 const GLOBAL_KEY = "";
 const NO_IP_KEY = "__no_ip__"; // shared bucket for ingress with no CF-Connecting-IP (per-IP fairness)
@@ -34,19 +35,17 @@ export function dayBucket(ms: number): number {
   return Math.floor(ms / CAP_WINDOW_MS);
 }
 
-// Minutes a job reserves against the minute pools: its advisory hint when present + sane, else the
-// nominal default. (advisory_duration_ms is a client SORT-ONLY hint; the authoritative per-job minute
-// bound is the worker's ffprobe over_duration cap — see the create-path comment. Under-declaring here
-// is bounded by the JOB-count caps, which are the real backstop.)
-export function reservedMinutesMs(advisoryDurationMs: number | null | undefined): number {
-  if (
-    typeof advisoryDurationMs === "number" &&
-    Number.isInteger(advisoryDurationMs) &&
-    advisoryDurationMs >= 0
-  ) {
-    return advisoryDurationMs;
-  }
-  return DEFAULT_RESERVE_MINUTES_MS;
+// Minutes a job reserves against the minute pools = the per-output_mode HARD duration ceiling (the max
+// a job of this mode can consume, enforced authoritatively by the worker's ffprobe over_duration gate).
+// Reserving THIS — not the client's advisory_duration_ms (a SORT-ONLY hint a client can under-declare to
+// 0) — makes the minute pool UNGAMEABLE: dailyGlobalMinutesMsCap can't be dodged by lying about duration
+// (CodeX R1). The trade-off is a conservative over-reserve for short jobs (safe direction: stricter cap);
+// charging the ACTUAL ffprobe duration + reconciling the reserve is a worker-accounting refinement -> PR-C.
+export function reservedMinutesForMode(
+  config: RuntimeConfig,
+  outputMode: "subtitle_only" | "dub_only" | "both",
+): number {
+  return config.maxVideoDurationMs[outputMode];
 }
 
 interface Pool {

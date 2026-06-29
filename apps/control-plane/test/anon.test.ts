@@ -92,8 +92,16 @@ describe("getActor posture (via an actor-authed route)", () => {
     expect(r.json.error.code).toBe("anon_unconfigured");
   });
 
-  it("no key + non-prod -> raw id accepted (dev / DEVLOOP / tests back-compat)", async () => {
-    const { env } = makeEnv({ r2Creds: true });
+  it("no key + OVT_ENV omitted (forgotten deploy var) -> 503 fail-closed BY DEFAULT (CodeX R1 #4)", async () => {
+    const { env } = makeEnv({ r2Creds: true, ovtEnv: "none" }); // neither the key nor OVT_ENV set
+    const { deps } = makeClock(1000);
+    const r = await call(env, deps, "POST", "/api/uploads/sign", { actor: "anon_u1", body: SIGN_BODY });
+    expect(r.status).toBe(503); // default is fail-closed, NOT raw-accept
+    expect(r.json.error.code).toBe("anon_unconfigured");
+  });
+
+  it("no key + explicit OVT_ENV=dev -> raw id accepted (DEVLOOP / tests opt-in only)", async () => {
+    const { env } = makeEnv({ r2Creds: true, ovtEnv: "dev" });
     const { deps } = makeClock(1000);
     expect((await call(env, deps, "POST", "/api/uploads/sign", { actor: "anon_raw", body: SIGN_BODY })).status).toBe(200);
   });

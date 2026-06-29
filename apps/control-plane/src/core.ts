@@ -46,10 +46,11 @@ export interface Env {
   // identity is unverified — accepted raw ONLY in non-prod (see OVT_ENV); in prod that is fail-closed.
   ANON_ID_HMAC_KEY?: string;
   // M2-CLOSE PR-B (#26): the deployment environment, operator deploy config (same trust class as
-  // R2_S3_ENDPOINT — NOT client-controlled, NOT a secret). 'prod' makes the anon-identity surface
-  // fail CLOSED when ANON_ID_HMAC_KEY is absent (503, mirroring requireR2/requireWorker/requireAdmin),
-  // so a deploy that forgets the key cannot silently run with forgeable identities. Absent / 'dev'
-  // keeps the raw-accept dev posture (tests / DEVLOOP / pre-deploy) unchanged.
+  // R2_S3_ENDPOINT — NOT client-controlled, NOT a secret). The anon-identity surface accepts a raw
+  // (unverified) X-OVT-Anon-Id ONLY when ANON_ID_HMAC_KEY is absent AND OVT_ENV === 'dev' (the explicit
+  // dev/DEVLOOP/test opt-in). The DEFAULT (prod, OR an unset/forgotten OVT_ENV) with no key FAILS CLOSED
+  // (503, mirroring requireR2/requireWorker/requireAdmin) — forgetting the key can never silently admit
+  // forgeable identities. wrangler.jsonc pins this to 'prod'; the dev harnesses set 'dev'.
   OVT_ENV?: "dev" | "prod";
   // DEVLOOP (#25): a NON-secret S3 endpoint override for the local dev loop, e.g. "http://127.0.0.1:9000".
   // When set (ONLY by `just dev`, NEVER in prod wrangler.jsonc), the presigned upload/download URLs

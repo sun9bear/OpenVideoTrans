@@ -5,12 +5,6 @@ import type { QueueBackend } from "./core";
 // refund MUST agree on the bucketing arithmetic, so it is fixed in code, not in the settings table.
 export const CAP_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
 
-// M2-CLOSE PR-B (#26): minutes reserved against the minute pools when a job carries no
-// advisory_duration_ms hint. A constant so the reserve and refund agree; the ACTUAL value reserved is
-// snapshotted onto the job row (jobs.reserved_minutes_ms) at create, so a later change to this default
-// never desynchronises a refund from the amount it reserved.
-export const DEFAULT_RESERVE_MINUTES_MS = 5 * 60 * 1000; // 5min nominal for an un-hinted job
-
 // Runtime knobs the Worker reads each request. These are NON-security operational values; the
 // authoritative source is the D1 `settings` table behind per-key validation + audit (CFG-GUARD).
 // getConfig + the load/validate/audit logic live in settings.ts (which imports this shape + defaults);
