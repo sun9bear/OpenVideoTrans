@@ -1,4 +1,5 @@
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
+import { refundLostJobs } from "./caps";
 import type { RuntimeConfig } from "./config";
 import type { Deps, Env, QueueProducer } from "./core";
 import { selectProducer } from "./queue";
@@ -17,10 +18,13 @@ import { selectProducer } from "./queue";
 // Each sweep is bounded by a row LIMIT so a single Cron tick is cheap; a backlog drains over
 // successive ticks. R2 deletes are idempotent and the D1 updates are guarded so re-runs are no-ops.
 //
-// Out of scope here (routed, documented): the `deadline_at` cross-mode-tier anti-starvation backstop
-// needs a comparator/error-code change beyond this unit -> M2-CLOSE (§12 scheduling DoD); the
-// worker_lost quota refund (§232) needs the dual-pool counters table that does not exist yet -> T2.4
-// / M2-CLOSE. recoverLeases here owns the state machine (re-queue / worker_lost) only.
+// recoverLeases here owns the lost-worker STATE MACHINE (re-queue / worker_lost) only; the dual-pool
+// quota REFUND for a worker_lost job (§232) is a separate duty (refundLostJobs, caps.ts), added in
+// M2-CLOSE PR-B now that the daily_counters table exists. It is driven off a STANDING query
+// (error_code='worker_lost' AND counted_job=1 AND refunded=0), NOT recoverLeases' single-tick output,
+// so a job stranded by a crash / batch-limit truncation between its transition and its decrement is
+// simply re-selected and refunded next tick (exactly-once-eventually). Still routed onward: the
+// `deadline_at` cross-mode anti-starvation backstop (comparator/error-code) -> M2-CLOSE PR-C.
 
 // Per-tick row cap. The sweeper is a maintenance loop, not a bulk migration: bound the work so one
 // invocation stays well within the Worker CPU/time budget; the next tick continues any backlog.
@@ -32,6 +36,7 @@ export interface SweepSummary {
   workerLost: number;
   orphans: number;
   reconciled: number;
+  refunded: number;
 }
 
 interface ArtifactRow {
@@ -264,7 +269,14 @@ export async function runSweep(
   producer: QueueProducer = selectProducer(env, config),
 ): Promise<SweepSummary> {
   const now = deps.now();
-  const summary: SweepSummary = { purged: 0, requeued: 0, workerLost: 0, orphans: 0, reconciled: 0 };
+  const summary: SweepSummary = {
+    purged: 0,
+    requeued: 0,
+    workerLost: 0,
+    orphans: 0,
+    reconciled: 0,
+    refunded: 0,
+  };
   const errors: unknown[] = [];
   let requeuedIds: string[] = [];
   const duty = async (run: () => Promise<void>): Promise<void> => {
@@ -280,6 +292,13 @@ export async function runSweep(
     summary.requeued = r.requeued;
     summary.workerLost = r.workerLost;
     requeuedIds = r.requeuedIds;
+  });
+  // Refund the dual-pool quota for worker_lost jobs (M2-CLOSE PR-B). Runs AFTER recoverLeases (which
+  // just transitioned this tick's attempt-exhausted lost workers to worker_lost) but is driven off a
+  // STANDING query, so it also picks up any worker_lost job stranded un-refunded by a prior tick's
+  // crash/truncation. Isolated like every duty: a refund failure never blocks the others.
+  await duty(async () => {
+    summary.refunded = await refundLostJobs(env.DB, now, SWEEP_BATCH_LIMIT);
   });
   await duty(async () => {
     summary.purged = await purgeExpired(env.DB, env.MEDIA, now);

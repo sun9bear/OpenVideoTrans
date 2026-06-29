@@ -1,5 +1,10 @@
 import type { QueueBackend } from "./core";
 
+// M2-CLOSE PR-B (#26): the dual-pool cap window. day = floor(now / CAP_WINDOW_MS) ⇒ UTC-day buckets,
+// the (scope, day) key of daily_counters. A constant (not operator-tunable): the reserve and the
+// refund MUST agree on the bucketing arithmetic, so it is fixed in code, not in the settings table.
+export const CAP_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
+
 // Runtime knobs the Worker reads each request. These are NON-security operational values; the
 // authoritative source is the D1 `settings` table behind per-key validation + audit (CFG-GUARD).
 // getConfig + the load/validate/audit logic live in settings.ts (which imports this shape + defaults);
@@ -28,6 +33,15 @@ export interface RuntimeConfig {
   // production lock to cf_queues + the audited break-glass switch back to d1 is CFG-GUARD's; here it
   // defaults to the conservative d1 so a Worker with no queue binding is fully functional.
   queueBackend: QueueBackend;
+  // M2-CLOSE PR-B (#26): the abuse dual-pool daily caps (per CAP_WINDOW_MS bucket). The GLOBAL pool is
+  // the absolute cost ceiling across ALL actors (red line §1 bounds total spend); per-actor + per-IP
+  // are best-effort fairness. Operator-tunable through CFG-GUARD (MUTABLE, NOT red-line — a cap is a
+  // knob, not a paid-API/AIGC gate). Defaults are conservative free-tier placeholders.
+  dailyGlobalJobCap: number;
+  dailyGlobalMinutesMsCap: number;
+  dailyActorJobCap: number;
+  dailyActorMinutesMsCap: number;
+  dailyIpJobCap: number;
 }
 
 export const DEFAULT_CONFIG: RuntimeConfig = {
@@ -63,4 +77,11 @@ export const DEFAULT_CONFIG: RuntimeConfig = {
     both: 300 * 1000,
   },
   queueBackend: "d1", // safe default; CFG-GUARD locks prod to cf_queues with an audited break-glass.
+  // Free-tier placeholders (CFG-GUARD owns the real caps). GLOBAL = absolute cost ceiling/day; per-
+  // actor + per-IP = best-effort fairness/day. Minutes are integer ms (project convention).
+  dailyGlobalJobCap: 500,
+  dailyGlobalMinutesMsCap: 3000 * 60 * 1000, // 3000 min/day across all actors
+  dailyActorJobCap: 10,
+  dailyActorMinutesMsCap: 120 * 60 * 1000, // 120 min/day per anon/user
+  dailyIpJobCap: 20,
 };

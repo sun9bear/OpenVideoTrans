@@ -39,6 +39,24 @@ export interface Env {
   // D1-claim backend, in which case the producer falls back to D1-claim (jobs table is the
   // authoritative worklist, so a missing queue never strands a job). Wired in wrangler.jsonc.
   JOB_QUEUE?: Queue<WakeMessage>;
+  // M2-CLOSE PR-B (#26): the HMAC key that signs/verifies anon ids server-side (getActor). A wrangler
+  // secret injected at deploy — names only here, never in the repo, never logged. When SET, getActor
+  // requires every X-OVT-Anon-Id to be a server-minted `base.sig` (forged/unsigned ids fail closed
+  // 401); the per-actor cap + job ownership then key on the unforgeable BASE id. When UNSET the actor
+  // identity is unverified — accepted raw ONLY in non-prod (see OVT_ENV); in prod that is fail-closed.
+  ANON_ID_HMAC_KEY?: string;
+  // M2-CLOSE PR-B (#26): the PREVIOUS anon HMAC key, for a zero-downtime key rotation overlap (mirrors
+  // INTERNAL_TOKEN/INTERNAL_TOKEN_NEXT, SECRETS). New ids are minted with ANON_ID_HMAC_KEY (current);
+  // getActor verifies against current OR this previous key, so ids signed with the old key keep
+  // validating until the rotation completes (then drop this). A wrangler secret, present only mid-rotation.
+  ANON_ID_HMAC_KEY_PREVIOUS?: string;
+  // M2-CLOSE PR-B (#26): the deployment environment, operator deploy config (same trust class as
+  // R2_S3_ENDPOINT — NOT client-controlled, NOT a secret). The anon-identity surface accepts a raw
+  // (unverified) X-OVT-Anon-Id ONLY when ANON_ID_HMAC_KEY is absent AND OVT_ENV === 'dev' (the explicit
+  // dev/DEVLOOP/test opt-in). The DEFAULT (prod, OR an unset/forgotten OVT_ENV) with no key FAILS CLOSED
+  // (503, mirroring requireR2/requireWorker/requireAdmin) — forgetting the key can never silently admit
+  // forgeable identities. wrangler.jsonc pins this to 'prod'; the dev harnesses set 'dev'.
+  OVT_ENV?: "dev" | "prod";
   // DEVLOOP (#25): a NON-secret S3 endpoint override for the local dev loop, e.g. "http://127.0.0.1:9000".
   // When set (ONLY by `just dev`, NEVER in prod wrangler.jsonc), the presigned upload/download URLs
   // (sigv4.ts) AND the verifyUpload HEAD/delete (media.ts) target this base — a local S3 stub — instead

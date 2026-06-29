@@ -125,6 +125,9 @@ function makeEnv(): Env {
     R2_ACCESS_KEY_ID: "AKIDEVLOOP",
     R2_SECRET_ACCESS_KEY: "dev-secret",
     R2_S3_ENDPOINT: process.env.R2_S3_ENDPOINT,
+    // M2-CLOSE PR-B (#26): explicit dev posture so getActor accepts the dev loop's raw anon id (no
+    // ANON_ID_HMAC_KEY here). Prod fails closed by default; only this explicit 'dev' admits a raw id.
+    OVT_ENV: "dev" as const,
   };
 }
 

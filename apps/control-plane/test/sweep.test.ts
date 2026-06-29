@@ -591,3 +591,69 @@ describe("runSweep — wake re-signal (T2.5 bridge symmetry)", () => {
     expect(jobRow(raw, "lost").status).toBe("queued");
   });
 });
+
+// ── worker_lost quota refund (M2-CLOSE PR-B) ───────────────────────────────────
+
+describe("refundLostJobs — worker_lost dual-pool refund", () => {
+  function counter(raw: RawDb, t: string, k: string): { jobs: number; minutes_ms: number } | undefined {
+    return raw
+      .prepare("SELECT jobs, minutes_ms FROM daily_counters WHERE scope_type=? AND scope_key=?")
+      .get(t, k) as { jobs: number; minutes_ms: number } | undefined;
+  }
+  function seedCounter(raw: RawDb, t: string, k: string, jobs: number, minutes: number): void {
+    raw
+      .prepare(
+        "INSERT INTO daily_counters (scope_type, scope_key, day, jobs, minutes_ms, updated_at) VALUES (?,?,0,?,?,0)",
+      )
+      .run(t, k, jobs, minutes);
+  }
+
+  it("runSweep refunds global + actor quota when a job is lost (attempt exhausted)", async () => {
+    const { env, raw } = makeEnv();
+    seedCounter(raw, "global", "", 1, 5000);
+    seedCounter(raw, "actor", "anon_x", 1, 5000);
+    insertJob(raw, {
+      job_id: "lost",
+      enqueue_at: 0,
+      created_at: 0, // UTC-day bucket 0 (same as the seeded counters)
+      status: "running",
+      attempt: MAX,
+      claim_version: 2,
+      lease_expires_at: 1000,
+      counted_job: 1,
+      counted_minutes: 1,
+      reserved_minutes_ms: 5000,
+      anon: "anon_x",
+    });
+    const now = 10_000; // past the lease, still UTC-day 0
+    const summary = await runSweep(env, { now: () => now, newId: (p) => p }, DEFAULT_CONFIG);
+    expect(summary.workerLost).toBe(1);
+    expect(summary.refunded).toBe(1);
+    expect(jobRow(raw, "lost").error_code).toBe("worker_lost");
+    expect(jobRow(raw, "lost").refunded).toBe(1);
+    expect(counter(raw, "global", "")).toEqual({ jobs: 0, minutes_ms: 0 });
+    expect(counter(raw, "actor", "anon_x")).toEqual({ jobs: 0, minutes_ms: 0 });
+  });
+
+  it("a requeue (attempt < max) does NOT refund — the count stands until a terminal worker_lost", async () => {
+    const { env, raw } = makeEnv();
+    seedCounter(raw, "global", "", 1, 5000);
+    insertJob(raw, {
+      job_id: "req",
+      enqueue_at: 0,
+      created_at: 0,
+      status: "running",
+      attempt: 1,
+      claim_version: 1,
+      lease_expires_at: 1000,
+      counted_job: 1,
+      reserved_minutes_ms: 5000,
+      anon: "anon_x",
+    });
+    const summary = await runSweep(env, { now: () => 10_000, newId: (p) => p }, DEFAULT_CONFIG);
+    expect(summary.requeued).toBe(1);
+    expect(summary.refunded).toBe(0);
+    expect(jobRow(raw, "req").status).toBe("queued"); // still in flight -> the reservation stands
+    expect(counter(raw, "global", "")).toEqual({ jobs: 1, minutes_ms: 5000 });
+  });
+});

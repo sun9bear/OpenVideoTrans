@@ -1,6 +1,7 @@
 import type { Ctx, Env } from "./core";
 import { json } from "./core";
 import type { RuntimeConfig } from "./config";
+import { CAP_WINDOW_MS } from "./config";
 import { FREE_PROVIDERS, PAID_PROVIDER_NAMES, getProviderAvailability } from "./providers";
 
 // OBS (#24) — the observability baseline (backlog §OBS, §12 gap). Three concerns live here:
@@ -123,6 +124,9 @@ const METRICS_WINDOW_MS = 24 * 60 * 60 * 1000;
 // free_pool_low fires at >= this fraction of configured free providers exhausted (with a >=2 floor,
 // applied in evaluateAlerts, so a one-provider pool's routine daily 429 does not alert).
 export const FREE_POOL_LOW_RATIO = 0.5;
+// global_cap_approaching fires at >= this fraction of EITHER the global job or global minute cap used
+// today (the cost/cap-proximity alert OBS routed to M2-CLOSE — it needs the counters + a global cap).
+export const GLOBAL_CAP_WARN_RATIO = 0.8;
 
 export interface Summary {
   n: number;
@@ -178,6 +182,9 @@ export interface MetricsSnapshot {
   claim_latency_ms: Summary | null;
   stages: { by_stage: Record<string, number>; elapsed_ms: Summary | null };
   free_pool: FreePoolMetrics;
+  // M2-CLOSE PR-B (#26): TODAY's authoritative global dual-pool counter + its caps. The cap-proximity
+  // alert reads ONLY this (day = floor(now/window)) — stale historical buckets never affect it.
+  global_pool: { jobs: number; job_cap: number; minutes_ms: number; minutes_ms_cap: number };
   global_minutes: { window_ms: number; advisory_consumed_ms: number };
   worker: {
     // The EXACT latest lease expiry across running jobs (no config coupling) — the unskewable
@@ -264,6 +271,23 @@ export async function computeMetrics(
 
   const free_pool = await freePoolMetrics(env, now);
 
+  // TODAY's authoritative global dual-pool counter (the cost ceiling the abuse reserve enforces). Read
+  // the single global row for the current UTC-day bucket — a PRIMARY KEY point lookup, not a SUM, so
+  // stale historical-day rows never inflate it. `day` mirrors caps.dayBucket; it is kept inline here
+  // rather than imported to avoid an obs<->caps import cycle (caps already imports logEvent from obs).
+  const day = Math.floor(now / CAP_WINDOW_MS);
+  const poolRow = await env.DB.prepare(
+    "SELECT jobs, minutes_ms FROM daily_counters WHERE scope_type = 'global' AND scope_key = '' AND day = ?",
+  )
+    .bind(day)
+    .first<{ jobs: number; minutes_ms: number }>();
+  const global_pool = {
+    jobs: typeof poolRow?.jobs === "number" ? poolRow.jobs : 0,
+    job_cap: config.dailyGlobalJobCap,
+    minutes_ms: typeof poolRow?.minutes_ms === "number" ? poolRow.minutes_ms : 0,
+    minutes_ms_cap: config.dailyGlobalMinutesMsCap,
+  };
+
   const minutesRow = await env.DB.prepare(
     "SELECT COALESCE(SUM(advisory_duration_ms), 0) AS s FROM jobs WHERE created_at >= ?",
   )
@@ -297,6 +321,7 @@ export async function computeMetrics(
     claim_latency_ms: summarize(latencies),
     stages: { by_stage, elapsed_ms: summarize(elapsed) },
     free_pool,
+    global_pool,
     global_minutes: {
       window_ms: METRICS_WINDOW_MS,
       advisory_consumed_ms: typeof minutesRow?.s === "number" ? minutesRow.s : 0,
@@ -334,6 +359,22 @@ export function evaluateAlerts(snapshot: MetricsSnapshot): Alert[] {
       exhausted: fp.exhausted,
       configured_total: fp.configured_total,
       available: fp.available,
+    });
+  }
+  // 成本逼近 cap: TODAY's authoritative global pool nearing EITHER the job or the minute cost ceiling.
+  // crit once a cap is reached (further creates 429); warn at the proximity ratio. Aggregates only — no
+  // anon/IP/job id in the payload (the global row's scope_key is '').
+  const gp = snapshot.global_pool;
+  const jobRatio = gp.job_cap > 0 ? gp.jobs / gp.job_cap : 0;
+  const minRatio = gp.minutes_ms_cap > 0 ? gp.minutes_ms / gp.minutes_ms_cap : 0;
+  if (jobRatio >= GLOBAL_CAP_WARN_RATIO || minRatio >= GLOBAL_CAP_WARN_RATIO) {
+    alerts.push({
+      name: "global_cap_approaching",
+      severity: jobRatio >= 1 || minRatio >= 1 ? "crit" : "warn",
+      jobs: gp.jobs,
+      job_cap: gp.job_cap,
+      minutes_ms: gp.minutes_ms,
+      minutes_ms_cap: gp.minutes_ms_cap,
     });
   }
   return alerts;

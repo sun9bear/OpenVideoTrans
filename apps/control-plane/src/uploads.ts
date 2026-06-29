@@ -87,6 +87,23 @@ interface SessionRow {
   expires_at: number;
 }
 
+// Atomically retire a PENDING upload session as 'expired' (single-use) — the same guarded single-consumer
+// pattern as verifyUpload's consume (T2.0-proven on D1). The caller (a bad-upload terminal that COUNTS
+// against the daily cap) invokes this FIRST: exactly one of N concurrent creates for the one pending
+// session wins (this returns) and goes on to throw the counted user-fault; the losers see changes=0 and
+// get 409 here (which createJob compensates), so a bad upload is charged ONCE — never multiplied by a
+// concurrent re-POST race (CodeX R4/R5). Throws HttpError(409) on a loser; returns on the winner.
+async function expirePendingOr409(env: Env, uploadSessionId: string): Promise<void> {
+  const expired = await env.DB.prepare(
+    `UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ? AND status = 'pending'`,
+  )
+    .bind(uploadSessionId)
+    .run();
+  if (expired.meta.changes === 0) {
+    throw new HttpError(409, "upload_already_consumed", "upload session already used");
+  }
+}
+
 // HEAD the uploaded object and enforce the byte cap on the ACTUAL size. Oversized -> delete the
 // object, mark the session expired, and create NO job (raises before job-create proceeds).
 //
@@ -118,14 +135,20 @@ export async function verifyUpload(
   }
 
   const obj = await mediaHead(ctx.env, row.source_key);
+  // The three bad-upload terminals below (missing object / oversized / type-mismatch) all COUNT against
+  // the daily cap (createJob treats their user-fault codes as anti create-fail farming, not refunded).
+  // Each FIRST retires the session via expirePendingOr409 — a guarded single-consumer expire — so the
+  // bad upload is charged exactly ONCE: of N concurrent creates for the one pending session exactly one
+  // wins and throws the counted fault, the losers get 409 (which createJob compensates). The winner then
+  // deletes the object (when one landed); a winner crash after expire is reaped by the orphan sweeper
+  // (expired + unpurged). CodeX R4 guarded the missing path; R5 unifies oversized + type-mismatch.
   if (!obj) {
+    await expirePendingOr409(ctx.env, uploadSessionId); // no object to delete — it never landed
     throw new HttpError(422, "source_verify_failed", "uploaded object not found");
   }
   if (obj.size > ctx.config.maxUploadBytes) {
+    await expirePendingOr409(ctx.env, uploadSessionId);
     await mediaDelete(ctx.env, row.source_key);
-    await ctx.env.DB.prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ?`)
-      .bind(uploadSessionId)
-      .run();
     throw new HttpError(413, "upload_too_large", "uploaded object exceeds the size cap");
   }
   // Verify the actual object type matches what was declared (the type half of the post-PUT HEAD
@@ -135,10 +158,8 @@ export async function verifyUpload(
   // honest-mismatch / wrong-extension / no-type case cheaply at admission.
   const actualType = obj.contentType;
   if (actualType === undefined || actualType !== row.declared_type) {
+    await expirePendingOr409(ctx.env, uploadSessionId);
     await mediaDelete(ctx.env, row.source_key);
-    await ctx.env.DB.prepare(`UPDATE upload_sessions SET status = 'expired' WHERE upload_session_id = ?`)
-      .bind(uploadSessionId)
-      .run();
     throw new HttpError(422, "source_verify_failed", "uploaded object type does not match the declared type");
   }
 

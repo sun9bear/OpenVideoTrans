@@ -7,12 +7,16 @@ import { makeD1, type RawDb } from "./d1";
 // PUT of a given size without allocating the bytes).
 export class FakeR2 {
   private readonly store = new Map<string, { size: number; contentType: string | undefined }>();
+  // M2-CLOSE PR-B (#26): when true, head() THROWS — simulating an R2 HEAD 5xx / binding failure (an
+  // OUR-fault infra error inside verifyUpload, which must compensate the reserve, not count it).
+  headThrows = false;
   // Simulate a browser PUT of a given size + content-type. Pass null to simulate a PUT that omitted
   // Content-Type (so head() returns no httpMetadata.contentType).
   putSized(key: string, size: number, contentType: string | null = "video/mp4"): void {
     this.store.set(key, { size, contentType: contentType ?? undefined });
   }
   async head(key: string): Promise<R2Object | null> {
+    if (this.headThrows) throw new Error("R2 HEAD failed (5xx)");
     const obj = this.store.get(key);
     if (obj === undefined) return null;
     return { key, size: obj.size, httpMetadata: { contentType: obj.contentType } } as unknown as R2Object;
@@ -67,6 +71,14 @@ export interface TestEnvOptions {
   adminToken?: string;
   r2Creds?: boolean;
   turnstileSecret?: string;
+  // M2-CLOSE PR-B (#26): the server-side anon-id HMAC key + the deployment env, so identity tests can
+  // exercise the signed (key set) / dev-raw (OVT_ENV='dev') / prod-fail-closed (='prod') / forgotten-var
+  // fail-closed (='none' ⇒ OVT_ENV omitted) postures. Defaults to 'dev' so existing actor tests pass.
+  anonHmacKey?: string;
+  // The PREVIOUS anon HMAC key, to exercise the zero-downtime rotation overlap (getActor accepts an id
+  // signed with current OR previous).
+  anonHmacKeyPrevious?: string;
+  ovtEnv?: "dev" | "prod" | "none";
   jobQueue?: FakeQueue;
   // Free-provider secrets served by /internal/credentials (SECRETS). Keys are the exact Env names so
   // a test sets exactly the subset it wants configured (an unset provider is omitted from the payload).
@@ -96,6 +108,13 @@ export function makeEnv(opts: TestEnvOptions = {}): {
     ...(opts.adminToken !== undefined ? { ADMIN_TOKEN: opts.adminToken } : {}),
     ...(opts.providerSecrets ?? {}),
     ...(opts.turnstileSecret !== undefined ? { TURNSTILE_SECRET_KEY: opts.turnstileSecret } : {}),
+    ...(opts.anonHmacKey !== undefined ? { ANON_ID_HMAC_KEY: opts.anonHmacKey } : {}),
+    ...(opts.anonHmacKeyPrevious !== undefined
+      ? { ANON_ID_HMAC_KEY_PREVIOUS: opts.anonHmacKeyPrevious }
+      : {}),
+    // Default to the explicit dev posture so existing actor-route tests accept a raw id; ovtEnv:"prod"
+    // exercises prod fail-closed, ovtEnv:"none" OMITS the var (the forgotten-deploy-var fail-closed case).
+    ...(opts.ovtEnv === "none" ? {} : { OVT_ENV: opts.ovtEnv ?? "dev" }),
     ...(opts.jobQueue !== undefined
       ? { JOB_QUEUE: opts.jobQueue as unknown as Queue<WakeMessage> }
       : {}),
@@ -155,9 +174,19 @@ export interface JobSeed {
   current_stage?: string | null;
   progress_meta?: string | null;
   created_at?: number;
+  // M2-CLOSE PR-B (#26) dual-pool cap accounting: the terminal error_code (e.g. 'worker_lost'), the
+  // idempotent quota flags, the snapshotted reserved minutes, and finished_at — so refund tests can seed
+  // a worker_lost row that still owes a refund. All default to the pre-PR-B values (no error, counted_*=0,
+  // refunded=0, reserved/finished NULL) so existing call sites are unaffected.
+  error_code?: string | null;
+  finished_at?: number | null;
+  counted_job?: number;
+  counted_minutes?: number;
+  refunded?: number;
+  reserved_minutes_ms?: number | null;
 }
 
-// Seed a job row directly (bypassing the upload flow) for claim / lifecycle / access / obs tests.
+// Seed a job row directly (bypassing the upload flow) for claim / lifecycle / access / obs / cap tests.
 export function insertJob(raw: RawDb, o: JobSeed): void {
   raw
     .prepare(
@@ -165,10 +194,11 @@ export function insertJob(raw: RawDb, o: JobSeed): void {
          job_id, anon_or_user_id, status, source_type, upload_session_id, target_lang,
          output_mode, subtitle_delivery, subtitle_lang, plan, settings_version, aigc_marking,
          priority, advisory_duration_ms, enqueue_at, deadline_at, created_at, expires_at,
-         lease_expires_at, data_purged_at, artifacts, attempt, claim_version,
+         lease_expires_at, finished_at, data_purged_at, artifacts, attempt, claim_version,
+         counted_job, counted_minutes, refunded, reserved_minutes_ms, error_code,
          started_at, current_stage, progress_meta
        ) VALUES (?, ?, ?, 'upload', 'us_seed', 'zh-Hans', ?, 'srt', 'target',
-         '{"asr":"auto","mt":"auto","tts":null}', 1, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         '{"asr":"auto","mt":"auto","tts":null}', 1, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       o.job_id,
@@ -182,10 +212,16 @@ export function insertJob(raw: RawDb, o: JobSeed): void {
       o.created_at ?? o.enqueue_at,
       o.expires_at ?? o.enqueue_at + 24 * 60 * 60 * 1000,
       o.lease_expires_at ?? null,
+      o.finished_at ?? null,
       o.data_purged_at ?? null,
       o.artifacts ?? "{}",
       o.attempt ?? 0,
       o.claim_version ?? 0,
+      o.counted_job ?? 0,
+      o.counted_minutes ?? 0,
+      o.refunded ?? 0,
+      o.reserved_minutes_ms ?? null,
+      o.error_code ?? null,
       o.started_at ?? null,
       o.current_stage ?? null,
       o.progress_meta ?? null,
