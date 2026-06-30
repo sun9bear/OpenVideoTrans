@@ -32,6 +32,7 @@ from pathlib import Path
 
 from autodub_core import JobPaths
 from autodub_core import ProviderUnavailable as KernelProviderUnavailable
+from autodub_core import config as autodub_config
 from autodub_core import run_pipeline as _run_pipeline
 from ovt_schemas import Job
 from provider_adapters import (
@@ -182,13 +183,24 @@ def _stage_kinds(output_mode: str) -> tuple[str, ...]:
 
 
 def _deliverables(job: Job, paths: JobPaths) -> list[tuple[str, str, str, Path]]:
-    # (artifact field, output filename, content-type, produced source path) per output_mode. Field
-    # names + filenames MUST match the control plane's complete() contract (video_key/srt_key,
-    # output.mp4/output.srt) — the same convention the T2.2 stub used.
+    # (artifact field, output filename, content-type, produced source path) per
+    # output_mode + subtitle_delivery. Field names + filenames MUST match the control plane's
+    # complete() contract (video_key/srt_key, output.mp4/output.srt). This mirrors
+    # stages.mux()'s deliver_video choice EXACTLY so we upload precisely what mux produced:
+    # a burned video reuses video_key (M2.1 — no new artifact field, CodeX decision), and
+    # dubbed_video is only its intermediate.
+    want_subs = job.output_mode in ("subtitle_only", "both")
+    burn = (
+        want_subs
+        and job.subtitle_delivery in ("burned", "both")
+        and autodub_config.BURN_SUBTITLES_ENABLED
+    )
     out: list[tuple[str, str, str, Path]] = []
-    if job.output_mode in ("dub_only", "both"):
+    if burn:
+        out.append(("video_key", "output.mp4", "video/mp4", paths.burned_video))
+    elif job.output_mode in ("dub_only", "both"):
         out.append(("video_key", "output.mp4", "video/mp4", paths.dubbed_video))
-    if job.output_mode in ("subtitle_only", "both"):
+    if want_subs and job.subtitle_delivery in ("srt", "both"):
         out.append(("srt_key", "output.srt", "application/x-subrip", paths.subtitles))
     return out
 

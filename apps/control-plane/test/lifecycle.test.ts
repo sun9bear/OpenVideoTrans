@@ -120,3 +120,71 @@ describe("/internal complete + fail idempotency (first terminal wins)", () => {
     expect(r.status).toBe(400);
   });
 });
+
+describe("/internal complete — M2.1 delivery mode matrix", () => {
+  const V = (id: string): string => `artifacts/${id}/0/output.mp4`;
+  const S = (id: string): string => `artifacts/${id}/0/output.srt`;
+
+  // (output_mode, subtitle_delivery) -> the EXACT artifact-key set the job must deliver. A burned
+  // subtitle reuses video_key (no burned_video_key); dub_only ignores delivery (no subtitle).
+  const OK: Array<[string, string, Array<"video" | "srt">]> = [
+    ["subtitle_only", "srt", ["srt"]],
+    ["subtitle_only", "burned", ["video"]],
+    ["subtitle_only", "both", ["video", "srt"]],
+    ["dub_only", "srt", ["video"]],
+    ["both", "srt", ["video", "srt"]],
+    ["both", "burned", ["video"]],
+    ["both", "both", ["video", "srt"]],
+  ];
+
+  for (const [mode, delivery, keys] of OK) {
+    it(`accepts the exact set for ${mode}+${delivery}`, async () => {
+      const { env, raw } = makeEnv({ internalToken: WORKER });
+      const id = `ok_${mode}_${delivery}`;
+      insertJob(raw, {
+        job_id: id, enqueue_at: 1000, status: "running",
+        output_mode: mode, subtitle_delivery: delivery,
+      });
+      const { deps } = makeClock(2000);
+      const artifacts: Record<string, string> = {};
+      if (keys.includes("video")) artifacts.video_key = V(id);
+      if (keys.includes("srt")) artifacts.srt_key = S(id);
+      const r = await call(env, deps, "POST", `/internal/jobs/${id}/complete`, {
+        worker: WORKER,
+        body: { claim_version: 0, artifacts },
+      });
+      expect(r.status).toBe(200);
+      expect(r.json.job.status).toBe("done");
+    });
+  }
+
+  it("rejects a missing required key (subtitle_only+burned without video_key) -> 400", async () => {
+    const { env, raw } = makeEnv({ internalToken: WORKER });
+    insertJob(raw, {
+      job_id: "miss", enqueue_at: 1000, status: "running",
+      output_mode: "subtitle_only", subtitle_delivery: "burned",
+    });
+    const { deps } = makeClock(2000);
+    const r = await call(env, deps, "POST", "/internal/jobs/miss/complete", {
+      worker: WORKER,
+      body: { claim_version: 0, artifacts: { srt_key: S("miss") } },
+    });
+    expect(r.status).toBe(400);
+    expect(r.json.error.code).toBe("missing_artifact");
+  });
+
+  it("rejects an unexpected key (both+burned with an srt_key) -> 400", async () => {
+    const { env, raw } = makeEnv({ internalToken: WORKER });
+    insertJob(raw, {
+      job_id: "extra", enqueue_at: 1000, status: "running",
+      output_mode: "both", subtitle_delivery: "burned",
+    });
+    const { deps } = makeClock(2000);
+    const r = await call(env, deps, "POST", "/internal/jobs/extra/complete", {
+      worker: WORKER,
+      body: { claim_version: 0, artifacts: { video_key: V("extra"), srt_key: S("extra") } },
+    });
+    expect(r.status).toBe(400);
+    expect(r.json.error.code).toBe("unexpected_artifact");
+  });
+});

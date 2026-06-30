@@ -136,10 +136,9 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   if (advisoryDurationMs !== undefined && advisoryDurationMs < 0) {
     throw new HttpError(400, "invalid_field", "advisory_duration_ms must be >= 0");
   }
-  // Burned subtitles are an M2.1 feature; T2.1 accepts the field but only delivers SRT.
-  if (subtitleDelivery !== "srt") {
-    throw new HttpError(400, "unsupported_subtitle_delivery", "burned subtitles are not available yet");
-  }
+  // M2.1: burned / both subtitle delivery is implemented end-to-end (kernel libass re-encode ->
+  // the worker uploads the burned video as video_key). reqEnum already constrains
+  // subtitle_delivery to srt|burned|both, so all three are accepted here.
 
   // Abuse gate (T2.4) BEFORE the reserve: a failed bot challenge must not even touch the counters.
   const ticket = await admitJob(ctx, body);
@@ -329,6 +328,36 @@ export async function heartbeat(ctx: Ctx): Promise<Response> {
   return json({ lease_expires_at: leaseExpiresAt });
 }
 
+// M2.1 delivery contract: the artifact set a completed job carries must match its output_mode +
+// subtitle_delivery EXACTLY. A burned subtitle reuses video_key (no separate burned_video_key) — the
+// burned video IS the video deliverable. Mirrors stages.mux()/worker _deliverables: video is expected
+// when burning OR dubbing; srt when delivering srt. Missing a required key or sending one the mode
+// never produces is a 400, so a worker/kernel drift fails loud rather than storing a half/mislabeled
+// artifact set the download API would then mis-serve.
+export function assertArtifactsMatchMode(
+  outputMode: string,
+  subtitleDelivery: string,
+  videoKey: string | undefined,
+  srtKey: string | undefined,
+): void {
+  const wantSubs = outputMode === "subtitle_only" || outputMode === "both";
+  const burn = wantSubs && (subtitleDelivery === "burned" || subtitleDelivery === "both");
+  const expectVideo = burn || outputMode === "dub_only" || outputMode === "both";
+  const expectSrt = wantSubs && (subtitleDelivery === "srt" || subtitleDelivery === "both");
+  const where = `output_mode=${outputMode} subtitle_delivery=${subtitleDelivery}`;
+  for (const [name, present, expected] of [
+    ["video_key", videoKey !== undefined, expectVideo],
+    ["srt_key", srtKey !== undefined, expectSrt],
+  ] as const) {
+    if (expected && !present) {
+      throw new HttpError(400, "missing_artifact", `${name} is required for ${where}`);
+    }
+    if (!expected && present) {
+      throw new HttpError(400, "unexpected_artifact", `${name} is not produced for ${where}`);
+    }
+  }
+}
+
 // POST /internal/jobs/:id/complete — idempotent terminal. Only the winning claim_version while
 // still running flips it to done; duplicate/late/superseded calls are no-ops (first terminal wins).
 export async function complete(ctx: Ctx): Promise<Response> {
@@ -349,9 +378,16 @@ export async function complete(ctx: Ctx): Promise<Response> {
       throw new HttpError(400, "invalid_artifact_key", `${name} must be under ${prefix}`);
     }
   }
-  const artifacts = JSON.stringify({ video_key: videoKey ?? null, srt_key: srtKey ?? null });
   const existing = await getJobRow(ctx, jobId);
   if (!existing) throw new HttpError(404, "not_found", "job not found");
+  // Validate the delivered set ONLY for the call that will actually complete the job (running under
+  // THIS claim_version). A stale worker (superseded claim_version) must still get 409, not a 400 on
+  // the matrix; a late/duplicate call on an already-terminal job is an idempotent no-op whose
+  // artifacts are discarded — neither should be rejected by the mode matrix (first-terminal-wins).
+  if (existing.status === "running" && existing.claim_version === claimVersion) {
+    assertArtifactsMatchMode(existing.output_mode, existing.subtitle_delivery, videoKey, srtKey);
+  }
+  const artifacts = JSON.stringify({ video_key: videoKey ?? null, srt_key: srtKey ?? null });
   const res = await ctx.env.DB.prepare(
     `UPDATE jobs SET status = 'done', finished_at = ?, artifacts = ?, current_stage = 'done', lease_expires_at = NULL
        WHERE job_id = ? AND status = 'running' AND claim_version = ?`,

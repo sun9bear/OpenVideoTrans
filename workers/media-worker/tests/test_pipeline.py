@@ -12,14 +12,46 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from autodub_core import JobPaths
 from media_worker.control_plane import ProviderSnapshot
-from media_worker.pipeline import FreePoolExhausted, inject_provider_env, run_real_pipeline
+from media_worker.pipeline import (
+    FreePoolExhausted,
+    _deliverables,
+    inject_provider_env,
+    run_real_pipeline,
+)
 from mw_fakes import FakeControlPlane, FakeStorage, make_job
 from provider_adapters import LanguageError, ProviderUnavailable, QuotaExhausted
 
 
 def _make_key(job_id: str, cv: int, name: str) -> str:
     return f"artifacts/{job_id}/{cv}/{name}"
+
+
+def test_deliverables_burned_reuses_video_key(tmp_path: Path) -> None:
+    # M2.1: a burned subtitle is delivered AS the video_key (no burned_video_key); the worker
+    # uploads paths.burned_video, mirroring stages.mux()'s deliver_video + complete()'s matrix.
+    paths = JobPaths(tmp_path)
+    both_burned = _deliverables(make_job(output_mode="both", subtitle_delivery="burned"), paths)
+    assert both_burned == [("video_key", "output.mp4", "video/mp4", paths.burned_video)]
+
+    both_both = _deliverables(make_job(output_mode="both", subtitle_delivery="both"), paths)
+    assert [(f[0], f[3]) for f in both_both] == [
+        ("video_key", paths.burned_video),
+        ("srt_key", paths.subtitles),
+    ]
+
+    sub_burned = _deliverables(
+        make_job(output_mode="subtitle_only", subtitle_delivery="burned"), paths
+    )
+    assert sub_burned == [("video_key", "output.mp4", "video/mp4", paths.burned_video)]
+
+    # delivery=srt (default): the plain dub is the video deliverable, NOT the burned video.
+    both_srt = _deliverables(make_job(output_mode="both", subtitle_delivery="srt"), paths)
+    assert [(f[0], f[3]) for f in both_srt] == [
+        ("video_key", paths.dubbed_video),
+        ("srt_key", paths.subtitles),
+    ]
 
 
 def _avail(mapping: dict[str, set[str]]) -> Callable[[str], frozenset[str]]:
