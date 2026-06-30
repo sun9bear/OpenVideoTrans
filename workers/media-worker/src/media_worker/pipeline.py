@@ -413,6 +413,11 @@ def run_real_pipeline(
     clock = now_ms if now_ms is not None else _now_ms
     # Fail-closed language gate (T1.3f) BEFORE any provider/transcode work.
     assert_language_pair(job.source_lang_hint, job.target_lang, job.output_mode)
+    # Per-locale burn font for the libass overlay (M2.1). Resolved HERE — the worker may import the
+    # language registry; the kernel may NOT (boundary). None when the locale needs no special font
+    # (Latin) or is uncatalogued; the kernel then uses the libass default.
+    burn_cap = get_capability(job.target_lang)
+    burn_font = burn_cap.burn_font if burn_cap is not None else None
     paths = JobPaths(Path(workdir) / "pipeline").ensure()
     kinds = _stage_kinds(job.output_mode)
     excluded: dict[str, set[str]] = {k: set() for k in _STAGE_KINDS}
@@ -434,7 +439,7 @@ def run_real_pipeline(
             # target_lang is a REQUIRED kwarg of autodub_core.run_pipeline (it derives the rest from
             # `job`, but the signature still requires it) — omitting it raises TypeError (CodeX P1).
             run_fn(paths, kernel_resolver, source=str(in_path),
-                   target_lang=routed.target_lang, job=routed)
+                   target_lang=routed.target_lang, job=routed, burn_font=burn_font)
             return _collect(storage, job, claim_version, paths, make_key)
         except FreePoolExhausted:
             # A sentinel-routed MT/TTS stage the kernel actually REACHED (the job had speech /

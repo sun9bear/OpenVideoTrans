@@ -228,6 +228,40 @@ def test_mux_burned_only_flag_off_raises(tmp_path: Path, monkeypatch) -> None:  
     assert not paths.subtitles.exists()
 
 
+def test_mux_subtitle_only_both_flag_off_raises(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # subtitle_only + both with the burn OFF: there is no dub video to carry the burned deliverable
+    # the contract requires, and degrading to srt-only would diverge from control-plane complete()'s
+    # mode matrix (which expects a video_key for any burn delivery and cannot see the kernel flag).
+    # Fail loud instead of stranding the job (uniform with the subtitle_only+burned case).
+    paths = JobPaths(tmp_path).ensure()
+    _write_segments(paths, [("hello", "你好")])
+    monkeypatch.setattr(stages.config, "BURN_SUBTITLES_ENABLED", False)
+    with pytest.raises(NotImplementedError, match="no dub video"):
+        stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="both")
+    assert not paths.subtitles.exists()
+
+
+def test_mux_threads_burn_font_to_force_style(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # The per-locale font is threaded into the libass force_style so a CJK burn is legible; with no
+    # font the kernel passes None (libass default, fine for Latin).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    _mock_ffmpeg(monkeypatch)
+    seen: dict[str, object] = {}
+
+    def _capture(video, srt, out, **kw) -> None:  # noqa: ANN001
+        seen.update(kw)
+        Path(out).write_bytes(b"burned")
+
+    monkeypatch.setattr(stages.ff, "burn_subtitles", _capture)
+    stages.mux(paths, output_mode="both", subtitle_delivery="burned", burn_font="Noto Sans CJK SC")
+    assert seen["force_style"] == "FontName=Noto Sans CJK SC"
+    seen.clear()
+    stages.mux(paths, output_mode="both", subtitle_delivery="burned", force=True)  # no font
+    assert seen["force_style"] is None
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

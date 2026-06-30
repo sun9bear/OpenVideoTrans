@@ -380,6 +380,7 @@ def mux(
     subtitle_lang: str = "target",
     subtitle_delivery: str = "srt",
     marking: AigcMarking | None = None,
+    burn_font: str | None = None,
 ) -> Path:
     """Compose the job's deliverables per ``output_mode`` (T1.3d).
 
@@ -427,6 +428,15 @@ def mux(
             raise NotImplementedError(
                 "subtitle_delivery='burned' needs BURN_SUBTITLES_ENABLED or an srt channel; "
                 "the burn re-encode is off and there is no srt fallback")
+        if not want_video:
+            # subtitle_only + 'both' with the burn OFF: there is no dub video to carry the burned
+            # deliverable the contract still requires. The control-plane complete() matrix expects a
+            # video_key for ANY burn delivery and cannot see this kernel flag, so degrading to
+            # srt-only would diverge from it and strand the job (uploads srt, complete() 400s). Fail
+            # loud (coded terminal) instead — uniform with the burned-only case above.
+            raise NotImplementedError(
+                "subtitle_delivery='both' with the burn re-encode off and no dub video cannot "
+                "produce the burned video the delivery contract requires")
         _log("mux: burned subtitles requested but BURN_SUBTITLES_ENABLED is off; srt only")
 
     # When burning, the burned_video IS the delivered video and dubbed_video is only its
@@ -452,7 +462,8 @@ def mux(
         # when burning, so a non-burn job's key stays byte-identical to before (no needless
         # cache churn / marker invalidation). A BURN_MAX_HEIGHT/crf/preset change re-burns.
         cache_key_parts.append(
-            f"burn:{config.BURN_MAX_HEIGHT}:{config.BURN_CRF}:{config.BURN_PRESET}"
+            f"burn:{config.BURN_MAX_WIDTH}:{config.BURN_MAX_HEIGHT}:{config.BURN_CRF}:"
+            f"{config.BURN_PRESET}:{burn_font or ''}"
         )
     cache_key = "|".join(cache_key_parts)
     marker = paths.output / ".mux_cache"
@@ -520,8 +531,12 @@ def mux(
                            disclosure=aigc.subtitle_disclosure(marking))
             ff.burn_subtitles(
                 burn_src, srt_for_burn, paths.burned_video,
-                max_height=config.BURN_MAX_HEIGHT, timeout_sec=config.BURN_ENCODE_TIMEOUT_SEC,
+                max_width=config.BURN_MAX_WIDTH, max_height=config.BURN_MAX_HEIGHT,
+                timeout_sec=config.BURN_ENCODE_TIMEOUT_SEC,
                 crf=config.BURN_CRF, preset=config.BURN_PRESET,
+                # Per-locale libass font (resolved by the orchestrator from the language registry —
+                # the kernel stays pure, no registry import). None -> libass default (Latin).
+                force_style=(f"FontName={burn_font}" if burn_font else None),
                 metadata=aigc.metadata_args(marking, output_mode),
             )
         _log(f"mux: wrote {paths.burned_video.name}")
@@ -602,6 +617,7 @@ def run_pipeline(
     subtitle_lang: str = "target",
     subtitle_delivery: str = "srt",
     aigc_marking: AigcMarking | None = None,
+    burn_font: str | None = None,
     job: Job | None = None,
 ) -> Path:
     """End-to-end local pipeline: ingest -> prepare -> transcribe -> translate ->
@@ -645,9 +661,12 @@ def run_pipeline(
     if output_mode in ("dub_only", "both"):
         tts(paths, resolver, tts_provider, force=force)
         align(paths, force=force)
+    # burn_font is a caller-supplied opaque font name (the orchestrator resolves it from the
+    # language registry — the kernel never imports provider-adapters). It is NOT derived from the
+    # Job, so it stays caller-supplied even on the job-driven path.
     out = mux(paths, keep_ambient=keep_ambient, force=force, output_mode=output_mode,
               subtitle_lang=subtitle_lang, subtitle_delivery=subtitle_delivery,
-              marking=aigc_marking)
+              marking=aigc_marking, burn_font=burn_font)
     if job is not None:
         # Record the embed method only when a mark was actually applied (mux sets
         # marking.applied on the non-empty deliverable set), so the manifest never

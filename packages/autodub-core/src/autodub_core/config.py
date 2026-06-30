@@ -118,11 +118,14 @@ DEFAULT_CHARS_PER_SEC = 15.0   # fallback budget hint when no probe is available
 BURN_SUBTITLES_ENABLED = True
 
 # Burn re-encode caps — keep a burn job bounded on a small (2GB) box:
-#  * BURN_MAX_HEIGHT: downscale a taller source (keeping aspect, even dims) BEFORE the
-#    libass overlay, so a 4K source can't blow up encode time/memory.
+#  * BURN_MAX_WIDTH / BURN_MAX_HEIGHT: downscale a source that exceeds EITHER cap (keeping
+#    aspect, even dims, never upscaling) BEFORE the libass overlay, so a large-area source —
+#    incl. an ultra-wide / anamorphic frame whose height alone is within the cap — can't blow
+#    up encode time/memory on a small box.
 #  * BURN_ENCODE_TIMEOUT_SEC: kill a wedged re-encode rather than hold the lease forever
 #    (the worker maps the resulting failure to a coded terminal, never a paid retry).
 #  * BURN_CRF / BURN_PRESET: x264 quality / speed tradeoff tuned for a free, time-bounded box.
+BURN_MAX_WIDTH = 1920
 BURN_MAX_HEIGHT = 1080
 BURN_ENCODE_TIMEOUT_SEC = 1800
 BURN_CRF = 23

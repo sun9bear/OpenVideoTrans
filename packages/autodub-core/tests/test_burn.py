@@ -11,19 +11,25 @@ from autodub_core import ffmpeg_utils as ff
 
 
 # --- _burn_vf (pure filter builder) ------------------------------------------ #
-def test_burn_vf_scales_when_taller_than_cap() -> None:
-    # a 4K source is downscaled to the cap BEFORE the libass overlay
-    assert ff._burn_vf(3840, 2160, 1080) == "scale=-2:1080,subtitles=subs.srt"
+def test_burn_vf_scales_4k_down_to_cap() -> None:
+    # a 4K source is downscaled to fit within the WxH cap BEFORE the libass overlay
+    assert ff._burn_vf(3840, 2160, 1920, 1080) == "scale=1920:1080,subtitles=subs.srt"
+
+
+def test_burn_vf_caps_ultrawide_by_width() -> None:
+    # an ultra-wide source whose HEIGHT is within the cap must still be bounded by WIDTH (the
+    # height-only-cap gap): 7680x1080 -> factor 0.25 -> 1920x270, not fed through at full ~8 MP.
+    assert ff._burn_vf(7680, 1080, 1920, 1080) == "scale=1920:270,subtitles=subs.srt"
 
 
 def test_burn_vf_no_scale_within_cap() -> None:
-    # never upscale: a source at or below the cap gets only the subtitles filter
-    assert ff._burn_vf(1280, 720, 1080) == "subtitles=subs.srt"
-    assert ff._burn_vf(1920, 1080, 1080) == "subtitles=subs.srt"  # exactly at cap
+    # never upscale: a source within BOTH caps gets only the subtitles filter
+    assert ff._burn_vf(1280, 720, 1920, 1080) == "subtitles=subs.srt"
+    assert ff._burn_vf(1920, 1080, 1920, 1080) == "subtitles=subs.srt"  # exactly at cap
 
 
 def test_burn_vf_force_style_is_quoted() -> None:
-    vf = ff._burn_vf(1280, 720, 1080, force_style="FontName=Noto Sans CJK SC")
+    vf = ff._burn_vf(1280, 720, 1920, 1080, force_style="FontName=Noto Sans CJK SC")
     assert vf == "subtitles=subs.srt:force_style='FontName=Noto Sans CJK SC'"
 
 
@@ -79,7 +85,9 @@ def test_burn_subtitles_passes_timeout_and_writes_atomic(
         return ""
 
     monkeypatch.setattr(ff, "_run", _fake_run)
-    ff.burn_subtitles(video, srt, out, max_height=1080, timeout_sec=123, crf=20, preset="fast")
+    ff.burn_subtitles(
+        video, srt, out, max_width=1920, max_height=1080, timeout_sec=123, crf=20, preset="fast"
+    )
     assert out.exists() and out.read_bytes() == b"burned"
     assert captured["timeout"] == 123
     assert captured["cwd"] is not None  # ran from the staged-srt temp dir

@@ -353,19 +353,25 @@ def probe_dimensions(path: str | Path) -> tuple[int, int]:
 _BURN_SUBS_NAME = "subs.srt"
 
 
-def _burn_vf(width: int, height: int, max_height: int, *,
+def _burn_vf(width: int, height: int, max_width: int, max_height: int, *,
              subs_name: str = _BURN_SUBS_NAME, force_style: str | None = None) -> str:
     """Build the ``-vf`` value for a subtitle burn-in (pure; no I/O).
 
-    Caps the picture at ``max_height`` (downscale only, keep aspect, even dims) BEFORE
-    the libass overlay so a 4K source can't blow up the re-encode; a source already at
-    or below the cap is NOT scaled (never upscale). ``force_style`` (when given) selects
-    the libass style — e.g. a CJK font name so the burn renders non-Latin scripts.
+    Downscales the picture to fit within ``max_width`` x ``max_height`` BEFORE the libass
+    overlay so a large-area source — including an ultra-wide / anamorphic frame whose height
+    alone is within the cap — can't blow up the re-encode. The aspect ratio is preserved (a
+    single scale factor), dimensions are forced even (x264), and a source already within BOTH
+    caps is NOT scaled (never upscale). ``force_style`` (when given) selects the libass style —
+    e.g. a CJK font name so the burn renders non-Latin scripts.
     """
     parts: list[str] = []
-    if height > max_height:
-        # -2 keeps the aspect ratio and forces an even width (x264 needs even dims).
-        parts.append(f"scale=-2:{max_height}")
+    # Downscale-only: the factor is capped at 1.0, so a source within both caps is untouched.
+    factor = min(max_width / width, max_height / height, 1.0)
+    if factor < 1.0:
+        # Force even dims (x264 needs them); clamp to >= 2 so a tiny factor can't round to 0.
+        target_w = max(2, int(width * factor) // 2 * 2)
+        target_h = max(2, int(height * factor) // 2 * 2)
+        parts.append(f"scale={target_w}:{target_h}")
     subs = f"subtitles={subs_name}"
     if force_style:
         subs += f":force_style='{force_style}'"
@@ -375,7 +381,7 @@ def _burn_vf(width: int, height: int, max_height: int, *,
 
 def burn_subtitles(
     video: str | Path, srt: str | Path, out: str | Path, *,
-    max_height: int, timeout_sec: float,
+    max_width: int, max_height: int, timeout_sec: float,
     crf: int = 23, preset: str = "veryfast",
     force_style: str | None = None, metadata: list[str] | None = None,
 ) -> None:
@@ -393,7 +399,7 @@ def burn_subtitles(
     # validate the source container HERE too so a crafted input can't reach ffmpeg.
     assert_allowed_input_format(video)
     width, height = probe_dimensions(video)
-    vf = _burn_vf(width, height, max_height, force_style=force_style)
+    vf = _burn_vf(width, height, max_width, max_height, force_style=force_style)
     extra = list(metadata or [])
     src = Path(video).resolve()  # absolute: ffmpeg runs with cwd = the srt's temp dir
     # Stage the srt under a plain name in a temp dir and run ffmpeg from there, so the
