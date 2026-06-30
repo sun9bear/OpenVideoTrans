@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ERROR_CODES, REFUNDABLE_ERROR_CODES } from "../src/errors";
+import { ERROR_CODES, REFUNDABLE_ERROR_CODES, WORKER_REPORTABLE_ERROR_CODES } from "../src/errors";
 import { call, insertJob, makeClock, makeEnv } from "./helpers/bindings";
 
 // M2-CLOSE PR-C (#26): the error-code registry consolidation. src/errors.ts is the SINGLE source of
@@ -43,6 +43,17 @@ describe("error-code registry (single source of truth, PR-C consolidation)", () 
     expect(REFUNDABLE_ERROR_CODES).not.toContain("source_verify_failed");
   });
 
+  it("WORKER_REPORTABLE excludes the CP-sweeper-only codes (worker_lost / deadline_exceeded)", () => {
+    // Both are REFUNDABLE codes the sweeper alone may emit; a worker must not be able to self-report
+    // them via /fail and trigger a refund of a job it actually claimed/ran (CodeX R2).
+    expect(WORKER_REPORTABLE_ERROR_CODES).not.toContain("worker_lost");
+    expect(WORKER_REPORTABLE_ERROR_CODES).not.toContain("deadline_exceeded");
+    // it is otherwise the full registry: every worker-reportable code is a registry code, and the only
+    // two omissions are the CP-sweeper terminals.
+    for (const c of WORKER_REPORTABLE_ERROR_CODES) expect(ERROR_CODES).toContain(c);
+    expect(WORKER_REPORTABLE_ERROR_CODES.length).toBe(ERROR_CODES.length - 2);
+  });
+
   it("the /fail endpoint validates error_code against the consolidated registry", async () => {
     const { env, raw } = makeEnv({ internalToken: WORKER });
     const clock = makeClock(1000);
@@ -67,5 +78,15 @@ describe("error-code registry (single source of truth, PR-C consolidation)", () 
       body: { claim_version: 1, error_code: "totally_made_up" },
     });
     expect(bad.status).toBe(400);
+    // a CP-sweeper-only code (worker_lost / deadline_exceeded) is ALSO rejected at /fail — a worker may
+    // not self-report a refundable terminal the sweeper alone owns (CodeX R2). reqEnum rejects it before
+    // any DB write, regardless of the job's current state.
+    for (const cpOnly of ["worker_lost", "deadline_exceeded"] as const) {
+      const res = await call(env, clock.deps, "POST", "/internal/jobs/r/fail", {
+        worker: WORKER,
+        body: { claim_version: 1, error_code: cpOnly },
+      });
+      expect(res.status, `${cpOnly} must be rejected at /fail`).toBe(400);
+    }
   });
 });

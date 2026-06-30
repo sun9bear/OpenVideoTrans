@@ -49,7 +49,19 @@ export const REFUNDABLE_ERROR_CODES = [
   "deadline_exceeded",
 ] as const satisfies readonly JobErrorCode[];
 
-// Named constants for the codes the CONTROL PLANE itself writes on a job (outside the worker /fail
-// path), so the sweeper's terminal UPDATEs bind a typed constant instead of a bare SQL string literal.
+// Named constants for the codes the CONTROL PLANE sweeper itself writes on a job (NEVER reported by a
+// worker), so the sweeper's terminal UPDATEs bind a typed constant instead of a bare SQL string literal.
+//   • worker_lost      — recoverLeases, an attempt-exhausted lost lease.
+//   • deadline_exceeded — enforceDeadlines, a non-terminal job past its deadline_at.
 export const WORKER_LOST: JobErrorCode = "worker_lost";
 export const DEADLINE_EXCEEDED: JobErrorCode = "deadline_exceeded";
+
+// Both CP-sweeper terminals are REFUNDABLE, so a worker must NOT be able to report them via
+// POST /internal/jobs/:id/fail — that would let an authenticated worker terminalize + refund a job it
+// actually claimed/ran, breaking the no-output-refund invariant the sweeper alone upholds (CodeX R2).
+// The worker /fail allowlist is therefore the registry MINUS these CP-internal codes; jobs.ts fail()
+// validates `error_code` against THIS set, not the full ERROR_CODES.
+const CP_SWEEPER_ONLY: readonly JobErrorCode[] = [WORKER_LOST, DEADLINE_EXCEEDED];
+export const WORKER_REPORTABLE_ERROR_CODES: readonly JobErrorCode[] = ERROR_CODES.filter(
+  (c) => !CP_SWEEPER_ONLY.includes(c),
+);

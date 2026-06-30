@@ -4,7 +4,7 @@ import { HttpError, asObject, json, optInt, optString, readJson, reqEnum, reqInt
 import { admitJob } from "./abuse";
 import { compensateReserve, reserveDualPool, reservedMinutesForMode } from "./caps";
 import { claimOne } from "./claim";
-import { ERROR_CODES } from "./errors";
+import { WORKER_REPORTABLE_ERROR_CODES } from "./errors";
 import { isKnownStage, logEvent, parseProgressMeta } from "./obs";
 import { presignR2Url } from "./sigv4";
 import { requireR2, verifyUpload } from "./uploads";
@@ -50,8 +50,9 @@ interface JobRow {
   refunded: number;
 }
 
-// ERROR_CODES (the /fail validation set) is the single-source registry from errors.ts, pinned to the
-// frozen contract ErrorCode union — imported above, no longer duplicated here.
+// The worker /fail validation set is WORKER_REPORTABLE_ERROR_CODES (errors.ts) — the single-source
+// registry MINUS the CP-sweeper-only terminals (worker_lost / deadline_exceeded), which a worker must
+// never be able to self-report (both are refundable; only the sweeper may emit them). See errors.ts.
 
 export function rowToJob(r: JobRow): Job {
   return {
@@ -362,7 +363,7 @@ export async function fail(ctx: Ctx): Promise<Response> {
   const jobId = ctx.params.id!;
   const body = asObject(await readJson(ctx.request));
   const claimVersion = reqInt(body, "claim_version");
-  const errorCode = reqEnum(body, "error_code", ERROR_CODES);
+  const errorCode = reqEnum(body, "error_code", WORKER_REPORTABLE_ERROR_CODES);
   const errorDetail = optString(body, "error_detail");
   const existing = await getJobRow(ctx, jobId);
   if (!existing) throw new HttpError(404, "not_found", "job not found");
