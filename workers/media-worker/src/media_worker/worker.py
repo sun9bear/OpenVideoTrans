@@ -13,6 +13,7 @@ import shutil
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from autodub_core.isolation import ensure_within, safe_component
@@ -23,6 +24,7 @@ from .admission import SourceRejected, admit_source
 from .config import DEFAULT_CONFIG, WorkerConfig
 from .control_plane import Claim, ControlPlane, ProgressTelemetry, StaleClaimError
 from .pipeline import FreePoolExhausted, run_real_pipeline
+from .scheduling import ClaimPlan, SlotTracker, weight_class
 from .storage import SourceTooLargeError, Storage
 
 logger = logging.getLogger("media_worker")
@@ -370,10 +372,20 @@ def run_forever(
     config: WorkerConfig | None = None,
     poll_idle_sec: float = 2.0,
     stop_event: threading.Event | None = None,
+    worker_concurrency: int = 1,
+    light_slot_reserve: int = 1,
     admit: Admitter = admit_source,
     produce: ArtifactProducer = _default_produce,
 ) -> None:
-    """Long-poll the claim loop until stopped. Clears orphan dirs at startup (crash recovery)."""
+    """Long-poll claim loop with bounded concurrency + the free_min_share light-slot reservation.
+
+    A SINGLE dispatcher claims jobs and runs them in a pool of `worker_concurrency` threads,
+    reserving `light_slot_reserve` slots for LIGHT (subtitle_only) jobs (scheduling.py): when the
+    heavy budget is full it claims `light_only`, so a stream of dub jobs can never starve a
+    subtitle job — WITHOUT preemption (运行中不抢占). Clears orphan dirs at startup; drains
+    in-flight jobs on stop. Only the dispatcher calls tracker.add (so the box never over-fills);
+    the pool threads call tracker.remove.
+    """
     base = Path(workdir_base)
     base.mkdir(parents=True, exist_ok=True)
     cleared = clean_orphan_workdirs(base)
@@ -387,26 +399,71 @@ def run_forever(
     # AND refresh it per claim (plan §14: worker pulls config at startup + claim time) so runtime
     # lease-knob changes take effect without a restart; fall back to the last-known config on error.
     cfg = config if config is not None else _fetch_config(cp, DEFAULT_CONFIG)
-    while stop_event is None or not stop_event.is_set():
-        claim = None
+    tracker = SlotTracker(worker_concurrency, light_slot_reserve)
+    # Leaving the `with` calls shutdown(wait=True) -> every in-flight job finishes before
+    # run_forever returns (a stop mid-job drains the pool, never abandons the job).
+    with ThreadPoolExecutor(max_workers=worker_concurrency, thread_name_prefix="ovt-job") as pool:
+        while stop_event is None or not stop_event.is_set():
+            plan = tracker.plan()
+            if plan is ClaimPlan.NONE:
+                # Box full: park until a pool thread frees a slot (or the timeout elapses so we
+                # re-check stop_event). No claim is issued while full.
+                tracker.wait_for_slot(poll_idle_sec)
+                continue
+            claim = None
+            try:
+                # When only the reserved slots remain, ask for a LIGHT job ONLY, so a dub job
+                # can never take a slot reserved for subtitles (free_min_share).
+                claim = cp.claim(light_only=(plan is ClaimPlan.LIGHT_ONLY))
+                if claim is not None:
+                    if config is None:
+                        cfg = _fetch_config(cp, cfg)
+                    weight = weight_class(claim.job.output_mode)
+                    tracker.add(weight)  # reserve the slot BEFORE submit (dispatcher = sole writer)
+                    _spawn(pool, tracker, weight, cp, storage, claim, base, cfg, admit, produce)
+            except Exception:
+                # A single iteration's unexpected error (e.g. a control-plane blip) must not kill
+                # the long-running worker. Log generically — no exception text (secret hygiene).
+                logger.warning("worker iteration failed; continuing")
+            if claim is None:
+                # Nothing claimable for this plan (queue drained, or only heavy jobs remain under
+                # a light-only plan): idle-poll, honoring stop. A freed heavy slot is picked up
+                # next poll.
+                if stop_event is not None:
+                    if stop_event.wait(poll_idle_sec):
+                        break
+                else:
+                    time.sleep(poll_idle_sec)
+
+
+def _spawn(
+    pool: ThreadPoolExecutor,
+    tracker: SlotTracker,
+    weight: str,
+    cp: ControlPlane,
+    storage: Storage,
+    claim: Claim,
+    base: Path,
+    cfg: WorkerConfig,
+    admit: Admitter,
+    produce: ArtifactProducer,
+) -> None:
+    """Run a claimed job in the pool, ALWAYS releasing its slot when it finishes (success or
+    crash)."""
+
+    def _task() -> None:
         try:
-            claim = cp.claim()
-            if claim is not None:
-                if config is None:
-                    cfg = _fetch_config(cp, cfg)
-                process_job(
-                    cp, storage, claim, workdir_base=base, config=cfg, admit=admit, produce=produce
-                )
+            process_job(
+                cp, storage, claim, workdir_base=base, config=cfg, admit=admit, produce=produce
+            )
         except Exception:
-            # A single iteration's unexpected error (e.g. a control-plane blip) must not kill the
-            # long-running worker. Log generically — no exception text (secret hygiene).
-            logger.warning("worker iteration failed; continuing")
-        if claim is None:
-            if stop_event is not None:
-                if stop_event.wait(poll_idle_sec):
-                    break
-            else:
-                time.sleep(poll_idle_sec)
+            # process_job maps known failures to fail() itself; this guards a truly unexpected
+            # crash so a pool thread can't die with the slot still counted. Job id only (hygiene).
+            logger.warning("job %s task crashed unexpectedly", claim.job.job_id)
+        finally:
+            tracker.remove(weight)
+
+    pool.submit(_task)
 
 
 def _fetch_config(cp: ControlPlane, fallback: WorkerConfig) -> WorkerConfig:

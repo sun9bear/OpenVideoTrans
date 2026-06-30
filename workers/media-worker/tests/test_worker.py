@@ -239,8 +239,8 @@ def test_run_forever_refreshes_config_per_claim(tmp_path: Path) -> None:
             self.config_calls += 1
             return super().get_config()
 
-        def claim(self) -> Claim | None:
-            claimed = super().claim()
+        def claim(self, *, light_only: bool = False) -> Claim | None:
+            claimed = super().claim(light_only=light_only)
             if claimed is None:
                 self._stop_after.set()  # work drained -> end the loop
             return claimed

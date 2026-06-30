@@ -87,6 +87,11 @@ WHERE job_id = (
     SELECT job_id FROM jobs
     WHERE (status = 'queued' OR (status = 'running' AND lease_expires_at <= ?))
       AND attempt < ?
+      -- PR-D free_min_share: when bound 1 (lightOnly) restrict the candidate set to LIGHT
+      -- (subtitle_only) jobs so a reserved slot never admits a dub job; bound 0 = no filter
+      -- (the default claim is byte-identical to before). A WHERE key only — the §8 ORDER BY below
+      -- is untouched, so the comparator/SQL mirror proven in claim.test.ts still holds.
+      AND (? = 0 OR output_mode = 'subtitle_only')
     ORDER BY
       -- Key 0 (PR-C deadline backstop): overdue rows (deadline_at <= now) first, oldest deadline
       -- first, promoted above the mode tier (cross-mode anti-starvation). A non-overdue row gets a
@@ -122,14 +127,19 @@ export interface ClaimOpts {
   leaseMs: number;
   maxAttempt: number;
   agingBucketMs: number;
+  // M2-CLOSE PR-D (#26): free_min_share reservation. When the worker's heavy budget is full it claims
+  // with lightOnly=true, restricting the candidate set to subtitle_only (LIGHT) jobs so a reserved slot
+  // is never taken by a dub job. A WHERE filter only — it does NOT touch the §8 ORDER BY. Default off.
+  lightOnly?: boolean;
 }
 
 // Positional params in CLAIM_SQL `?` order:
-// lease(now, leaseMs) · started_at(now) · innerWHERE(now, maxAttempt) · deadlineKeys(now, now) ·
+// lease(now, leaseMs) · started_at(now) · innerWHERE(now, maxAttempt, lightOnly) · deadlineKeys(now, now) ·
 // aging(now, bucket) · outerWHERE(now, maxAttempt)
 export function claimParams(o: ClaimOpts): number[] {
+  const lightOnly = o.lightOnly ? 1 : 0;
   return [
-    o.now, o.leaseMs, o.now, o.now, o.maxAttempt, o.now, o.now, o.now, o.agingBucketMs, o.now, o.maxAttempt,
+    o.now, o.leaseMs, o.now, o.now, o.maxAttempt, lightOnly, o.now, o.now, o.now, o.agingBucketMs, o.now, o.maxAttempt,
   ];
 }
 

@@ -113,9 +113,16 @@ class FakeControlPlane:
             raise ControlPlaneError("config endpoint unavailable")
         return self._config
 
-    def claim(self) -> Claim | None:
+    def claim(self, *, light_only: bool = False) -> Claim | None:
         with self._lock:
-            return self._claims.pop(0) if self._claims else None
+            if not self._claims:
+                return None
+            if light_only:
+                for i, c in enumerate(self._claims):
+                    if c.job.output_mode == "subtitle_only":
+                        return self._claims.pop(i)
+                return None
+            return self._claims.pop(0)
 
     def heartbeat(
         self,

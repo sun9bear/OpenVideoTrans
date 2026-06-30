@@ -156,7 +156,9 @@ def require_secure_base(base_url: str) -> None:
 
 class ControlPlane(Protocol):
     def get_config(self) -> WorkerConfig: ...
-    def claim(self) -> Claim | None: ...
+    # light_only (M2-CLOSE PR-D, #26): when the worker's heavy budget is full it asks for a LIGHT
+    # (subtitle_only) job only, so the reserved free_min_share slots are never taken by a dub job.
+    def claim(self, *, light_only: bool = False) -> Claim | None: ...
     def heartbeat(
         self,
         job_id: str,
@@ -256,8 +258,12 @@ class HttpControlPlane:
         # Bootstrap pull (SECRETS): R2 storage creds + free-provider keys over the authed channel.
         return parse_credentials(self._call("GET", "/internal/credentials"))
 
-    def claim(self) -> Claim | None:
-        resp = self._call("POST", "/internal/jobs/claim")
+    def claim(self, *, light_only: bool = False) -> Claim | None:
+        # light_only=True restricts the claim to a LIGHT (subtitle_only) job (free_min_share
+        # reserved slot, PR-D). Sent only when True so a normal claim keeps its empty body
+        # (backward compatible).
+        body = {"light_only": True} if light_only else None
+        resp = self._call("POST", "/internal/jobs/claim", body)
         job_data = resp.get("job")
         if not job_data:
             return None
