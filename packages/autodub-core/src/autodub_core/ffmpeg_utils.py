@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 import wave
 from pathlib import Path
 
@@ -27,13 +28,23 @@ def have(binary: str) -> bool:
     return shutil.which(binary) is not None
 
 
-def _run(cmd: list[str]) -> str:
+def _run(cmd: list[str], *, timeout: float | None = None, cwd: str | Path | None = None) -> str:
     # ffmpeg/ffprobe emit UTF-8; decode as UTF-8 (not the Windows locale/cp936) and
     # never crash the output-reader thread on odd bytes. AIGC metadata carries
     # non-ASCII (e.g. Chinese), which a locale decode would choke on.
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
+    # ``timeout`` bounds a long re-encode (M2.1 burn): subprocess.run kills the child on
+    # expiry, and we surface it as FfmpegError so a wedged encode never holds the lease.
+    # ``cwd`` lets the burn step run from the subtitle file's directory so the libass
+    # ``subtitles=`` filter can reference it by a plain name (no Windows drive-colon escaping).
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, cwd=None if cwd is None else str(cwd),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise FfmpegError(
+            f"command timed out after {timeout}s: {' '.join(cmd[:6])} ..."
+        ) from exc
     if proc.returncode != 0:
         raise FfmpegError(
             f"command failed ({proc.returncode}): {' '.join(cmd[:6])} ...\n{proc.stderr[-2000:]}"
@@ -306,3 +317,95 @@ def mux(
                 "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", *extra, "-shortest", str(tmp),
             ]
         _run(cmd)
+
+
+# --------------------------------------------------------------------------- #
+# Burned-in subtitles (M2.1): a libass re-encode that paints the subtitle into the picture.
+# --------------------------------------------------------------------------- #
+def probe_dimensions(path: str | Path) -> tuple[int, int]:
+    """ffprobe the first video stream's ``(width, height)``.
+
+    Demuxer- AND protocol-restricted like the other probes, so a disguised
+    playlist/concat/network demuxer can never be opened here (SSRF guard, T1.3c).
+    """
+    out = _run([
+        *_FFPROBE_BASE, *_FORMAT_WHITELIST, "-select_streams", "v:0",
+        "-show_entries", "stream=width,height", "-of", "json",
+        *_PROTOCOL_WHITELIST, str(path),
+    ])
+    try:
+        streams = json.loads(out).get("streams") or []
+        width = int(streams[0]["width"])
+        height = int(streams[0]["height"])
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise FfmpegError(
+            f"could not read video dimensions from ffprobe ({exc}); stdout was: {out[:300]!r}"
+        ) from exc
+    if width <= 0 or height <= 0:
+        raise FfmpegError(f"ffprobe reported non-positive video dimensions {width}x{height}")
+    return width, height
+
+
+# A plain, fixed subtitle filename used inside the libass ``subtitles=`` filter:
+# burn_subtitles() stages the srt under this name in a temp dir and runs ffmpeg from
+# there, so the filter never carries a Windows drive colon / path separator that the
+# filtergraph parser would otherwise mangle.
+_BURN_SUBS_NAME = "subs.srt"
+
+
+def _burn_vf(width: int, height: int, max_height: int, *,
+             subs_name: str = _BURN_SUBS_NAME, force_style: str | None = None) -> str:
+    """Build the ``-vf`` value for a subtitle burn-in (pure; no I/O).
+
+    Caps the picture at ``max_height`` (downscale only, keep aspect, even dims) BEFORE
+    the libass overlay so a 4K source can't blow up the re-encode; a source already at
+    or below the cap is NOT scaled (never upscale). ``force_style`` (when given) selects
+    the libass style — e.g. a CJK font name so the burn renders non-Latin scripts.
+    """
+    parts: list[str] = []
+    if height > max_height:
+        # -2 keeps the aspect ratio and forces an even width (x264 needs even dims).
+        parts.append(f"scale=-2:{max_height}")
+    subs = f"subtitles={subs_name}"
+    if force_style:
+        subs += f":force_style='{force_style}'"
+    parts.append(subs)
+    return ",".join(parts)
+
+
+def burn_subtitles(
+    video: str | Path, srt: str | Path, out: str | Path, *,
+    max_height: int, timeout_sec: float,
+    crf: int = 23, preset: str = "veryfast",
+    force_style: str | None = None, metadata: list[str] | None = None,
+) -> None:
+    """Re-encode ``video`` with ``srt`` burned into the picture (libass), writing ``out``.
+
+    Unlike mux() (which stream-copies), burning paints the subtitle into pixels, so the
+    video stream MUST be re-encoded (x264). The source is validated at this ffmpeg
+    boundary (SSRF guard, T1.3c), downscaled to ``max_height`` if taller, and the
+    re-encode is bounded by ``timeout_sec`` (a wedged encode is killed and surfaced as
+    FfmpegError, never an unbounded lease hold). Audio is stream-copied. ``metadata``
+    (the AIGC ``-metadata`` tags) rides on the output container. Atomic temp+replace.
+    """
+    assert_ffmpeg()
+    # mux/burn may run on a pre-staged/resumed job that bypassed ingest's allowlist;
+    # validate the source container HERE too so a crafted input can't reach ffmpeg.
+    assert_allowed_input_format(video)
+    width, height = probe_dimensions(video)
+    vf = _burn_vf(width, height, max_height, force_style=force_style)
+    extra = list(metadata or [])
+    src = Path(video).resolve()  # absolute: ffmpeg runs with cwd = the srt's temp dir
+    # Stage the srt under a plain name in a temp dir and run ffmpeg from there, so the
+    # libass filter references "subs.srt" (no path escaping / Windows drive-colon issues).
+    with tempfile.TemporaryDirectory(prefix="ovt_burn_") as td:
+        shutil.copy2(srt, Path(td) / _BURN_SUBS_NAME)
+        with atomic_output(out) as tmp:
+            cmd = [
+                "ffmpeg", "-y", *_input(src),
+                "-vf", vf,
+                "-map", "0:v:0", "-map", "0:a:0?",
+                "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
+                "-c:a", "copy", *extra, str(Path(tmp).resolve()),
+            ]
+            _run(cmd, timeout=timeout_sec, cwd=td)

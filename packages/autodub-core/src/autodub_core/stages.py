@@ -416,22 +416,26 @@ def mux(
     want_video = output_mode in ("dub_only", "both")
     want_subs = output_mode in ("subtitle_only", "both")
     want_srt = want_subs and subtitle_delivery in ("srt", "both")
-    if want_subs and subtitle_delivery in ("burned", "both"):
-        if config.BURN_SUBTITLES_ENABLED:
-            # M2.1 owns the libass re-encode burn-in; intentionally unreachable in M1.
-            raise NotImplementedError("burned subtitles are an M2.1 feature")
+    burn_requested = want_subs and subtitle_delivery in ("burned", "both")
+    want_burn = burn_requested and config.BURN_SUBTITLES_ENABLED  # M2.1 libass re-encode
+    if burn_requested and not want_burn:
+        # Burn re-encode OFF (ops fallback): a 'burned' request degrades to its srt channel.
         if not want_srt:
-            # burned-only with no srt fallback: there is no channel to carry the
-            # subtitle (nor its §3 AIGC disclosure), so fail explicitly rather than
+            # burned-only with the burn disabled and no srt fallback: there is no channel to
+            # carry the subtitle (nor its §3 AIGC disclosure), so fail explicitly rather than
             # complete with zero deliverables and a dead primary path.
             raise NotImplementedError(
-                "subtitle_delivery='burned' has no srt fallback; burned-in subtitles "
-                "are an M2.1 feature (BURN_SUBTITLES_ENABLED off)")
-        _log("mux: burned subtitles requested but deferred to M2.1 (feature-flag off)")
+                "subtitle_delivery='burned' needs BURN_SUBTITLES_ENABLED or an srt channel; "
+                "the burn re-encode is off and there is no srt fallback")
+        _log("mux: burned subtitles requested but BURN_SUBTITLES_ENABLED is off; srt only")
 
-    expected = [p for p, want in
-                ((paths.dubbed_video, want_video), (paths.subtitles, want_srt)) if want]
-    primary = paths.dubbed_video if want_video else paths.subtitles
+    # When burning, the burned_video IS the delivered video and dubbed_video is only its
+    # intermediate (the burn source for a dub+burn job) — so it is built but not delivered.
+    deliver_video = (
+        paths.burned_video if want_burn else (paths.dubbed_video if want_video else None)
+    )
+    expected = [p for p in (deliver_video, paths.subtitles if want_srt else None) if p is not None]
+    primary = deliver_video if deliver_video is not None else paths.subtitles
     # The AIGC mark the deliverables must carry ("" = unmarked). A marker file records
     # what the cached artifacts were actually built with, so a marking change forces a
     # re-mux: the cache can neither under-claim (resume of a marked run) nor over-claim
@@ -442,7 +446,15 @@ def mux(
     # bilingual subtitles, or a marking change) invalidates the cache and forces a
     # rewrite (CodeX R3/R5) — the cache never serves a deliverable built for other
     # settings, and never over-/under-claims the §3 mark.
-    cache_key = "|".join([want_method, output_mode, subtitle_lang, subtitle_delivery])
+    cache_key_parts = [want_method, output_mode, subtitle_lang, subtitle_delivery]
+    if want_burn:
+        # The burn re-encode caps shape the pixels too, so fold them into the key — but ONLY
+        # when burning, so a non-burn job's key stays byte-identical to before (no needless
+        # cache churn / marker invalidation). A BURN_MAX_HEIGHT/crf/preset change re-burns.
+        cache_key_parts.append(
+            f"burn:{config.BURN_MAX_HEIGHT}:{config.BURN_CRF}:{config.BURN_PRESET}"
+        )
+    cache_key = "|".join(cache_key_parts)
     marker = paths.output / ".mux_cache"
     cached_key = marker.read_text(encoding="utf-8") if marker.exists() else ""
     if (expected and all(p.exists() for p in expected)
@@ -456,7 +468,7 @@ def mux(
     # from the previous wider mode (e.g. dubbed_video.mp4 / subtitles.srt) must not linger for
     # presence-based packaging/upload to publish (CodeX bot P2). Expected ones are rebuilt below;
     # clearing first also keeps a mid-build failure repairable, never stale-looking-as-cached.
-    for p in (paths.dubbed_video, paths.subtitles):
+    for p in (paths.dubbed_video, paths.subtitles, paths.burned_video):
         p.unlink(missing_ok=True)
 
     result = TranslationResult.model_validate(read_json(paths.segments))
@@ -487,10 +499,32 @@ def mux(
         _log(f"mux: wrote {paths.dubbed_video.name}")
     # Write the srt LAST so a failed video mux above leaves no lone deliverable
     # that the next run might otherwise treat as progress.
+    # The subtitle text is delivered as srt and/or used as the burn source — build it once.
+    srt_for_burn: Path | None = None
     if want_srt:
         _write_srt(result, paths.subtitles, bilingual=(subtitle_lang == "bilingual"),
                    disclosure=aigc.subtitle_disclosure(marking))
         _log(f"mux: wrote {paths.subtitles.name}")
+        srt_for_burn = paths.subtitles
+    if want_burn:
+        # Burn onto the dubbed video when dubbing, else onto the original (subtitle_only +
+        # burned). burn_subtitles re-validates the source container at its ffmpeg boundary.
+        burn_src = paths.dubbed_video if want_video else paths.original_video()
+        if not burn_src:
+            raise RuntimeError("mux: no source video to burn subtitles onto")
+        with tempfile.TemporaryDirectory(dir=paths.output) as _td:
+            if srt_for_burn is None:
+                # burn-only delivery: the srt is a throwaway burn source, never a deliverable.
+                srt_for_burn = Path(_td) / "subs.srt"
+                _write_srt(result, srt_for_burn, bilingual=(subtitle_lang == "bilingual"),
+                           disclosure=aigc.subtitle_disclosure(marking))
+            ff.burn_subtitles(
+                burn_src, srt_for_burn, paths.burned_video,
+                max_height=config.BURN_MAX_HEIGHT, timeout_sec=config.BURN_ENCODE_TIMEOUT_SEC,
+                crf=config.BURN_CRF, preset=config.BURN_PRESET,
+                metadata=aigc.metadata_args(marking, output_mode),
+            )
+        _log(f"mux: wrote {paths.burned_video.name}")
     # Record what was actually marked alongside the deliverables, so a later resume
     # can trust (or invalidate) the cache. applied reflects an actually-written mark
     # (non-empty method), never merely that marking was enabled — the §3 audit trail
