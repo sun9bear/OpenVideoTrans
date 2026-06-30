@@ -1,6 +1,6 @@
 import type { ErrorCode, Job } from "../../../packages/schemas/generated/ts/contracts";
 import type { Ctx } from "./core";
-import { HttpError, asObject, json, optInt, optString, readJson, reqEnum, reqInt, reqString } from "./core";
+import { HttpError, asObject, json, optBool, optInt, optString, readJson, reqEnum, reqInt, reqString } from "./core";
 import { admitJob } from "./abuse";
 import { compensateReserve, reserveDualPool, reservedMinutesForMode } from "./caps";
 import { claimOne } from "./claim";
@@ -244,13 +244,31 @@ export async function getJob(ctx: Ctx): Promise<Response> {
   return json({ job: publicJob(rowToJob(row)) });
 }
 
+// The claim body is OPTIONAL: a bare POST (empty body) is the normal claim; a worker whose heavy budget
+// is full sends {"light_only": true} so the reserved free_min_share slot is filled ONLY by a LIGHT
+// (subtitle_only) job (PR-D, #26). An empty body parses to false (backward compatible with every
+// pre-PR-D worker); a present-but-malformed body / non-boolean light_only is a 400 (fail-closed input).
+async function readClaimLightOnly(request: Request): Promise<boolean> {
+  const text = await request.text();
+  if (!text) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new HttpError(400, "invalid_body", "request body must be valid JSON");
+  }
+  return optBool(asObject(parsed), "light_only") ?? false;
+}
+
 // POST /internal/jobs/claim — worker pulls the next claimable job per the §8 comparator.
 export async function claimNext(ctx: Ctx): Promise<Response> {
+  const lightOnly = await readClaimLightOnly(ctx.request);
   const claimed = await claimOne(ctx.env.DB, {
     now: ctx.deps.now(),
     leaseMs: ctx.config.leaseTtlMs,
     maxAttempt: ctx.config.maxAttempts,
     agingBucketMs: ctx.config.agingBucketMs,
+    lightOnly,
   });
   if (!claimed) return json({ job: null });
   const row = await getJobRow(ctx, claimed.job_id);

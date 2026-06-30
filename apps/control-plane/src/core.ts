@@ -197,6 +197,13 @@ export function optInt(o: Record<string, unknown>, key: string): number | undefi
   return v;
 }
 
+export function optBool(o: Record<string, unknown>, key: string): boolean | undefined {
+  const v = o[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "boolean") throw new HttpError(400, "invalid_field", `${key} must be a boolean`);
+  return v;
+}
+
 export function reqEnum<T extends string>(
   o: Record<string, unknown>,
   key: string,

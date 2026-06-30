@@ -5,6 +5,8 @@ Config from env (secrets are read from env ONLY — never logged or passed on a 
   OVT_INTERNAL_TOKEN       worker bootstrap shared secret (the /internal bearer)
   OVT_INTERNAL_TOKEN_NEXT  optional staged next bootstrap secret (zero-downtime rotation)
   OVT_WORKDIR              jobs scratch dir (default /var/lib/ovt/jobs)
+  OVT_WORKER_CONCURRENCY   max jobs run at once (default 1; per-box per §14: 2GB→1 / 4GB→1-2)
+  OVT_LIGHT_SLOT_RESERVE   slots reserved for LIGHT (subtitle_only) jobs (free_min_share; default 1)
   OVT_R2_ENDPOINT          optional NON-secret S3 base override for the local dev loop
                            (DEVLOOP #25); unset in prod ⇒ the real R2 host
 
@@ -35,6 +37,12 @@ def main() -> int:
     token = os.environ["OVT_INTERNAL_TOKEN"]
     next_token = os.environ.get("OVT_INTERNAL_TOKEN_NEXT") or None
     workdir = Path(os.environ.get("OVT_WORKDIR", "/var/lib/ovt/jobs"))
+    # Per-box sizing fixed at deploy (§14 line 307/308): default 1 (the 2GB baseline box; the
+    # original "2" was a stale Oracle-12GB assumption). A 4GB box opts into 1-2 via the env.
+    # Defaulting to 1 is fail-safe — never OOM a 2GB box on an unconfigured deploy; mirrors
+    # run_forever's own default.
+    worker_concurrency = int(os.environ.get("OVT_WORKER_CONCURRENCY", "1"))
+    light_slot_reserve = int(os.environ.get("OVT_LIGHT_SLOT_RESERVE", "1"))
     # DEVLOOP (#25): NON-secret S3 endpoint override for the local dev loop (points at a local
     # S3 stub so the box needs no real R2). Unset in prod ⇒ the real R2 host; the box's egress
     # allowlist gates it regardless. R2 ACCESS creds still come from /internal/credentials.
@@ -52,7 +60,10 @@ def main() -> int:
         "pulled worker credentials: storage configured; free providers: %s",
         ", ".join(configured) or "(none)",
     )
-    run_forever(cp, storage, workdir_base=workdir)
+    run_forever(
+        cp, storage, workdir_base=workdir,
+        worker_concurrency=worker_concurrency, light_slot_reserve=light_slot_reserve,
+    )
     return 0
 
 
