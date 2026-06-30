@@ -411,7 +411,11 @@ def burn_subtitles(
                 "ffmpeg", "-y", *_input(src),
                 "-vf", vf,
                 "-map", "0:v:0", "-map", "0:a:0?",
-                "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
-                "-c:a", "copy", *extra, str(Path(tmp).resolve()),
+                # Force a browser-compatible MP4: yuv420p (4:2:0) video + AAC audio, so a valid but
+                # exotic source (RGB / yuv444p MKV/WebM, non-AAC audio) still yields a playable
+                # video/mp4 instead of inheriting an unplayable pixel format / copying a non-AAC
+                # track. Mirrors the dub mux's AAC normalization (not -c:a copy).
+                "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k", *extra, str(Path(tmp).resolve()),
             ]
             _run(cmd, timeout=timeout_sec, cwd=td)

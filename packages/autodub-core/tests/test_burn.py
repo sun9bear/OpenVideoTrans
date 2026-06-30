@@ -94,3 +94,4 @@ def test_burn_subtitles_passes_timeout_and_writes_atomic(
     cmd = captured["cmd"]
     assert isinstance(cmd, list)
     assert "libx264" in cmd and "subtitles=subs.srt" in cmd and "20" in cmd
+    assert "yuv420p" in cmd and "aac" in cmd  # browser-compatible MP4 normalization (CodeX P2)
