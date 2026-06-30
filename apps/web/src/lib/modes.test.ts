@@ -12,11 +12,12 @@ describe("modes — output mode selector", () => {
 });
 
 describe("modes — subtitle delivery", () => {
-  it("enables SRT and DISABLES burned-in (M2.1, '即将支持')", () => {
-    const srt = SUBTITLE_DELIVERY_OPTIONS.find((o) => o.value === "srt");
-    const burned = SUBTITLE_DELIVERY_OPTIONS.find((o) => o.value === "burned");
-    expect(srt?.disabled).toBe(false);
-    expect(burned?.disabled).toBe(true);
-    expect(burned?.label).toContain("即将支持");
+  it("offers srt, burned, and both — all enabled (M2.1)", () => {
+    expect(SUBTITLE_DELIVERY_OPTIONS.map((o) => o.value)).toEqual(["srt", "burned", "both"]);
+    for (const o of SUBTITLE_DELIVERY_OPTIONS) {
+      expect(o.disabled).toBe(false); // burn-in shipped in M2.1
+      expect(o.label).not.toContain("即将支持");
+      expect(o.label).not.toBe("");
+    }
   });
 });

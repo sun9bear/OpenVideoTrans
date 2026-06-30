@@ -19,9 +19,10 @@ export interface DeliveryOption {
   disabled: boolean;
 }
 
-// 烧录（burned-in）字幕属 M2.1，前端先 disable 并标「即将支持」（CodeX P2.6）。后端也只接受 srt：
-// createJob 对非 srt 返 unsupported_subtitle_delivery，所以 disabled 选项即便被绕过也会被服务器拒。
+// 字幕交付方式（M2.1 起全部可选）：独立 SRT / 烧录进画面 / 两者都要。烧录由内核 libass 重编码实现；
+// 后端按 output_mode + subtitle_delivery 校验交付物，烧录视频复用 video_key（不新增字段）。
 export const SUBTITLE_DELIVERY_OPTIONS: DeliveryOption[] = [
   { value: "srt", label: "独立字幕文件（SRT）", disabled: false },
-  { value: "burned", label: "烧录进画面（即将支持）", disabled: true },
+  { value: "burned", label: "烧录进画面", disabled: false },
+  { value: "both", label: "SRT + 烧录进画面", disabled: false },
 ];
