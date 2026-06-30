@@ -170,16 +170,22 @@ export async function recoverLeases(
   return { requeued: requeuedIds.length, requeuedIds, workerLost: lost.meta.changes };
 }
 
-// Duty 5 — DEADLINE backstop (M2-CLOSE PR-C). The claim comparator PROMOTES an overdue job (deadline_at
-// <= now) to the head of the claimable set; this duty is the saturation backstop for when — even after
-// promotion — no worker claims it before its deadline. A still-`queued` job past deadline_at is
-// terminalized `failed / deadline_exceeded` so the user gets a definitive answer instead of an unbounded
-// wait. ONLY `queued` rows are touched: a `running` job is owned by recoverLeases (dead lease → requeue /
-// worker_lost) and the worker's own jobHardTimeoutMs (a live-but-stuck worker self-reports
-// processing_timeout), so a live, progressing job is NEVER cut off here. deadline_exceeded is REFUNDABLE
-// (the job never ran → no cost incurred), so refundLostJobs' standing query gives the reserve back next
-// pass. Batch-bounded (IN (SELECT … LIMIT)) like every duty; idempotent (the status='queued' guard means
-// a re-run after the flip matches 0 rows). error_code binds the typed DEADLINE_EXCEEDED constant.
+// Duty 5 — DEADLINE backstop (M2-CLOSE PR-C). deadline_at is an anti-STARVATION backstop: the claim
+// comparator PROMOTES an overdue job (deadline_at <= now) to the head of the claimable set, and this
+// duty terminalizes a job that — even after promotion — was NEVER claimed before its deadline (sustained
+// saturation), as `failed / deadline_exceeded`, so the user gets a definitive answer instead of an
+// unbounded wait. It targets ONLY NEVER-CLAIMED queued rows (status='queued' AND started_at IS NULL):
+//   • a `running` job (live or lease-expired) is owned by recoverLeases (dead lease → requeue /
+//     worker_lost) + the worker's own jobHardTimeoutMs — never cut off here.
+//   • a CLAIMED-then-requeued job (status='queued' but started_at SET, attempt>=1, retry budget left)
+//     already received service, so it stays with recoverLeases' retry/worker_lost machinery — this duty
+//     must NOT steal it into deadline_exceeded and refund a reserve whose attempt ALREADY ran (CodeX R1
+//     P2). The comparator still promotes it for a fast re-claim; if it keeps losing its lease it ends as
+//     worker_lost (also refundable) once attempts exhaust.
+// Restricting to started_at IS NULL keeps the deadline_exceeded ⟹ never-ran ⟹ refund invariant pristine:
+// refundLostJobs' standing query gives a never-ran job's reserve back next pass with no double-count.
+// Batch-bounded (IN (SELECT … LIMIT)) like every duty; idempotent (the status flip means a re-run matches
+// 0 rows). error_code binds the typed DEADLINE_EXCEEDED constant.
 export async function enforceDeadlines(
   db: D1Database,
   now: number,
@@ -191,7 +197,7 @@ export async function enforceDeadlines(
                        lease_expires_at = NULL, current_stage = 'failed'
          WHERE job_id IN (
            SELECT job_id FROM jobs
-             WHERE status = 'queued' AND deadline_at <= ?
+             WHERE status = 'queued' AND started_at IS NULL AND deadline_at <= ?
              ORDER BY deadline_at ASC LIMIT ?
          )`,
     )
@@ -334,11 +340,12 @@ export async function runSweep(
     summary.workerLost = r.workerLost;
     requeuedIds = r.requeuedIds;
   });
-  // Deadline backstop (M2-CLOSE PR-C): terminalize still-queued jobs past their deadline_at as
-  // deadline_exceeded. Ordered AFTER recoverLeases (a lost job requeued THIS tick that is ALSO past its
-  // deadline is terminalized here rather than lingering queued-overdue to the next tick) and BEFORE
-  // refundLostJobs (deadline_exceeded is REFUNDABLE, so the just-failed job gets its reserve back SAME
-  // tick via the standing refund query). Isolated like every duty; a failure never blocks the others.
+  // Deadline backstop (M2-CLOSE PR-C): terminalize NEVER-CLAIMED queued jobs past their deadline_at as
+  // deadline_exceeded (started_at IS NULL — see enforceDeadlines). Ordered BEFORE refundLostJobs so the
+  // just-failed never-ran job gets its reserve back SAME tick via the standing refund query. It does NOT
+  // overlap recoverLeases: that duty owns CLAIMED jobs — a lost lease it requeues this tick keeps its
+  // started_at, so enforceDeadlines skips it (the comparator promotes it for a fast re-claim instead).
+  // Isolated like every duty; a failure never blocks the others.
   await duty(async () => {
     summary.deadlineExceeded = await enforceDeadlines(env.DB, now, SWEEP_BATCH_LIMIT);
   });

@@ -78,6 +78,18 @@ describe("enforceDeadlines — queued-past-deadline terminalization (PR-C)", () 
     expect(jobRow(raw, "run").status).toBe("running"); // a live, progressing job is never cut off here
   });
 
+  it("does NOT terminalize a CLAIMED-then-requeued queued job past deadline (started_at set)", async () => {
+    const { env, raw } = makeEnv();
+    // A job that was claimed (started_at set, attempt 1) then requeued by lease recovery, now past its
+    // deadline. deadline_at is an anti-STARVATION backstop for NEVER-claimed jobs; a job that already
+    // received service is owned by recoverLeases' retry / worker_lost machinery, not this duty.
+    insertJob(raw, { job_id: "requeued", enqueue_at: 0, status: "queued", attempt: 1, started_at: 5000 });
+    const n = await enforceDeadlines(env.DB, 5 * H);
+    expect(n).toBe(0);
+    expect(jobRow(raw, "requeued").status).toBe("queued"); // left for re-claim / worker_lost, not deadline_exceeded
+    expect(jobRow(raw, "requeued").error_code).toBeNull();
+  });
+
   it("does NOT touch a terminal (done/failed) job past its expiry", async () => {
     const { env, raw } = makeEnv();
     insertJob(raw, { job_id: "done", enqueue_at: 0, status: "done" });
@@ -132,5 +144,36 @@ describe("runSweep — deadline_exceeded integration + refund (PR-C)", () => {
     // the reserve is given back (the job never ran → no cost incurred)
     expect(counter(raw, "global", "")).toEqual({ jobs: 0, minutes_ms: 0 });
     expect(counter(raw, "actor", "anon_x")).toEqual({ jobs: 0, minutes_ms: 0 });
+  });
+
+  it("a lost-lease job past deadline WITH retry budget is requeued by recoverLeases, NOT deadline_exceeded/refunded", async () => {
+    // CodeX R1 P2: a running job whose lease lapsed past its deadline, with attempt < maxAttempts, is
+    // owned by recoverLeases (requeue for retry) — enforceDeadlines must NOT then terminalize the
+    // just-requeued row as deadline_exceeded and refund a reserve whose attempt already ran. The fix
+    // (enforceDeadlines targets started_at IS NULL = never-claimed) keeps this job in flight.
+    const { env, raw } = makeEnv();
+    seedCounter(raw, "global", "", 1, 5000);
+    insertJob(raw, {
+      job_id: "lost",
+      enqueue_at: 0,
+      created_at: 0,
+      status: "running",
+      attempt: 1, // < maxAttempts (2) -> recoverLeases REQUEUES, does not worker_lost
+      claim_version: 1,
+      started_at: 1000, // it WAS claimed -> not a starvation victim
+      lease_expires_at: 1000,
+      counted_job: 1,
+      reserved_minutes_ms: 5000,
+      anon: "anon_x",
+    });
+    const now = 5 * H; // past both the lease AND the 4h deadline
+    const summary = await runSweep(env, { now: () => now, newId: (p) => p }, DEFAULT_CONFIG);
+    expect(summary.requeued).toBe(1); // recoverLeases requeued it for another attempt
+    expect(summary.deadlineExceeded).toBe(0); // enforceDeadlines did NOT terminalize it
+    const r = jobRow(raw, "lost");
+    expect(r.status).toBe("queued"); // back in the queue (the deadline comparator will promote it)
+    expect(r.error_code).toBeNull();
+    expect(r.refunded).toBe(0); // the reserve STANDS — the job is still in flight (an attempt ran)
+    expect(counter(raw, "global", "")).toEqual({ jobs: 1, minutes_ms: 5000 });
   });
 });
