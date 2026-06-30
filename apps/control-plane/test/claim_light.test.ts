@@ -63,6 +63,19 @@ describe("CLAIM_SQL lightOnly filter (free_min_share, PR-D)", () => {
     // Even an overdue dub job must wait for a NON-reserved slot — lightOnly never admits a heavy job.
     expect(await claimOne(env.DB, opts)).toBeNull();
   });
+
+  it("lightOnly does NOT claim a burned subtitle job (a libass re-encode is HEAVY, M2.1)", async () => {
+    const { env, raw } = makeEnv();
+    // A subtitle_only job whose delivery is burned/both runs a video re-encode, so it must not fill a
+    // reserved light slot (mirrors the worker's weight_class) — only pure subtitle_only+srt is light.
+    insertJob(raw, {
+      job_id: "SUB_BURN", output_mode: "subtitle_only", subtitle_delivery: "burned", enqueue_at: 990_000,
+    });
+    expect(await claimOne(env.DB, { ...base, lightOnly: true })).toBeNull();
+    expect(raw.prepare("SELECT status FROM jobs WHERE job_id='SUB_BURN'").get()).toEqual({
+      status: "queued",
+    });
+  });
 });
 
 describe("claimParams binds lightOnly (PR-D)", () => {

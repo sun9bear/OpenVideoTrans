@@ -49,3 +49,15 @@ def admit_source(path: Path, job: Job, config: WorkerConfig) -> None:
         raise SourceRejected("unsupported_format") from exc
     if duration_ms > config.duration_cap_sec(job.output_mode) * 1000:
         raise SourceRejected("over_duration")
+    # 4. burned subtitles (M2.1) paint onto pixels, so a burn job NEEDS a video stream. Uploads
+    #    allow audio/*; an audio-only source picked with burned/both delivery can't be burned, so
+    #    reject with a coded terminal instead of failing deep in the libass re-encode.
+    burns = job.subtitle_delivery in ("burned", "both") and job.output_mode in (
+        "subtitle_only",
+        "both",
+    )
+    if burns:
+        try:
+            ff.probe_dimensions(path)  # raises FfmpegError when the source has no video stream
+        except ff.FfmpegError as exc:
+            raise SourceRejected("unsupported_format") from exc

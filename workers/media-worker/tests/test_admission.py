@@ -116,6 +116,41 @@ def test_both_mode_uses_the_tighter_dub_cap(
     assert ei.value.error_code == "over_duration"
 
 
+def test_rejects_burned_subtitles_on_audio_only_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # subtitle_only + burned on an audio-only upload: probe_dimensions raises (no video stream) ->
+    # a coded unsupported_format terminal, not a deep internal_error re-encode (M2.1, CodeX P2).
+    monkeypatch.setattr(adm.ff, "assert_allowed_input_format", lambda p: None)
+    monkeypatch.setattr(adm.ff, "probe_duration_ms", lambda p: 10_000)
+
+    def _no_video(p: object) -> tuple[int, int]:
+        raise adm.ff.FfmpegError("no video stream")
+
+    monkeypatch.setattr(adm.ff, "probe_dimensions", _no_video)
+    with pytest.raises(SourceRejected) as ei:
+        admit_source(
+            _write(tmp_path / "in", 32),
+            make_job(output_mode="subtitle_only", subtitle_delivery="burned"),
+            TEST_CONFIG,
+        )
+    assert ei.value.error_code == "unsupported_format"
+
+
+def test_admits_burned_subtitles_on_a_video_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the same burn job on a real video source (probe_dimensions returns dims) is admitted.
+    monkeypatch.setattr(adm.ff, "assert_allowed_input_format", lambda p: None)
+    monkeypatch.setattr(adm.ff, "probe_duration_ms", lambda p: 10_000)
+    monkeypatch.setattr(adm.ff, "probe_dimensions", lambda p: (1920, 1080))
+    admit_source(
+        _write(tmp_path / "in", 32),
+        make_job(output_mode="subtitle_only", subtitle_delivery="burned"),
+        TEST_CONFIG,
+    )  # must not raise
+
+
 def test_duration_cap_sec_mapping() -> None:
     assert TEST_CONFIG.duration_cap_sec("subtitle_only") == 1800
     assert TEST_CONFIG.duration_cap_sec("dub_only") == 300

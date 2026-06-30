@@ -87,11 +87,13 @@ WHERE job_id = (
     SELECT job_id FROM jobs
     WHERE (status = 'queued' OR (status = 'running' AND lease_expires_at <= ?))
       AND attempt < ?
-      -- PR-D free_min_share: when bound 1 (lightOnly) restrict the candidate set to LIGHT
-      -- (subtitle_only) jobs so a reserved slot never admits a dub job; bound 0 = no filter
-      -- (the default claim is byte-identical to before). A WHERE key only — the §8 ORDER BY below
-      -- is untouched, so the comparator/SQL mirror proven in claim.test.ts still holds.
-      AND (? = 0 OR output_mode = 'subtitle_only')
+      -- PR-D free_min_share: when bound 1 (lightOnly) restrict the candidate set to LIGHT jobs so a
+      -- reserved slot never admits heavy work; bound 0 = no filter (the default claim is byte-identical
+      -- to before). LIGHT = a PURE-SRT subtitle job (subtitle_only + srt): no TTS, no re-encode. A
+      -- burned/both subtitle delivery runs an M2.1 libass VIDEO re-encode (as heavy as a dub), so it
+      -- must NOT take a reserved light slot (mirrors the worker's weight_class). A WHERE key only — the
+      -- §8 ORDER BY below is untouched, so the comparator/SQL mirror proven in claim.test.ts holds.
+      AND (? = 0 OR (output_mode = 'subtitle_only' AND subtitle_delivery = 'srt'))
     ORDER BY
       -- Key 0 (PR-C deadline backstop): overdue rows (deadline_at <= now) first, oldest deadline
       -- first, promoted above the mode tier (cross-mode anti-starvation). A non-overdue row gets a
