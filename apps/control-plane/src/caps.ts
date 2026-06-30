@@ -41,7 +41,9 @@ export function dayBucket(ms: number): number {
 // Reserving THIS — not the client's advisory_duration_ms (a SORT-ONLY hint a client can under-declare to
 // 0) — makes the minute pool UNGAMEABLE: dailyGlobalMinutesMsCap can't be dodged by lying about duration
 // (CodeX R1). The trade-off is a conservative over-reserve for short jobs (safe direction: stricter cap);
-// charging the ACTUAL ffprobe duration + reconciling the reserve is a worker-accounting refinement -> PR-C.
+// charging the ACTUAL ffprobe duration + reconciling the reserve is a worker-accounting refinement
+// deferred WITH the worker settings_version pinning (归 M2-CLOSE/DEPLOY; see jobs.ts createJob's
+// config-version note) — NOT PR-C, which is the control-plane scheduling/deadline + registry close-out.
 export function reservedMinutesForMode(
   config: RuntimeConfig,
   outputMode: "subtitle_only" | "dub_only" | "both",
