@@ -475,7 +475,10 @@ describe("runSweep — all four duties in one pass", () => {
 
   it("the scheduled (cron) handler drains a sweep", async () => {
     const { env, raw } = makeEnv();
-    // lease expired in 1970 -> Date.now() is far past it, so no clock injection is needed.
+    // lease expired in 1970 -> Date.now() is far past it, so no clock injection is needed. deadline_at
+    // is pinned FAR future so PR-C's enforceDeadlines doesn't also terminalize this (enqueue_at 0 would
+    // otherwise be ~decades past its 4h deadline under the real clock); this test isolates the
+    // recoverLeases requeue path.
     insertJob(raw, {
       job_id: "lost2",
       enqueue_at: 0,
@@ -483,6 +486,7 @@ describe("runSweep — all four duties in one pass", () => {
       attempt: 1,
       claim_version: 1,
       lease_expires_at: 1000,
+      deadline_at: 10_000_000_000_000,
     });
     let pending: Promise<unknown> | undefined;
     const ctx = { waitUntil: (p: Promise<unknown>) => void (pending = p), passThroughOnException: () => {} };

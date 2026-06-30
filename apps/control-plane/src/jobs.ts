@@ -4,6 +4,7 @@ import { HttpError, asObject, json, optInt, optString, readJson, reqEnum, reqInt
 import { admitJob } from "./abuse";
 import { compensateReserve, reserveDualPool, reservedMinutesForMode } from "./caps";
 import { claimOne } from "./claim";
+import { ERROR_CODES } from "./errors";
 import { isKnownStage, logEvent, parseProgressMeta } from "./obs";
 import { presignR2Url } from "./sigv4";
 import { requireR2, verifyUpload } from "./uploads";
@@ -49,20 +50,8 @@ interface JobRow {
   refunded: number;
 }
 
-const ERROR_CODES = [
-  "over_duration",
-  "unsupported_format",
-  "upload_too_large",
-  "source_verify_failed",
-  "source_fetch_failed",
-  "unsupported_language_pair",
-  "no_tts_model_for_language",
-  "free_pool_exhausted",
-  "worker_lost",
-  "processing_timeout",
-  "daily_cap_reached",
-  "internal_error",
-] as const;
+// ERROR_CODES (the /fail validation set) is the single-source registry from errors.ts, pinned to the
+// frozen contract ErrorCode union — imported above, no longer duplicated here.
 
 export function rowToJob(r: JobRow): Job {
   return {

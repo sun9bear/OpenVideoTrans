@@ -1,5 +1,6 @@
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import { refundLostJobs } from "./caps";
+import { DEADLINE_EXCEEDED, WORKER_LOST } from "./errors";
 import type { RuntimeConfig } from "./config";
 import type { Deps, Env, QueueProducer } from "./core";
 import { selectProducer } from "./queue";
@@ -14,6 +15,10 @@ import { selectProducer } from "./queue";
 //   4. reconcileQueue     — surface stale `queued` jobs. In the D1-claim adapter the jobs table IS
 //                           the worklist, so claim() (long-poll) finds them directly and nothing is
 //                           stranded; the CF-Queues wake-message re-enqueue is the T2.5 adapter's job.
+//   5. enforceDeadlines   — deadline backstop (M2-CLOSE PR-C): terminalize a still-`queued` job past
+//                           its deadline_at as `deadline_exceeded` (refundable). Pairs with the claim
+//                           comparator's deadline PROMOTION — promotion gets an overdue job claimed if
+//                           any worker is free; this is the saturation backstop when none is.
 //
 // Each sweep is bounded by a row LIMIT so a single Cron tick is cheap; a backlog drains over
 // successive ticks. R2 deletes are idempotent and the D1 updates are guarded so re-runs are no-ops.
@@ -23,8 +28,10 @@ import { selectProducer } from "./queue";
 // M2-CLOSE PR-B now that the daily_counters table exists. It is driven off a STANDING query
 // (error_code='worker_lost' AND counted_job=1 AND refunded=0), NOT recoverLeases' single-tick output,
 // so a job stranded by a crash / batch-limit truncation between its transition and its decrement is
-// simply re-selected and refunded next tick (exactly-once-eventually). Still routed onward: the
-// `deadline_at` cross-mode anti-starvation backstop (comparator/error-code) -> M2-CLOSE PR-C.
+// simply re-selected and refunded next tick (exactly-once-eventually). The `deadline_at` cross-mode
+// anti-starvation backstop (comparator promotion + `deadline_exceeded` terminalization) is now
+// implemented in M2-CLOSE PR-C — see enforceDeadlines below + the claim.ts comparator key 0. A
+// deadline_exceeded job is REFUNDABLE, so the SAME refundLostJobs standing query gives its reserve back.
 
 // Per-tick row cap. The sweeper is a maintenance loop, not a bulk migration: bound the work so one
 // invocation stays well within the Worker CPU/time budget; the next tick continues any backlog.
@@ -37,6 +44,7 @@ export interface SweepSummary {
   orphans: number;
   reconciled: number;
   refunded: number;
+  deadlineExceeded: number;
 }
 
 interface ArtifactRow {
@@ -145,9 +153,11 @@ export async function recoverLeases(
     .bind(now, maxAttempts, limit)
     .all<{ job_id: string }>();
   const requeuedIds = requeue.results.map((r) => r.job_id);
+  // error_code binds the typed WORKER_LOST constant (registry, errors.ts) instead of a bare SQL
+  // literal — same value, but the single source of truth makes a contract rename a compile error.
   const lost = await db
     .prepare(
-      `UPDATE jobs SET status = 'failed', error_code = 'worker_lost', finished_at = ?,
+      `UPDATE jobs SET status = 'failed', error_code = ?, finished_at = ?,
                        lease_expires_at = NULL, current_stage = 'failed'
          WHERE job_id IN (
            SELECT job_id FROM jobs
@@ -155,9 +165,39 @@ export async function recoverLeases(
              ORDER BY lease_expires_at ASC LIMIT ?
          )`,
     )
-    .bind(now, now, maxAttempts, limit)
+    .bind(WORKER_LOST, now, now, maxAttempts, limit)
     .run();
   return { requeued: requeuedIds.length, requeuedIds, workerLost: lost.meta.changes };
+}
+
+// Duty 5 — DEADLINE backstop (M2-CLOSE PR-C). The claim comparator PROMOTES an overdue job (deadline_at
+// <= now) to the head of the claimable set; this duty is the saturation backstop for when — even after
+// promotion — no worker claims it before its deadline. A still-`queued` job past deadline_at is
+// terminalized `failed / deadline_exceeded` so the user gets a definitive answer instead of an unbounded
+// wait. ONLY `queued` rows are touched: a `running` job is owned by recoverLeases (dead lease → requeue /
+// worker_lost) and the worker's own jobHardTimeoutMs (a live-but-stuck worker self-reports
+// processing_timeout), so a live, progressing job is NEVER cut off here. deadline_exceeded is REFUNDABLE
+// (the job never ran → no cost incurred), so refundLostJobs' standing query gives the reserve back next
+// pass. Batch-bounded (IN (SELECT … LIMIT)) like every duty; idempotent (the status='queued' guard means
+// a re-run after the flip matches 0 rows). error_code binds the typed DEADLINE_EXCEEDED constant.
+export async function enforceDeadlines(
+  db: D1Database,
+  now: number,
+  limit: number = SWEEP_BATCH_LIMIT,
+): Promise<number> {
+  const res = await db
+    .prepare(
+      `UPDATE jobs SET status = 'failed', error_code = ?, finished_at = ?,
+                       lease_expires_at = NULL, current_stage = 'failed'
+         WHERE job_id IN (
+           SELECT job_id FROM jobs
+             WHERE status = 'queued' AND deadline_at <= ?
+             ORDER BY deadline_at ASC LIMIT ?
+         )`,
+    )
+    .bind(DEADLINE_EXCEEDED, now, now, limit)
+    .run();
+  return res.meta.changes;
 }
 
 interface OrphanRow {
@@ -276,6 +316,7 @@ export async function runSweep(
     orphans: 0,
     reconciled: 0,
     refunded: 0,
+    deadlineExceeded: 0,
   };
   const errors: unknown[] = [];
   let requeuedIds: string[] = [];
@@ -292,6 +333,14 @@ export async function runSweep(
     summary.requeued = r.requeued;
     summary.workerLost = r.workerLost;
     requeuedIds = r.requeuedIds;
+  });
+  // Deadline backstop (M2-CLOSE PR-C): terminalize still-queued jobs past their deadline_at as
+  // deadline_exceeded. Ordered AFTER recoverLeases (a lost job requeued THIS tick that is ALSO past its
+  // deadline is terminalized here rather than lingering queued-overdue to the next tick) and BEFORE
+  // refundLostJobs (deadline_exceeded is REFUNDABLE, so the just-failed job gets its reserve back SAME
+  // tick via the standing refund query). Isolated like every duty; a failure never blocks the others.
+  await duty(async () => {
+    summary.deadlineExceeded = await enforceDeadlines(env.DB, now, SWEEP_BATCH_LIMIT);
   });
   // Refund the dual-pool quota for worker_lost jobs (M2-CLOSE PR-B). Runs AFTER recoverLeases (which
   // just transitioned this tick's attempt-exhausted lost workers to worker_lost) but is driven off a
