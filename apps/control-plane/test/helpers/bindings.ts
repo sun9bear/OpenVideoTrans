@@ -162,6 +162,10 @@ export interface JobSeed {
   priority?: number;
   attempt?: number;
   claim_version?: number;
+  // M2-CLOSE PR-C (#26): the cross-mode aging backstop "must-run" time. Defaults to enqueue_at + 4h
+  // (the create-time deadlineMaxWaitMs) so existing call sites seed a NOT-overdue job; deadline tests
+  // pass a PAST value to seed an overdue job (comparator promotion + enforceDeadlines terminalization).
+  deadline_at?: number;
   lease_expires_at?: number | null;
   data_purged_at?: number | null;
   anon?: string;
@@ -208,7 +212,7 @@ export function insertJob(raw: RawDb, o: JobSeed): void {
       o.priority ?? 0,
       o.advisory_duration_ms ?? null,
       o.enqueue_at,
-      o.enqueue_at + 4 * 60 * 60 * 1000,
+      o.deadline_at ?? o.enqueue_at + 4 * 60 * 60 * 1000,
       o.created_at ?? o.enqueue_at,
       o.expires_at ?? o.enqueue_at + 24 * 60 * 60 * 1000,
       o.lease_expires_at ?? null,

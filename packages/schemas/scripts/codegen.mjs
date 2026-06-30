@@ -341,7 +341,12 @@ function wrapTopLevelLiteral(name, enumValues) {
     const item = items[i];
     const isLast = i === items.length - 1;
     const addition = isLast ? item : item + ", ";
-    if (current !== prefixFirst && current.length + addition.length > LINE_LENGTH) {
+    // The LAST item is followed by the closing ']' on the same line — count that bracket in the
+    // break decision so the final line can't overflow LINE_LENGTH by one (e.g. a 101-char ErrorCode
+    // Literal). Without this, a literal whose last item lands exactly at the limit emits a 101-col
+    // line that ruff E501 rejects.
+    const additionLen = addition.length + (isLast ? 1 : 0);
+    if (current !== prefixFirst && current.length + additionLen > LINE_LENGTH) {
       resultLines.push(current.trimEnd());
       current = prefixRest + addition;
     } else {

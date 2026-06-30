@@ -1,15 +1,20 @@
 import type { D1Database } from "@cloudflare/workers-types";
 
-// Frozen v4 priority comparator (plan §8 / line 210) — a TOTAL order over the claimable set:
+// Frozen v4 priority comparator (plan §8 / line 210) + the M2-CLOSE PR-C deadline backstop — a TOTAL
+// order over the claimable set:
+//   0. deadline backstop (PR-C): a job past its deadline_at is PROMOTED above the mode tier so a
+//      long-waiting dub job can never be starved indefinitely by a steady stream of higher-tier
+//      subtitle jobs; among overdue jobs the OLDEST deadline runs first. Non-overdue jobs are
+//      untouched by this key and fall through to keys 1-5 below unchanged.
 //   1. output_mode tier: subtitle_only outranks any dub mode (字幕 > 配音)
 //   2. aging bucket: floor((now - enqueue_at) / agingBucketMs) — larger (older) wins, anti-starvation
 //   3. advisory_duration_ms ascending (shorter first); a NULL hint sorts last (unknown = lowest)
 //   4. enqueue_at ascending (FIFO tiebreak)
 //   5. job_id ascending (final deterministic tiebreak)
-// advisory_duration_ms is a browser hint used ONLY for ordering; the hard duration cap is enforced
-// by the worker's ffprobe admission. deadline_at is a separate cross-mode-tier anti-starvation
-// backstop; enforcing it needs a comparator/error-code change and is routed to M2-CLOSE (§12
-// scheduling DoD) — it is neither a sort key here nor enforced by the T2.3 sweeper.
+// advisory_duration_ms is a browser hint used ONLY for ordering; the hard duration cap is enforced by
+// the worker's ffprobe admission. deadline_at = enqueue + deadlineMaxWaitMs (4h, the "must-run" time);
+// if even after promotion no worker claims an overdue job, the sweeper's enforceDeadlines (sweep.ts)
+// terminalizes it `deadline_exceeded` — the saturation backstop that pairs with this promotion.
 
 export const ADVISORY_NULL_SENTINEL = Number.MAX_SAFE_INTEGER;
 
@@ -18,6 +23,9 @@ export interface ComparatorJob {
   output_mode: string;
   enqueue_at: number;
   advisory_duration_ms: number | null;
+  // PR-C: the cross-mode anti-starvation deadline (enqueue + deadlineMaxWaitMs). A row whose
+  // deadline_at <= now is "overdue" and promoted above the mode tier (comparator key 0).
+  deadline_at: number;
 }
 
 export function modeTier(outputMode: string): number {
@@ -39,6 +47,13 @@ export function compareClaimable(
   now: number,
   agingBucketMs: number,
 ): number {
+  // Key 0 (PR-C deadline backstop): an overdue job (deadline_at <= now) outranks any non-overdue job
+  // regardless of mode tier; among overdue jobs the oldest deadline runs first. Non-overdue jobs skip
+  // this and fall through to the §8 keys below unchanged. Mirrors the CLAIM_SQL ORDER BY exactly.
+  const aOverdue = a.deadline_at <= now ? 0 : 1;
+  const bOverdue = b.deadline_at <= now ? 0 : 1;
+  if (aOverdue !== bOverdue) return aOverdue - bOverdue; // overdue (0) before non-overdue (1)
+  if (aOverdue === 0 && a.deadline_at !== b.deadline_at) return a.deadline_at - b.deadline_at;
   const tier = modeTier(b.output_mode) - modeTier(a.output_mode);
   if (tier !== 0) return tier;
   const aging =
@@ -73,6 +88,13 @@ WHERE job_id = (
     WHERE (status = 'queued' OR (status = 'running' AND lease_expires_at <= ?))
       AND attempt < ?
     ORDER BY
+      -- Key 0 (PR-C deadline backstop): overdue rows (deadline_at <= now) first, oldest deadline
+      -- first, promoted above the mode tier (cross-mode anti-starvation). A non-overdue row gets a
+      -- CONSTANT second key (0) so it ties with its peers and falls through to the §8 keys unchanged;
+      -- the first key already segregates the two tiers, so the second key only ever orders overdue
+      -- rows by deadline. Two '?' bind now. Mirrors compareClaimable's key 0 exactly.
+      CASE WHEN deadline_at <= ? THEN 0 ELSE 1 END ASC,
+      CASE WHEN deadline_at <= ? THEN deadline_at ELSE 0 END ASC,
       CASE WHEN output_mode = 'subtitle_only' THEN 1 ELSE 0 END DESC,
       -- aging bucket: MAX(0, ...) + CAST forces integer floor division so the key matches
       -- agingBucket()/Math.floor exactly on BOTH D1 (INTEGER binding) and better-sqlite3 (REAL
@@ -103,9 +125,12 @@ export interface ClaimOpts {
 }
 
 // Positional params in CLAIM_SQL `?` order:
-// lease(now, leaseMs) · started_at(now) · innerWHERE(now, maxAttempt) · aging(now, bucket) · outerWHERE(now, maxAttempt)
+// lease(now, leaseMs) · started_at(now) · innerWHERE(now, maxAttempt) · deadlineKeys(now, now) ·
+// aging(now, bucket) · outerWHERE(now, maxAttempt)
 export function claimParams(o: ClaimOpts): number[] {
-  return [o.now, o.leaseMs, o.now, o.now, o.maxAttempt, o.now, o.agingBucketMs, o.now, o.maxAttempt];
+  return [
+    o.now, o.leaseMs, o.now, o.now, o.maxAttempt, o.now, o.now, o.now, o.agingBucketMs, o.now, o.maxAttempt,
+  ];
 }
 
 export async function claimOne(db: D1Database, o: ClaimOpts): Promise<ClaimRow | null> {

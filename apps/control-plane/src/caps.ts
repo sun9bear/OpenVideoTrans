@@ -2,6 +2,7 @@ import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
 import type { RuntimeConfig } from "./config";
 import { CAP_WINDOW_MS } from "./config";
 import { HttpError } from "./core";
+import { REFUNDABLE_ERROR_CODES } from "./errors";
 import { logEvent } from "./obs";
 
 // M2-CLOSE PR-B (#26) — the abuse dual-pool daily-cap reserve + the idempotent worker_lost refund.
@@ -40,7 +41,9 @@ export function dayBucket(ms: number): number {
 // Reserving THIS — not the client's advisory_duration_ms (a SORT-ONLY hint a client can under-declare to
 // 0) — makes the minute pool UNGAMEABLE: dailyGlobalMinutesMsCap can't be dodged by lying about duration
 // (CodeX R1). The trade-off is a conservative over-reserve for short jobs (safe direction: stricter cap);
-// charging the ACTUAL ffprobe duration + reconciling the reserve is a worker-accounting refinement -> PR-C.
+// charging the ACTUAL ffprobe duration + reconciling the reserve is a worker-accounting refinement
+// deferred WITH the worker settings_version pinning (归 M2-CLOSE/DEPLOY; see jobs.ts createJob's
+// config-version note) — NOT PR-C, which is the control-plane scheduling/deadline + registry close-out.
 export function reservedMinutesForMode(
   config: RuntimeConfig,
   outputMode: "subtitle_only" | "dub_only" | "both",
@@ -179,19 +182,14 @@ interface RefundRow {
 }
 
 // Terminal error codes that are OUR fault (infra / worker / pipeline) and therefore REFUND the reserve.
-// The USER-fault terminals (bad input: over_duration, unsupported_format, upload_too_large,
-// unsupported_language_pair, no_tts_model_for_language) are deliberately ABSENT — they COUNT against the
-// cap (anti create-fail farming), consistent with createJob's verifyUpload split (our-fault returns
-// quota, user-fault keeps it). (CodeX R3: a successfully-created job that later fails internal_error /
-// processing_timeout / free_pool_exhausted / source_fetch_failed is our fault and must refund, else it
-// holds its reservation for the rest of the day and false-trips daily_cap_reached.)
-export const REFUNDABLE_ERROR_CODES = [
-  "worker_lost",
-  "internal_error",
-  "processing_timeout",
-  "free_pool_exhausted",
-  "source_fetch_failed",
-] as const;
+// REFUNDABLE_ERROR_CODES (the our-fault / never-served terminals whose counted reserve must be given
+// back) lives in the registry (errors.ts) alongside ERROR_CODES so the refund set and the frozen
+// contract stay pinned to ONE source. The USER-fault terminals (over_duration / unsupported_* /
+// upload_too_large / no_tts_model_for_language) are deliberately ABSENT — they COUNT against the cap
+// (anti create-fail farming), consistent with createJob's verifyUpload our-fault/user-fault split.
+// (CodeX R3: a created job that later fails internal_error / processing_timeout / free_pool_exhausted /
+// source_fetch_failed is our fault and must refund, else it false-trips daily_cap_reached. PR-C adds
+// deadline_exceeded — a queued job the scheduler could not serve before its deadline, which never ran.)
 
 // Standing query: the jobs whose OUR-fault terminal still owes a refund. Driving the refund off THIS
 // (not the single-tick worker_lost RETURNING set) makes it exactly-once-eventually: a row stranded by a
