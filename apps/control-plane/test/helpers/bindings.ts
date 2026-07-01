@@ -158,6 +158,7 @@ export interface JobSeed {
   enqueue_at: number;
   status?: string;
   output_mode?: string;
+  subtitle_delivery?: string;
   advisory_duration_ms?: number | null;
   priority?: number;
   attempt?: number;
@@ -201,7 +202,7 @@ export function insertJob(raw: RawDb, o: JobSeed): void {
          lease_expires_at, finished_at, data_purged_at, artifacts, attempt, claim_version,
          counted_job, counted_minutes, refunded, reserved_minutes_ms, error_code,
          started_at, current_stage, progress_meta
-       ) VALUES (?, ?, ?, 'upload', 'us_seed', 'zh-Hans', ?, 'srt', 'target',
+       ) VALUES (?, ?, ?, 'upload', 'us_seed', 'zh-Hans', ?, ?, 'target',
          '{"asr":"auto","mt":"auto","tts":null}', 1, '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
@@ -209,6 +210,7 @@ export function insertJob(raw: RawDb, o: JobSeed): void {
       o.anon ?? "anon_seed",
       o.status ?? "queued",
       o.output_mode ?? "dub_only",
+      o.subtitle_delivery ?? "srt",
       o.priority ?? 0,
       o.advisory_duration_ms ?? null,
       o.enqueue_at,

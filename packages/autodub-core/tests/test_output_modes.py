@@ -48,6 +48,9 @@ def _mock_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
                         lambda placements, out, total: Path(out).write_bytes(b"a"))  # noqa: ARG005
     monkeypatch.setattr(stages.ff, "mux",
                         lambda v, a, o, ambient=None, metadata=None: Path(o).write_bytes(b"mp4"))  # noqa: ARG005, E501
+    monkeypatch.setattr(stages.ff, "probe_dimensions", lambda p: (1920, 1080))  # noqa: ARG005
+    monkeypatch.setattr(stages.ff, "burn_subtitles",
+                        lambda video, srt, out, **kw: Path(out).write_bytes(b"burned"))  # noqa: ARG005, E501
 
 
 # --------------------------------------------------------------------------- #
@@ -135,38 +138,127 @@ def test_mux_clears_stale_deliverable_when_mode_narrows(tmp_path: Path, monkeypa
     assert not paths.dubbed_video.exists()  # stale deliverable cleared, not left behind
 
 
-def test_mux_burned_delivery_deferred_no_crash(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    # delivery=both (srt + burned) with the burn flag off: srt + video still
-    # produced, burn-in deferred to M2.1 (no exception, no burned artifact).
+def test_mux_both_burned_delivers_burned_video_not_srt(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # M2.1 (flag ON): output_mode=both + delivery=burned -> the deliverable is the burned
+    # video (dub + burned subs); no srt is delivered, and burned_video is the primary.
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    _mock_ffmpeg(monkeypatch)
+    out = stages.mux(paths, output_mode="both", subtitle_delivery="burned")
+    assert out == paths.burned_video
+    assert paths.burned_video.exists()
+    assert not paths.subtitles.exists()  # delivery=burned carries no srt deliverable
+
+
+def test_mux_delivery_both_produces_srt_and_burned_video(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # delivery=both: deliver the srt AND a burned video; burned_video is the primary.
     paths = JobPaths(tmp_path).ensure()
     (paths.video / "original.mp4").write_bytes(b"vid")
     _write_segments(paths, [("hello", "你好")])
     _mock_ffmpeg(monkeypatch)
     out = stages.mux(paths, output_mode="both", subtitle_delivery="both")
-    assert out == paths.dubbed_video
-    assert paths.dubbed_video.exists()
+    assert out == paths.burned_video
+    assert paths.burned_video.exists()
     assert paths.subtitles.exists()
 
 
-def test_mux_burned_only_no_srt_fallback_raises(tmp_path: Path) -> None:
-    # subtitle_only + burned (no srt) with the flag off: there is no channel to
-    # carry the subtitle, so mux must fail explicitly rather than return a dead
-    # (non-existent) primary path and re-run forever on resume.
+def test_mux_subtitle_only_burned_burns_onto_original(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # subtitle_only + burned: no dub; burn onto the ORIGINAL video; deliver only the burned video.
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    _mock_ffmpeg(monkeypatch)
+    seen: dict[str, Path] = {}
+
+    def _capture(video, srt, out, **kw) -> None:  # noqa: ANN001
+        seen["src"] = Path(video)
+        Path(out).write_bytes(b"burned")
+
+    monkeypatch.setattr(stages.ff, "burn_subtitles", _capture)
+    out = stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="burned")
+    assert out == paths.burned_video
+    assert paths.burned_video.exists()
+    assert not paths.dubbed_video.exists()  # subtitle_only produces no dub
+    assert seen["src"] == paths.original_video()  # burned onto the original video
+
+
+def test_mux_burn_cap_change_invalidates_cache(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # A BURN_MAX_HEIGHT change must re-burn (the cap shapes the pixels), not serve the stale video.
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    _mock_ffmpeg(monkeypatch)
+    calls = {"n": 0}
+
+    def _count(video, srt, out, **kw) -> None:  # noqa: ANN001
+        calls["n"] += 1
+        Path(out).write_bytes(b"burned")
+
+    monkeypatch.setattr(stages.ff, "burn_subtitles", _count)
+    stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="burned")
+    stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="burned")  # cached
+    assert calls["n"] == 1  # second run hit the cache
+    monkeypatch.setattr(stages.config, "BURN_MAX_HEIGHT", 720)
+    stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="burned")  # cap changed
+    assert calls["n"] == 2  # re-burned, not served stale
+
+
+def test_mux_both_both_flag_off_raises(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # Ops fallback (BURN_SUBTITLES_ENABLED off): a burn request can't be honored. Even both+both,
+    # which HAS a dub video, must NOT silently ship the plain (unburned) dub as the burned one —
+    # fail loud, uniform for every burn request when the re-encode is off (CodeX bot P2).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    _mock_ffmpeg(monkeypatch)
+    monkeypatch.setattr(stages.config, "BURN_SUBTITLES_ENABLED", False)
+    with pytest.raises(NotImplementedError, match="BURN_SUBTITLES_ENABLED is off"):
+        stages.mux(paths, output_mode="both", subtitle_delivery="both")
+    assert not paths.burned_video.exists()  # never produced a burned artifact
+
+
+def test_mux_burned_only_flag_off_raises(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # subtitle_only + burned with the burn OFF: fail explicitly (the burned video cannot be
+    # produced) rather than complete with a dead primary path.
     paths = JobPaths(tmp_path).ensure()
     _write_segments(paths, [("hello", "你好")])
-    with pytest.raises(NotImplementedError, match="no srt fallback"):
+    monkeypatch.setattr(stages.config, "BURN_SUBTITLES_ENABLED", False)
+    with pytest.raises(NotImplementedError, match="BURN_SUBTITLES_ENABLED is off"):
         stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="burned")
     assert not paths.subtitles.exists()
 
 
-def test_mux_burn_flag_on_is_not_implemented(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    # locks the placeholder: flipping the flag without the M2.1 burn impl raises,
-    # rather than silently shipping a plain (un-burned) video.
+def test_mux_subtitle_only_both_flag_off_raises(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # subtitle_only + both with the burn OFF: no dub video for the burned deliverable; degrading
+    # to srt-only would diverge from complete()'s mode matrix. Fail loud (uniform).
     paths = JobPaths(tmp_path).ensure()
     _write_segments(paths, [("hello", "你好")])
-    monkeypatch.setattr(stages.config, "BURN_SUBTITLES_ENABLED", True)
-    with pytest.raises(NotImplementedError):
-        stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="burned")
+    monkeypatch.setattr(stages.config, "BURN_SUBTITLES_ENABLED", False)
+    with pytest.raises(NotImplementedError, match="BURN_SUBTITLES_ENABLED is off"):
+        stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="both")
+    assert not paths.subtitles.exists()
+
+
+def test_mux_threads_burn_font_to_force_style(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # The per-locale font is threaded into the libass force_style so a CJK burn is legible; with no
+    # font the kernel passes None (libass default, fine for Latin).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    _mock_ffmpeg(monkeypatch)
+    seen: dict[str, object] = {}
+
+    def _capture(video, srt, out, **kw) -> None:  # noqa: ANN001
+        seen.update(kw)
+        Path(out).write_bytes(b"burned")
+
+    monkeypatch.setattr(stages.ff, "burn_subtitles", _capture)
+    stages.mux(paths, output_mode="both", subtitle_delivery="burned", burn_font="Noto Sans CJK SC")
+    assert seen["force_style"] == "FontName=Noto Sans CJK SC"
+    seen.clear()
+    stages.mux(paths, output_mode="both", subtitle_delivery="burned", force=True)  # no font
+    assert seen["force_style"] is None
 
 
 @pytest.mark.parametrize(

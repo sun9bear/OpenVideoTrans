@@ -70,10 +70,11 @@ describe("2-concurrent soak — exactly-once claim under two interleaved workers
     });
     expect(aComplete.status).toBe(409); // stale_claim
 
-    // Worker B (the live claim) completes successfully.
+    // Worker B (the live claim) completes successfully. Job "j" is dub_only (insertJob default),
+    // so the delivery contract requires a video_key (M2.1 mode matrix).
     const bComplete = await call(env, clock.deps, "POST", "/internal/jobs/j/complete", {
       worker: WORKER,
-      body: { claim_version: cvB, artifacts: {} },
+      body: { claim_version: cvB, artifacts: { video_key: `artifacts/j/${cvB}/v.mp4` } },
     });
     expect(bComplete.status).toBe(200);
     expect(bComplete.json.job.status).toBe("done");

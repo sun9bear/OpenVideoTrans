@@ -152,7 +152,7 @@ describe("POST /jobs — HEAD-after-PUT verification", () => {
     expect(create.status).toBe(404);
   });
 
-  it("burned subtitle delivery is rejected (M2.1 feature) (400)", async () => {
+  it("burned subtitle delivery is accepted (M2.1) and stored on the job", async () => {
     const { env, r2 } = makeEnv({ r2Creds: true });
     const { deps } = makeClock(1_000_000);
     const s = await sign(env, deps, "u1");
@@ -167,6 +167,8 @@ describe("POST /jobs — HEAD-after-PUT verification", () => {
         subtitle_lang: "target",
       },
     });
-    expect(create.status).toBe(400);
+    expect(create.status).toBe(201);
+    expect(create.json.job.status).toBe("queued");
+    expect(create.json.job.subtitle_delivery).toBe("burned"); // burn delivery persisted
   });
 });

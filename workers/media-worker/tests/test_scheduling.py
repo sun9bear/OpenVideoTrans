@@ -24,8 +24,16 @@ from media_worker.scheduling import (
 # weight_class — output_mode -> light/heavy (ungameable: derived from the mode, NOT the browser
 # advisory_duration hint). subtitle_only is light (no TTS); dub_only/both carry TTS = heavy.
 # --------------------------------------------------------------------------- #
-def test_subtitle_only_is_light() -> None:
-    assert weight_class("subtitle_only") == LIGHT
+def test_subtitle_only_srt_is_light() -> None:
+    assert weight_class("subtitle_only") == LIGHT  # default delivery = srt
+    assert weight_class("subtitle_only", "srt") == LIGHT
+
+
+def test_burned_subtitle_is_heavy() -> None:
+    # M2.1: a burned/both subtitle delivery runs a libass VIDEO re-encode (as heavy as a dub), so it
+    # must NOT be classed light — otherwise it could fill a reserved free_min_share slot (CodeX P2).
+    assert weight_class("subtitle_only", "burned") == HEAVY
+    assert weight_class("subtitle_only", "both") == HEAVY
 
 
 def test_dub_and_both_are_heavy() -> None:

@@ -7,7 +7,7 @@
   import { OUTPUT_MODE_OPTIONS, SUBTITLE_DELIVERY_OPTIONS } from "./lib/modes";
   import { renderTurnstile, turnstileEnabled, type TurnstileHandle } from "./lib/turnstile";
   import { COPY } from "./lib/copy";
-  import type { CreateJobBody, JobView, OutputMode, SubtitleLang } from "./lib/types";
+  import type { CreateJobBody, JobView, OutputMode, SubtitleDelivery, SubtitleLang } from "./lib/types";
 
   // SAME-ORIGIN by default (""): the Worker serves both this SPA and /api, so the X-OVT-Anon-Id +
   // JSON requests are not cross-origin and need no CORS. Setting VITE_API_BASE to a DIFFERENT origin
@@ -31,6 +31,7 @@
   let outputMode = $state<OutputMode>("subtitle_only");
   let targetLang = $state("zh-Hans");
   let subtitleLang = $state<SubtitleLang>("target");
+  let subtitleDelivery = $state<SubtitleDelivery>("srt");
 
   let phase = $state<"idle" | "working" | "polling" | "done" | "failed">("idle");
   let statusText = $state("");
@@ -86,7 +87,9 @@
 
   const sizeWarn = $derived(file ? oversizeWarning(file.size) : null);
   const typeWarn = $derived(file ? unsupportedTypeWarning(file) : null);
-  const durationWarn = $derived(file && durationSec ? longVideoWarning(durationSec, outputMode) : null);
+  const durationWarn = $derived(
+    file && durationSec ? longVideoWarning(durationSec, outputMode, subtitleDelivery) : null,
+  );
   const busy = $derived(phase === "working" || phase === "polling");
   // sizeWarn is ADVISORY only (the byte cap is runtime-configurable server-side via CFG-GUARD; a stale
   // client mirror must not hard-block a file the server would accept). typeWarn is the one hard gate
@@ -159,7 +162,7 @@
         upload_session_id: sign.upload_session_id,
         target_lang: targetLang,
         output_mode: outputMode,
-        subtitle_delivery: "srt", // 烧录属 M2.1，前端锁 srt
+        subtitle_delivery: subtitleDelivery,
         subtitle_lang: subtitleLang,
       };
       if (durationSec) body.advisory_duration_ms = Math.round(durationSec * 1000);
@@ -302,7 +305,7 @@
       <legend>字幕形式</legend>
       {#each SUBTITLE_DELIVERY_OPTIONS as opt (opt.value)}
         <label class="radio" class:disabled={opt.disabled}>
-          <input type="radio" name="delivery" value={opt.value} checked={opt.value === "srt"} disabled={opt.disabled || busy} />
+          <input type="radio" name="delivery" value={opt.value} bind:group={subtitleDelivery} disabled={opt.disabled || busy} />
           <span>{opt.label}</span>
         </label>
       {/each}

@@ -418,7 +418,7 @@ def run_forever(
                 if claim is not None:
                     if config is None:
                         cfg = _fetch_config(cp, cfg)
-                    weight = weight_class(claim.job.output_mode)
+                    weight = weight_class(claim.job.output_mode, claim.job.subtitle_delivery)
                     tracker.add(weight)  # reserve the slot BEFORE submit (dispatcher = sole writer)
                     _spawn(pool, tracker, weight, cp, storage, claim, base, cfg, admit, produce)
             except Exception:

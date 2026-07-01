@@ -72,6 +72,11 @@ class JobPaths:
     def subtitles(self) -> Path:
         return self.output / "subtitles.srt"
 
+    @property
+    def burned_video(self) -> Path:
+        # M2.1: the libass re-encode deliverable (subtitles burned into the picture).
+        return self.output / "burned_video.mp4"
+
     def original_video(self) -> Path | None:
         if not self.video.exists():
             return None
@@ -106,8 +111,22 @@ MAX_SPEEDUP = 2.0          # never speed a segment up more than 2x (quality floo
 DEFAULT_CHARS_PER_SEC = 15.0   # fallback budget hint when no probe is available
 
 # Output feature flags
-# Burned-in subtitles (re-encode with libass) are an M2.1 fast-follow; the kernel
-# carries a guarded placeholder and the front-end disables the option in M1
-# (T1.3d). Flipping this on without the M2.1 burn implementation is a programming
-# error — the mux placeholder raises rather than silently shipping plain video.
-BURN_SUBTITLES_ENABLED = False
+# Burned-in subtitles (M2.1): a libass re-encode that paints the subtitle into the
+# picture. Implemented in mux() + ff.burn_subtitles(); enabled by default now that
+# the burn path exists (the front-end exposes the option). Ops may set this False to
+# fall back to srt-only delivery (a 'burned' request then needs an srt channel).
+BURN_SUBTITLES_ENABLED = True
+
+# Burn re-encode caps — keep a burn job bounded on a small (2GB) box:
+#  * BURN_MAX_WIDTH / BURN_MAX_HEIGHT: downscale a source that exceeds EITHER cap (keeping
+#    aspect, even dims, never upscaling) BEFORE the libass overlay, so a large-area source —
+#    incl. an ultra-wide / anamorphic frame whose height alone is within the cap — can't blow
+#    up encode time/memory on a small box.
+#  * BURN_ENCODE_TIMEOUT_SEC: kill a wedged re-encode rather than hold the lease forever
+#    (the worker maps the resulting failure to a coded terminal, never a paid retry).
+#  * BURN_CRF / BURN_PRESET: x264 quality / speed tradeoff tuned for a free, time-bounded box.
+BURN_MAX_WIDTH = 1920
+BURN_MAX_HEIGHT = 1080
+BURN_ENCODE_TIMEOUT_SEC = 1800
+BURN_CRF = 23
+BURN_PRESET = "veryfast"

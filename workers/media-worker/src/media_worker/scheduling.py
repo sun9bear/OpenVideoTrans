@@ -28,10 +28,15 @@ class ClaimPlan(Enum):
     LIGHT_ONLY = "light_only"  # only the reserved slots remain — claim a LIGHT job or nothing
 
 
-def weight_class(output_mode: str) -> str:
-    """LIGHT iff subtitle_only (no TTS); every other / unknown mode is HEAVY (fail-safe: an unknown
-    mode must never consume a reserved light slot)."""
-    return LIGHT if output_mode == "subtitle_only" else HEAVY
+def weight_class(output_mode: str, subtitle_delivery: str = "srt") -> str:
+    """LIGHT iff a pure-SRT subtitle job (subtitle_only + srt delivery): no TTS, no re-encode.
+
+    A burned / both subtitle delivery runs a full libass VIDEO re-encode (M2.1) — as heavy as a
+    dub — so it must NOT take a reserved light slot (free_min_share protects short srt-only work).
+    Any other / unknown mode or delivery is HEAVY (fail-safe — never consumes a reserved slot).
+    """
+    light = output_mode == "subtitle_only" and subtitle_delivery == "srt"
+    return LIGHT if light else HEAVY
 
 
 def heavy_budget(worker_concurrency: int, light_slot_reserve: int) -> int:

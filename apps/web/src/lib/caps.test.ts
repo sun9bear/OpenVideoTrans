@@ -25,6 +25,17 @@ describe("caps — duration", () => {
     expect(longVideoWarning(600, "subtitle_only")).toBeNull(); // 10min < 30min subtitle cap
   });
 
+  it("burned/both subtitle delivery is bound by the tighter dub cap (M2.1, CodeX bot P2)", () => {
+    // subtitle_only+srt uses the 30-min cap; +burned/+both uses the 5-min dub cap (mirrors server).
+    expect(exceedsDurationCap(600, "subtitle_only", "srt")).toBe(false); // 10min < 30min srt cap
+    expect(exceedsDurationCap(600, "subtitle_only", "burned")).toBe(true); // 10min > 5min dub cap
+    expect(exceedsDurationCap(300, "subtitle_only", "burned")).toBe(false); // exactly at dub cap
+    const w = longVideoWarning(600, "subtitle_only", "burned");
+    expect(w).toContain("超出");
+    expect(w).toContain("SRT"); // hint points at the re-encode-free srt delivery
+    expect(longVideoWarning(600, "subtitle_only", "both")).toContain("超出"); // both also burns
+  });
+
   it("longVideoWarning ignores unknown/zero durations", () => {
     expect(longVideoWarning(0, "dub_only")).toBeNull();
     expect(longVideoWarning(Number.NaN, "dub_only")).toBeNull();

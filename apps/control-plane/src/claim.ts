@@ -21,6 +21,10 @@ export const ADVISORY_NULL_SENTINEL = Number.MAX_SAFE_INTEGER;
 export interface ComparatorJob {
   job_id: string;
   output_mode: string;
+  // Optional in the JS mirror (defaults to the common "srt"); the DB row always has a value. Only a
+  // burned/both value changes ordering (drops the row out of the subtitle fast lane), so tests that
+  // exercise that must set it explicitly.
+  subtitle_delivery?: string;
   enqueue_at: number;
   advisory_duration_ms: number | null;
   // PR-C: the cross-mode anti-starvation deadline (enqueue + deadlineMaxWaitMs). A row whose
@@ -28,8 +32,11 @@ export interface ComparatorJob {
   deadline_at: number;
 }
 
-export function modeTier(outputMode: string): number {
-  return outputMode === "subtitle_only" ? 1 : 0;
+export function modeTier(outputMode: string, subtitleDelivery = "srt"): number {
+  // Only a PURE-SRT subtitle job gets the fast lane (字幕 > 配音): it's cheap (no TTS, no re-encode).
+  // A burned/both subtitle delivery is a libass VIDEO re-encode (as heavy as a dub), so it drops to the
+  // heavy tier and must NOT jump ahead of dub work — mirrors weight_class + the light-slot filter.
+  return outputMode === "subtitle_only" && subtitleDelivery === "srt" ? 1 : 0;
 }
 
 // Clamp the wait to >= 0 then floor: a not-yet-aged job contributes bucket 0. The clamp + integer
@@ -54,7 +61,8 @@ export function compareClaimable(
   const bOverdue = b.deadline_at <= now ? 0 : 1;
   if (aOverdue !== bOverdue) return aOverdue - bOverdue; // overdue (0) before non-overdue (1)
   if (aOverdue === 0 && a.deadline_at !== b.deadline_at) return a.deadline_at - b.deadline_at;
-  const tier = modeTier(b.output_mode) - modeTier(a.output_mode);
+  const tier =
+    modeTier(b.output_mode, b.subtitle_delivery) - modeTier(a.output_mode, a.subtitle_delivery);
   if (tier !== 0) return tier;
   const aging =
     agingBucket(now, b.enqueue_at, agingBucketMs) - agingBucket(now, a.enqueue_at, agingBucketMs);
@@ -87,11 +95,13 @@ WHERE job_id = (
     SELECT job_id FROM jobs
     WHERE (status = 'queued' OR (status = 'running' AND lease_expires_at <= ?))
       AND attempt < ?
-      -- PR-D free_min_share: when bound 1 (lightOnly) restrict the candidate set to LIGHT
-      -- (subtitle_only) jobs so a reserved slot never admits a dub job; bound 0 = no filter
-      -- (the default claim is byte-identical to before). A WHERE key only — the §8 ORDER BY below
-      -- is untouched, so the comparator/SQL mirror proven in claim.test.ts still holds.
-      AND (? = 0 OR output_mode = 'subtitle_only')
+      -- PR-D free_min_share: when bound 1 (lightOnly) restrict the candidate set to LIGHT jobs so a
+      -- reserved slot never admits heavy work; bound 0 = no filter (the default claim is byte-identical
+      -- to before). LIGHT = a PURE-SRT subtitle job (subtitle_only + srt): no TTS, no re-encode. A
+      -- burned/both subtitle delivery runs an M2.1 libass VIDEO re-encode (as heavy as a dub), so it
+      -- must NOT take a reserved light slot (mirrors the worker's weight_class). A WHERE key only — the
+      -- §8 ORDER BY below is untouched, so the comparator/SQL mirror proven in claim.test.ts holds.
+      AND (? = 0 OR (output_mode = 'subtitle_only' AND subtitle_delivery = 'srt'))
     ORDER BY
       -- Key 0 (PR-C deadline backstop): overdue rows (deadline_at <= now) first, oldest deadline
       -- first, promoted above the mode tier (cross-mode anti-starvation). A non-overdue row gets a
@@ -100,7 +110,7 @@ WHERE job_id = (
       -- rows by deadline. Two '?' bind now. Mirrors compareClaimable's key 0 exactly.
       CASE WHEN deadline_at <= ? THEN 0 ELSE 1 END ASC,
       CASE WHEN deadline_at <= ? THEN deadline_at ELSE 0 END ASC,
-      CASE WHEN output_mode = 'subtitle_only' THEN 1 ELSE 0 END DESC,
+      CASE WHEN output_mode = 'subtitle_only' AND subtitle_delivery = 'srt' THEN 1 ELSE 0 END DESC,
       -- aging bucket: MAX(0, ...) + CAST forces integer floor division so the key matches
       -- agingBucket()/Math.floor exactly on BOTH D1 (INTEGER binding) and better-sqlite3 (REAL
       -- binding). Without the CAST a REAL-bound param makes the division float-divide and silences
