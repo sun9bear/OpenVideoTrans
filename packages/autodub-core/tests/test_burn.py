@@ -23,9 +23,15 @@ def test_burn_vf_caps_ultrawide_by_width() -> None:
 
 
 def test_burn_vf_no_scale_within_cap() -> None:
-    # never upscale: a source within BOTH caps gets only the subtitles filter
+    # never upscale: a source within BOTH caps AND already even gets only the subtitles filter
     assert ff._burn_vf(1280, 720, 1920, 1080) == "subtitles=subs.srt"
     assert ff._burn_vf(1920, 1080, 1920, 1080) == "subtitles=subs.srt"  # exactly at cap
+
+
+def test_burn_vf_evens_odd_dims_within_cap() -> None:
+    # an in-cap but ODD-dimension source must STILL be scaled to even dims — x264 + yuv420p reject
+    # odd width/height, so 853x481 -> 852x480 (CodeX P2, follow-on of the yuv420p normalization).
+    assert ff._burn_vf(853, 481, 1920, 1080) == "scale=852:480,subtitles=subs.srt"
 
 
 def test_burn_vf_force_style_is_quoted() -> None:

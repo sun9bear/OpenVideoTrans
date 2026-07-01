@@ -365,12 +365,14 @@ def _burn_vf(width: int, height: int, max_width: int, max_height: int, *,
     e.g. a CJK font name so the burn renders non-Latin scripts.
     """
     parts: list[str] = []
-    # Downscale-only: the factor is capped at 1.0, so a source within both caps is untouched.
+    # Downscale-only: the factor is capped at 1.0, so a source within both caps is never enlarged.
     factor = min(max_width / width, max_height / height, 1.0)
-    if factor < 1.0:
-        # Force even dims (x264 needs them); clamp to >= 2 so a tiny factor can't round to 0.
-        target_w = max(2, int(width * factor) // 2 * 2)
-        target_h = max(2, int(height * factor) // 2 * 2)
+    # Even target dims: x264 + yuv420p (4:2:0) reject odd width/height. Round down to even (min 2,
+    # so a tiny factor can't round to 0). Emit a scale whenever the target differs from the source —
+    # i.e. to downscale AND to fix an in-cap but ODD-dimension source (e.g. 853x481 -> 852x480).
+    target_w = max(2, int(width * factor) // 2 * 2)
+    target_h = max(2, int(height * factor) // 2 * 2)
+    if (target_w, target_h) != (width, height):
         parts.append(f"scale={target_w}:{target_h}")
     subs = f"subtitles={subs_name}"
     if force_style:
