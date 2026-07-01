@@ -87,7 +87,9 @@
 
   const sizeWarn = $derived(file ? oversizeWarning(file.size) : null);
   const typeWarn = $derived(file ? unsupportedTypeWarning(file) : null);
-  const durationWarn = $derived(file && durationSec ? longVideoWarning(durationSec, outputMode) : null);
+  const durationWarn = $derived(
+    file && durationSec ? longVideoWarning(durationSec, outputMode, subtitleDelivery) : null,
+  );
   const busy = $derived(phase === "working" || phase === "polling");
   // sizeWarn is ADVISORY only (the byte cap is runtime-configurable server-side via CFG-GUARD; a stale
   // client mirror must not hard-block a file the server would accept). typeWarn is the one hard gate
