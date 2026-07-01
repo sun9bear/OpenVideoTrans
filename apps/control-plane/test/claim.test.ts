@@ -20,10 +20,26 @@ describe("§8 comparator (pure total order)", () => {
     expect(order).toEqual(["A", "C", "B", "D"]);
   });
 
-  it("modeTier: subtitle_only outranks dub modes", () => {
-    expect(modeTier("subtitle_only")).toBe(1);
+  it("modeTier: only pure-SRT subtitle jobs get the fast lane; burned/both drop to the heavy tier", () => {
+    expect(modeTier("subtitle_only")).toBe(1); // default delivery = srt
+    expect(modeTier("subtitle_only", "srt")).toBe(1);
+    expect(modeTier("subtitle_only", "burned")).toBe(0); // libass re-encode = heavy, no fast lane
+    expect(modeTier("subtitle_only", "both")).toBe(0);
     expect(modeTier("dub_only")).toBe(0);
     expect(modeTier("both")).toBe(0);
+  });
+
+  it("compareClaimable: a burned subtitle job does NOT outrank a dub job (both tier 0)", () => {
+    // Same enqueue/advisory so ONLY the mode tier could differ: a pure-srt subtitle wins, but a
+    // burned subtitle ties the dub on tier and falls through to the FIFO/job_id tiebreak (CodeX bot P2).
+    const FAR = 9_999_999_999;
+    const dub: ComparatorJob = { job_id: "z_dub", output_mode: "dub_only", enqueue_at: 1000, advisory_duration_ms: 100, deadline_at: FAR };
+    const srtSub: ComparatorJob = { job_id: "a_sub", output_mode: "subtitle_only", subtitle_delivery: "srt", enqueue_at: 1000, advisory_duration_ms: 100, deadline_at: FAR };
+    const burnSub: ComparatorJob = { job_id: "a_sub", output_mode: "subtitle_only", subtitle_delivery: "burned", enqueue_at: 1000, advisory_duration_ms: 100, deadline_at: FAR };
+    expect(compareClaimable(srtSub, dub, 2000, 1000)).toBeLessThan(0); // pure-srt subtitle wins its tier
+    // burned subtitle ties the dub on every key EXCEPT job_id ("a_sub" < "z_dub"), so it only wins the
+    // FIFO/id tiebreak — proving it gained NO mode-tier advantage:
+    expect(compareClaimable({ ...burnSub, job_id: "z_dub" }, dub, 2000, 1000)).toBe(0); // true tie
   });
 
   it("agingBucket floors elapsed/bucket and clamps a future enqueue to 0", () => {
