@@ -151,6 +151,22 @@ def test_admits_burned_subtitles_on_a_video_source(
     )  # must not raise
 
 
+def test_burned_subtitle_uses_the_tighter_dub_duration_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A burned subtitle_only job runs a video re-encode, so it is bound by the DUB cap (300s), not
+    # the loose srt-only cap (1800s): 600s passes srt-only but is rejected for a burn (bot P2).
+    monkeypatch.setattr(adm.ff, "assert_allowed_input_format", lambda p: None)
+    monkeypatch.setattr(adm.ff, "probe_duration_ms", lambda p: 600_000)  # 10 min: > 300s dub cap
+    with pytest.raises(SourceRejected) as ei:
+        admit_source(
+            _write(tmp_path / "in", 32),
+            make_job(output_mode="subtitle_only", subtitle_delivery="burned"),
+            TEST_CONFIG,
+        )
+    assert ei.value.error_code == "over_duration"
+
+
 def test_duration_cap_sec_mapping() -> None:
     assert TEST_CONFIG.duration_cap_sec("subtitle_only") == 1800
     assert TEST_CONFIG.duration_cap_sec("dub_only") == 300

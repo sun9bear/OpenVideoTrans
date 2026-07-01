@@ -204,39 +204,38 @@ def test_mux_burn_cap_change_invalidates_cache(tmp_path: Path, monkeypatch) -> N
     assert calls["n"] == 2  # re-burned, not served stale
 
 
-def test_mux_burn_off_falls_back_to_srt(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    # Ops fallback: BURN_SUBTITLES_ENABLED off + delivery=both -> srt + plain dub, no burned video.
+def test_mux_both_both_flag_off_raises(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # Ops fallback (BURN_SUBTITLES_ENABLED off): a burn request can't be honored. Even both+both,
+    # which HAS a dub video, must NOT silently ship the plain (unburned) dub as the burned one —
+    # fail loud, uniform for every burn request when the re-encode is off (CodeX bot P2).
     paths = JobPaths(tmp_path).ensure()
     (paths.video / "original.mp4").write_bytes(b"vid")
     _write_segments(paths, [("hello", "你好")])
     _mock_ffmpeg(monkeypatch)
     monkeypatch.setattr(stages.config, "BURN_SUBTITLES_ENABLED", False)
-    out = stages.mux(paths, output_mode="both", subtitle_delivery="both")
-    assert out == paths.dubbed_video  # the plain dub is the video deliverable
-    assert paths.subtitles.exists()
-    assert not paths.burned_video.exists()  # burn disabled -> no burned artifact
+    with pytest.raises(NotImplementedError, match="BURN_SUBTITLES_ENABLED is off"):
+        stages.mux(paths, output_mode="both", subtitle_delivery="both")
+    assert not paths.burned_video.exists()  # never produced a burned artifact
 
 
 def test_mux_burned_only_flag_off_raises(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    # subtitle_only + burned with the burn OFF and no srt channel: fail explicitly
-    # (no deliverable channel) rather than complete with a dead primary path.
+    # subtitle_only + burned with the burn OFF: fail explicitly (the burned video cannot be
+    # produced) rather than complete with a dead primary path.
     paths = JobPaths(tmp_path).ensure()
     _write_segments(paths, [("hello", "你好")])
     monkeypatch.setattr(stages.config, "BURN_SUBTITLES_ENABLED", False)
-    with pytest.raises(NotImplementedError, match="no srt fallback"):
+    with pytest.raises(NotImplementedError, match="BURN_SUBTITLES_ENABLED is off"):
         stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="burned")
     assert not paths.subtitles.exists()
 
 
 def test_mux_subtitle_only_both_flag_off_raises(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    # subtitle_only + both with the burn OFF: there is no dub video to carry the burned deliverable
-    # the contract requires, and degrading to srt-only would diverge from control-plane complete()'s
-    # mode matrix (which expects a video_key for any burn delivery and cannot see the kernel flag).
-    # Fail loud instead of stranding the job (uniform with the subtitle_only+burned case).
+    # subtitle_only + both with the burn OFF: no dub video for the burned deliverable; degrading
+    # to srt-only would diverge from complete()'s mode matrix. Fail loud (uniform).
     paths = JobPaths(tmp_path).ensure()
     _write_segments(paths, [("hello", "你好")])
     monkeypatch.setattr(stages.config, "BURN_SUBTITLES_ENABLED", False)
-    with pytest.raises(NotImplementedError, match="no dub video"):
+    with pytest.raises(NotImplementedError, match="BURN_SUBTITLES_ENABLED is off"):
         stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="both")
     assert not paths.subtitles.exists()
 

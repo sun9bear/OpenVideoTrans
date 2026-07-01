@@ -41,21 +41,25 @@ def admit_source(path: Path, job: Job, config: WorkerConfig) -> None:
     #    smaller object that was then swapped via the still-valid presigned PUT.
     if path.stat().st_size > config.max_upload_bytes:
         raise SourceRejected("upload_too_large")
-    # 3. duration vs the per-mode hard cap. The browser advisory_duration_ms is sort-only; THIS is
-    #    the enforced cap — a lie to jump the queue is still stopped here.
-    try:
-        duration_ms = ff.probe_duration_ms(path)
-    except ff.FfmpegError as exc:
-        raise SourceRejected("unsupported_format") from exc
-    if duration_ms > config.duration_cap_sec(job.output_mode) * 1000:
-        raise SourceRejected("over_duration")
-    # 4. burned subtitles (M2.1) paint onto pixels, so a burn job NEEDS a video stream. Uploads
-    #    allow audio/*; an audio-only source picked with burned/both delivery can't be burned, so
-    #    reject with a coded terminal instead of failing deep in the libass re-encode.
+    # A burned/both subtitle delivery runs a video re-encode (like a dub): bind it by the tighter
+    # dub-class cap AND require a video stream — computed once, used by both gates below.
     burns = job.subtitle_delivery in ("burned", "both") and job.output_mode in (
         "subtitle_only",
         "both",
     )
+    # 3. duration vs the per-mode hard cap. advisory_duration_ms is sort-only; THIS is the enforced
+    #    cap — a lie to jump the queue is stopped here. A burn job uses the tighter dub-class cap
+    #    (NOT the loose srt-only cap): a 30-min burn re-encode would blow the small box.
+    try:
+        duration_ms = ff.probe_duration_ms(path)
+    except ff.FfmpegError as exc:
+        raise SourceRejected("unsupported_format") from exc
+    cap_mode = "dub_only" if burns else job.output_mode
+    if duration_ms > config.duration_cap_sec(cap_mode) * 1000:
+        raise SourceRejected("over_duration")
+    # 4. burned subtitles (M2.1) paint onto pixels, so a burn job NEEDS a video stream. Uploads
+    #    allow audio/*; an audio-only source with burned/both delivery can't be burned, so reject
+    #    with a coded terminal instead of failing deep in the libass re-encode.
     if burns:
         try:
             ff.probe_dimensions(path)  # raises FfmpegError when the source has no video stream

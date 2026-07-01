@@ -420,24 +420,13 @@ def mux(
     burn_requested = want_subs and subtitle_delivery in ("burned", "both")
     want_burn = burn_requested and config.BURN_SUBTITLES_ENABLED  # M2.1 libass re-encode
     if burn_requested and not want_burn:
-        # Burn re-encode OFF (ops fallback): a 'burned' request degrades to its srt channel.
-        if not want_srt:
-            # burned-only with the burn disabled and no srt fallback: there is no channel to
-            # carry the subtitle (nor its §3 AIGC disclosure), so fail explicitly rather than
-            # complete with zero deliverables and a dead primary path.
-            raise NotImplementedError(
-                "subtitle_delivery='burned' needs BURN_SUBTITLES_ENABLED or an srt channel; "
-                "the burn re-encode is off and there is no srt fallback")
-        if not want_video:
-            # subtitle_only + 'both' with the burn OFF: there is no dub video to carry the burned
-            # deliverable the contract still requires. The control-plane complete() matrix expects a
-            # video_key for ANY burn delivery and cannot see this kernel flag, so degrading to
-            # srt-only would diverge from it and strand the job (uploads srt, complete() 400s). Fail
-            # loud (coded terminal) instead — uniform with the burned-only case above.
-            raise NotImplementedError(
-                "subtitle_delivery='both' with the burn re-encode off and no dub video cannot "
-                "produce the burned video the delivery contract requires")
-        _log("mux: burned subtitles requested but BURN_SUBTITLES_ENABLED is off; srt only")
+        # Burn requested (burned/both) but the re-encode is OFF (ops fallback). We can't produce the
+        # burned video the user asked for, and neither worker nor complete() can tell an unburned
+        # video from a burned one — so FAIL LOUD (coded terminal) rather than silently ship a plain
+        # video (e.g. both+both would fall through to the plain dub) or diverge from the delivery
+        # contract. Ops must re-enable BURN_SUBTITLES_ENABLED to serve any burn request.
+        raise NotImplementedError(
+            "subtitle_delivery requires the burn re-encode, but BURN_SUBTITLES_ENABLED is off")
 
     # When burning, the burned_video IS the delivered video and dubbed_video is only its
     # intermediate (the burn source for a dub+burn job) — so it is built but not delivered.
