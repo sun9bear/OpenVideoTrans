@@ -24,6 +24,24 @@ function cfg(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return { ...DEFAULT_CONFIG, ...overrides };
 }
 
+describe("reservedMinutesForMode — burn reserves the dub-class cap (M2.1, CodeX bot P2)", () => {
+  // both != dub so the "don't remap both" rule is observable.
+  const c = cfg({ maxVideoDurationMs: { subtitle_only: 1_800_000, dub_only: 300_000, both: 600_000 } });
+
+  it("subtitle_only reserves the srt cap for srt, but the DUB cap for burned/both", () => {
+    expect(reservedMinutesForMode(c, "subtitle_only", "srt")).toBe(1_800_000);
+    expect(reservedMinutesForMode(c, "subtitle_only", "burned")).toBe(300_000); // re-encode = dub-class
+    expect(reservedMinutesForMode(c, "subtitle_only", "both")).toBe(300_000);
+    expect(reservedMinutesForMode(c, "subtitle_only")).toBe(1_800_000); // default delivery = srt
+  });
+
+  it("both keeps its OWN cap (not remapped to dub); dub_only unchanged", () => {
+    expect(reservedMinutesForMode(c, "both", "burned")).toBe(600_000); // both's own cap, not 300k
+    expect(reservedMinutesForMode(c, "both", "srt")).toBe(600_000);
+    expect(reservedMinutesForMode(c, "dub_only", "burned")).toBe(300_000);
+  });
+});
+
 function counter(
   raw: RawDb,
   scopeType: string,

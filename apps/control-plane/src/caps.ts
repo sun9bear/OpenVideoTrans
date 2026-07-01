@@ -47,8 +47,16 @@ export function dayBucket(ms: number): number {
 export function reservedMinutesForMode(
   config: RuntimeConfig,
   outputMode: "subtitle_only" | "dub_only" | "both",
+  subtitleDelivery: "srt" | "burned" | "both" = "srt",
 ): number {
-  return config.maxVideoDurationMs[outputMode];
+  // A burned subtitle_only job runs a video re-encode (dub-class cost), so it reserves — and the worker
+  // admits — against the tighter dub cap, NOT the loose srt-only cap. The two derive the SAME effective
+  // mode (worker: admission.py cap_mode), so a burn job accepted here is never later rejected
+  // over_duration for a cap the reserve didn't honor. `both` already carries the dub-class cap, so keep
+  // its own (possibly operator-customized) value — don't remap it.
+  const mode =
+    outputMode === "subtitle_only" && subtitleDelivery !== "srt" ? "dub_only" : outputMode;
+  return config.maxVideoDurationMs[mode];
 }
 
 interface Pool {

@@ -149,7 +149,7 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   // duration ceiling (ungameable; NOT the client advisory hint) and is snapshotted onto the row so the
   // refund decrements EXACTLY what was reserved.
   const now = ctx.deps.now();
-  const minutesMs = reservedMinutesForMode(ctx.config, outputMode);
+  const minutesMs = reservedMinutesForMode(ctx.config, outputMode, subtitleDelivery);
   // Reserve uses the CREATE-time per-mode cap. The worker's ffprobe over_duration gate enforces the cap
   // it reads at claim; if an operator RAISES maxVideoDurationMs while this job is queued, the worker
   // (which today reads /internal/config LIVE, not ?version=job.settings_version) could admit a longer job

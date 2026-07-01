@@ -54,7 +54,10 @@ def admit_source(path: Path, job: Job, config: WorkerConfig) -> None:
         duration_ms = ff.probe_duration_ms(path)
     except ff.FfmpegError as exc:
         raise SourceRejected("unsupported_format") from exc
-    cap_mode = "dub_only" if burns else job.output_mode
+    # Only subtitle_only+burned needs remapping (its own srt cap is too loose for a re-encode); both
+    # already carries the dub-class cap, so keep its OWN (possibly operator-customized) cap. The
+    # control-plane reservation derives the SAME effective mode, so reserve/admit stay in lockstep.
+    cap_mode = "dub_only" if (burns and job.output_mode == "subtitle_only") else job.output_mode
     if duration_ms > config.duration_cap_sec(cap_mode) * 1000:
         raise SourceRejected("over_duration")
     # 4. burned subtitles (M2.1) paint onto pixels, so a burn job NEEDS a video stream. Uploads

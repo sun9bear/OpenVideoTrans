@@ -13,6 +13,7 @@ A rejection raises SourceRejected(error_code); the worker deletes the source + f
 """
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import media_worker.admission as adm
@@ -165,6 +166,27 @@ def test_burned_subtitle_uses_the_tighter_dub_duration_cap(
             TEST_CONFIG,
         )
     assert ei.value.error_code == "over_duration"
+
+
+def test_burn_keeps_both_own_cap_not_remapped_to_dub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # both+burned uses BOTH's OWN cap, not remapped to dub (bot P2): with both=600s > dub=300s, a
+    # 500s both+burned admits, while a 500s subtitle_only+burned (dub-class) is rejected.
+    conf = dataclasses.replace(
+        TEST_CONFIG,
+        max_video_duration_subtitle_sec=1800,
+        max_video_duration_dub_sec=300,
+        max_video_duration_both_sec=600,
+    )
+    monkeypatch.setattr(adm.ff, "assert_allowed_input_format", lambda p: None)
+    monkeypatch.setattr(adm.ff, "probe_duration_ms", lambda p: 500_000)  # 500s
+    monkeypatch.setattr(adm.ff, "probe_dimensions", lambda p: (1920, 1080))
+    src = _write(tmp_path / "in", 32)
+    admit_source(src, make_job(output_mode="both", subtitle_delivery="burned"), conf)  # 500 < 600
+    with pytest.raises(SourceRejected) as ei:
+        admit_source(src, make_job(output_mode="subtitle_only", subtitle_delivery="burned"), conf)
+    assert ei.value.error_code == "over_duration"  # 500 > 300 dub cap
 
 
 def test_duration_cap_sec_mapping() -> None:
