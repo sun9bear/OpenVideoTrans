@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { ApiClient, ApiError } from "./lib/api";
-  import { ensureAnonId } from "./lib/session";
+  import { clearAnonCookie, ensureServerAnonId } from "./lib/session";
   import { longVideoWarning, oversizeWarning } from "./lib/caps";
   import { resolveUploadType, unsupportedTypeWarning } from "./lib/mime";
   import { OUTPUT_MODE_OPTIONS, SUBTITLE_DELIVERY_OPTIONS } from "./lib/modes";
@@ -54,8 +54,7 @@
   let pendingBody: CreateJobBody | null = null;
 
   onMount(() => {
-    const anonId = ensureAnonId(document, location.protocol === "https:");
-    api = new ApiClient(API_BASE, anonId);
+    void initIdentity();
     if (turnstileEnabled() && turnstileEl) {
       renderTurnstile(turnstileEl, onTurnstileToken, () => (turnstileToken = ""))
         .then((h) => {
@@ -69,6 +68,24 @@
     }
     return () => stopPolling();
   });
+
+  // Acquire the identity, then unlock the form (canSubmit gates on `api`). The server mint is the
+  // primary path (HMAC-signed id, the go-live posture); ensureServerAnonId falls back to a local id
+  // when the mint endpoint is unreachable — accepted server-side only in the dev posture.
+  async function initIdentity() {
+    const anonId = await ensureServerAnonId(document, location.protocol === "https:", API_BASE);
+    api = new ApiClient(API_BASE, anonId);
+  }
+
+  // The server rejected our held id (401 unauthenticated — e.g. a pre-HMAC legacy cookie after the
+  // key was injected, or an id signed under a dropped key). Clear it and mint a fresh signed id so
+  // the NEXT submit works; without this a bad cookie 401s every request until the user clears site
+  // data. Jobs owned by the rejected id were unreachable anyway (the server refused the id).
+  async function refreshIdentity() {
+    api = null; // block submits while the new identity is minted
+    clearAnonCookie(document);
+    await initIdentity();
+  }
 
   // Turnstile solved (or refreshed): record the token and, if an uploaded job is waiting on it, create.
   function onTurnstileToken(token: string) {
@@ -98,7 +115,9 @@
   // token solved during the upload stays fresh. EXCEPT: if the Turnstile widget failed to load, no
   // token can ever arrive, so block submit BEFORE the user wastes an upload (vs. parking forever).
   const turnstileBroken = $derived(turnstileEnabled() && turnstileFailed);
-  const canSubmit = $derived(!!file && !typeWarn && !busy && !turnstileBroken);
+  // `api` is null until the identity mint resolves (and while a 401 recovery re-mints) — submits are
+  // blocked rather than silently no-oping inside submit().
+  const canSubmit = $derived(!!api && !!file && !typeWarn && !busy && !turnstileBroken);
 
   // If the widget breaks WHILE a submission is parked waiting for a token, fail it rather than leaving
   // the form stuck in `working` forever (R4-A). The upload is already spent; the user can reload/retry.
@@ -272,6 +291,11 @@
 
   function fail(e: unknown) {
     phase = "failed";
+    if (e instanceof ApiError && e.status === 401 && e.code === "unauthenticated") {
+      void refreshIdentity();
+      errorMsg = "会话身份已失效，已自动重置，请重新提交。";
+      return;
+    }
     errorMsg = e instanceof ApiError ? `${e.message}（${e.code}）` : "网络错误，请稍后重试。";
   }
 </script>
