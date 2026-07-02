@@ -8,6 +8,7 @@ import {
   mintServerAnonId,
   newAnonId,
   readAnonId,
+  recoverAnonId,
 } from "./session";
 
 // A minimal fetch stub: mintServerAnonId only touches res.ok + res.json().
@@ -121,5 +122,24 @@ describe("session — server mint (POST /api/anon)", () => {
     clearAnonCookie(jar);
     expect(jar.cookie).toContain(`${ANON_COOKIE}=;`);
     expect(jar.cookie).toContain("Max-Age=0");
+  });
+
+  it("recoverAnonId clears FIRST and mints fresh — a held (rejected) cookie is never reused", async () => {
+    const fetchFn = fetchReturning(200, { anon_id: SIGNED });
+    const jar = { cookie: `${ANON_COOKIE}=anon_rejected.badsig` };
+    const id = await recoverAnonId(jar, true, "", fetchFn);
+    // fetch WAS called: proves the clear happened before the read-or-mint (an existing cookie would
+    // otherwise short-circuit ensureServerAnonId straight back to the rejected id)
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(id).toBe(SIGNED);
+    expect(jar.cookie).toContain(`${ANON_COOKIE}=${encodeURIComponent(SIGNED)}`);
+  });
+
+  it("recoverAnonId falls back to a NEW local id (never the rejected one) when the mint fails", async () => {
+    const jar = { cookie: `${ANON_COOKIE}=anon_rejected.badsig` };
+    const id = await recoverAnonId(jar, false, "", fetchReturning(503, null));
+    expect(id).toMatch(/^anon_[0-9a-f]{32}$/);
+    expect(id).not.toBe("anon_rejected.badsig");
+    expect(jar.cookie).not.toContain("anon_rejected.badsig");
   });
 });

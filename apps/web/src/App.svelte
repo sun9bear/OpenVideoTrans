@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { ApiClient, ApiError } from "./lib/api";
-  import { clearAnonCookie, ensureServerAnonId } from "./lib/session";
+  import { ensureServerAnonId, recoverAnonId } from "./lib/session";
   import { longVideoWarning, oversizeWarning } from "./lib/caps";
   import { resolveUploadType, unsupportedTypeWarning } from "./lib/mime";
   import { OUTPUT_MODE_OPTIONS, SUBTITLE_DELIVERY_OPTIONS } from "./lib/modes";
@@ -83,8 +83,12 @@
   // data. Jobs owned by the rejected id were unreachable anyway (the server refused the id).
   async function refreshIdentity() {
     api = null; // block submits while the new identity is minted
-    clearAnonCookie(document);
-    await initIdentity();
+    const anonId = await recoverAnonId(document, location.protocol === "https:", API_BASE);
+    api = new ApiClient(API_BASE, anonId);
+  }
+
+  function isIdentityRejection(e: unknown): boolean {
+    return e instanceof ApiError && e.status === 401 && e.code === "unauthenticated";
   }
 
   // Turnstile solved (or refreshed): record the token and, if an uploaded job is waiting on it, create.
@@ -285,13 +289,21 @@
       const { url } = await api.downloadUrl(job.job_id, which);
       window.open(url, "_blank", "noopener");
     } catch (e) {
+      // A rejected identity (e.g. key rotation completed while the page sat on `done`) also needs the
+      // recovery — otherwise every click re-sends the rejected id until a reload. Keep phase as-is
+      // (the artifacts of THIS job belong to the rejected id and are gone for this browser either way).
+      if (isIdentityRejection(e)) {
+        void refreshIdentity();
+        errorMsg = "会话身份已失效，已自动重置；该任务的下载已不可用，请重新提交任务。";
+        return;
+      }
       errorMsg = e instanceof ApiError ? `${e.message}（${e.code}）` : "下载链接获取失败，请重试。";
     }
   }
 
   function fail(e: unknown) {
     phase = "failed";
-    if (e instanceof ApiError && e.status === 401 && e.code === "unauthenticated") {
+    if (isIdentityRejection(e)) {
       void refreshIdentity();
       errorMsg = "会话身份已失效，已自动重置，请重新提交。";
       return;

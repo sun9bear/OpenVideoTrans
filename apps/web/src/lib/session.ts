@@ -91,6 +91,19 @@ export function clearAnonCookie(jar: CookieJar): void {
   jar.cookie = `${ANON_COOKIE}=; Path=/; Max-Age=0; SameSite=Strict`;
 }
 
+// Recovery for a server-REJECTED id (401): clear the held cookie FIRST (an existing cookie would
+// short-circuit ensureServerAnonId back to the rejected id), then mint fresh. Never returns the old
+// id — on mint failure the fallback is a NEW local id (dev posture), not the rejected one.
+export async function recoverAnonId(
+  jar: CookieJar,
+  isSecure: boolean,
+  baseUrl: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<string> {
+  clearAnonCookie(jar);
+  return ensureServerAnonId(jar, isSecure, baseUrl, fetchFn);
+}
+
 // Read-or-mint the anon id, preferring the server mint (the go-live identity path). An existing
 // cookie is reused as-is — the SPA cannot verify the HMAC client-side; the server verdict is
 // authoritative (see the 401 recovery in App.svelte). A minted id is ALSO persisted client-side:
