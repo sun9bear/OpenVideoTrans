@@ -77,11 +77,16 @@ describe("session — anon id", () => {
 describe("session — server mint (POST /api/anon)", () => {
   const SIGNED = "anon_0123456789abcdef0123456789abcdef.aa11"; // shape only; server owns the format
 
-  it("mintServerAnonId returns the minted id and posts to {base}/api/anon", async () => {
+  it("mintServerAnonId returns the minted id and posts to {base}/api/anon with a timeout", async () => {
     const fetchFn = fetchReturning(200, { anon_id: SIGNED });
     expect(await mintServerAnonId("https://cp.example/", fetchFn)).toBe(SIGNED);
-    // trailing slashes trimmed so the Worker's exact-path router matches (mirrors ApiClient)
-    expect(fetchFn).toHaveBeenCalledWith("https://cp.example/api/anon", { method: "POST" });
+    // trailing slashes trimmed so the Worker's exact-path router matches (mirrors ApiClient); the
+    // request carries an abort signal so a HUNG connection settles (falls to the local fallback)
+    // instead of locking the form forever.
+    expect(fetchFn).toHaveBeenCalledWith(
+      "https://cp.example/api/anon",
+      expect.objectContaining({ method: "POST", signal: expect.any(AbortSignal) }),
+    );
   });
 
   it("returns null on non-2xx / malformed body / thrown fetch (never throws)", async () => {
@@ -127,19 +132,21 @@ describe("session — server mint (POST /api/anon)", () => {
   it("recoverAnonId clears FIRST and mints fresh — a held (rejected) cookie is never reused", async () => {
     const fetchFn = fetchReturning(200, { anon_id: SIGNED });
     const jar = { cookie: `${ANON_COOKIE}=anon_rejected.badsig` };
-    const id = await recoverAnonId(jar, true, "", fetchFn);
+    const { anonId, minted } = await recoverAnonId(jar, true, "", fetchFn);
     // fetch WAS called: proves the clear happened before the read-or-mint (an existing cookie would
-    // otherwise short-circuit ensureServerAnonId straight back to the rejected id)
+    // otherwise short-circuit the read-or-mint straight back to the rejected id)
     expect(fetchFn).toHaveBeenCalledOnce();
-    expect(id).toBe(SIGNED);
+    expect(anonId).toBe(SIGNED);
+    expect(minted).toBe(true); // server provenance — the UI may claim "identity reset"
     expect(jar.cookie).toContain(`${ANON_COOKIE}=${encodeURIComponent(SIGNED)}`);
   });
 
-  it("recoverAnonId falls back to a NEW local id (never the rejected one) when the mint fails", async () => {
+  it("recoverAnonId falls back to a NEW local id (never the rejected one) and reports minted=false", async () => {
     const jar = { cookie: `${ANON_COOKIE}=anon_rejected.badsig` };
-    const id = await recoverAnonId(jar, false, "", fetchReturning(503, null));
-    expect(id).toMatch(/^anon_[0-9a-f]{32}$/);
-    expect(id).not.toBe("anon_rejected.badsig");
+    const { anonId, minted } = await recoverAnonId(jar, false, "", fetchReturning(503, null));
+    expect(anonId).toMatch(/^anon_[0-9a-f]{32}$/);
+    expect(anonId).not.toBe("anon_rejected.badsig");
+    expect(minted).toBe(false); // fallback provenance — the UI must NOT claim the reset succeeded
     expect(jar.cookie).not.toContain("anon_rejected.badsig");
   });
 });

@@ -66,16 +66,24 @@ export function ensureAnonId(jar: CookieJar, isSecure: boolean): string {
   return id;
 }
 
+// Bound the mint round-trip: a HUNG connection (accepted but never answered) would otherwise leave
+// the awaited fetch pending for minutes — the promise never settles, the fallback never fires, and
+// the form stays locked (canSubmit gates on the identity). 10s is generous for one tiny POST.
+const MINT_TIMEOUT_MS = 10_000;
+
 // POST {base}/api/anon — mint a server-signed anon id. Returns null on ANY failure (network error,
-// non-2xx, malformed body) instead of throwing: the caller falls back to a local id and the server
-// stays the enforcement point (an id the server won't accept just 401s there; nothing to enforce
-// client-side).
+// timeout, non-2xx, malformed body) instead of throwing: the caller falls back to a local id and
+// the server stays the enforcement point (an id the server won't accept just 401s there; nothing
+// to enforce client-side).
 export async function mintServerAnonId(
   baseUrl: string,
   fetchFn: typeof fetch = fetch,
 ): Promise<string | null> {
   try {
-    const res = await fetchFn(`${baseUrl.replace(/\/+$/, "")}/api/anon`, { method: "POST" });
+    // AbortSignal.timeout is baseline in every browser shipping fetch we target; guarded anyway so
+    // an exotic embedder without it degrades to the unbounded fetch instead of throwing here.
+    const signal = typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(MINT_TIMEOUT_MS) : null;
+    const res = await fetchFn(`${baseUrl.replace(/\/+$/, "")}/api/anon`, { method: "POST", signal });
     if (!res.ok) return null;
     const body = (await res.json().catch(() => null)) as { anon_id?: unknown } | null;
     return typeof body?.anon_id === "string" && body.anon_id !== "" ? body.anon_id : null;
@@ -92,16 +100,23 @@ export function clearAnonCookie(jar: CookieJar): void {
 }
 
 // Recovery for a server-REJECTED id (401): clear the held cookie FIRST (an existing cookie would
-// short-circuit ensureServerAnonId back to the rejected id), then mint fresh. Never returns the old
+// short-circuit the read-or-mint back to the rejected id), then mint fresh. Never returns the old
 // id — on mint failure the fallback is a NEW local id (dev posture), not the rejected one.
+// `minted` reports provenance so the UI can be honest: in the prod posture a fallback local id is
+// guaranteed to be rejected again (unsigned), so "identity reset" must NOT be claimed on fallback.
 export async function recoverAnonId(
   jar: CookieJar,
   isSecure: boolean,
   baseUrl: string,
   fetchFn: typeof fetch = fetch,
-): Promise<string> {
+): Promise<{ anonId: string; minted: boolean }> {
   clearAnonCookie(jar);
-  return ensureServerAnonId(jar, isSecure, baseUrl, fetchFn);
+  const minted = await mintServerAnonId(baseUrl, fetchFn);
+  if (minted) {
+    jar.cookie = anonCookie(minted, { secure: isSecure });
+    return { anonId: minted, minted: true };
+  }
+  return { anonId: ensureAnonId(jar, isSecure), minted: false };
 }
 
 // Read-or-mint the anon id, preferring the server mint (the go-live identity path). An existing

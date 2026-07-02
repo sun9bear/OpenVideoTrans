@@ -50,7 +50,7 @@ describe("App — smoke", () => {
     await vi.waitFor(() => {
       expect(document.cookie).toContain(`${ANON_COOKIE}=${encodeURIComponent(SIGNED)}`);
     });
-    expect(fetchFn).toHaveBeenCalledWith("/api/anon", { method: "POST" });
+    expect(fetchFn).toHaveBeenCalledWith("/api/anon", expect.objectContaining({ method: "POST" }));
 
     unmount(app);
     target.remove();

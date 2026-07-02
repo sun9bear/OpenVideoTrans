@@ -83,8 +83,14 @@
   // data. Jobs owned by the rejected id were unreachable anyway (the server refused the id).
   async function refreshIdentity() {
     api = null; // block submits while the new identity is minted
-    const anonId = await recoverAnonId(document, location.protocol === "https:", API_BASE);
+    const { anonId, minted } = await recoverAnonId(document, location.protocol === "https:", API_BASE);
     api = new ApiClient(API_BASE, anonId);
+    // Honest outcome messaging: a fallback local id is guaranteed-rejected in the prod posture, so
+    // claiming "reset succeeded" would send the user into a doomed resubmit loop. Self-heals on the
+    // next 401 once /api/anon is reachable again.
+    errorMsg = minted
+      ? "会话身份已重置，请重新提交。"
+      : "会话身份重置未完成（身份服务暂时不可用），请稍后重试或刷新页面。";
   }
 
   function isIdentityRejection(e: unknown): boolean {
@@ -293,8 +299,8 @@
       // recovery — otherwise every click re-sends the rejected id until a reload. Keep phase as-is
       // (the artifacts of THIS job belong to the rejected id and are gone for this browser either way).
       if (isIdentityRejection(e)) {
-        void refreshIdentity();
-        errorMsg = "会话身份已失效，已自动重置；该任务的下载已不可用，请重新提交任务。";
+        errorMsg = "会话身份已失效，正在重置…（该任务的下载已不可用）";
+        void refreshIdentity(); // completion overwrites errorMsg with the honest outcome
         return;
       }
       errorMsg = e instanceof ApiError ? `${e.message}（${e.code}）` : "下载链接获取失败，请重试。";
@@ -304,8 +310,8 @@
   function fail(e: unknown) {
     phase = "failed";
     if (isIdentityRejection(e)) {
-      void refreshIdentity();
-      errorMsg = "会话身份已失效，已自动重置，请重新提交。";
+      errorMsg = "会话身份已失效，正在重置…";
+      void refreshIdentity(); // completion overwrites errorMsg with the honest outcome
       return;
     }
     errorMsg = e instanceof ApiError ? `${e.message}（${e.code}）` : "网络错误，请稍后重试。";
@@ -381,6 +387,12 @@
     <button onclick={submit} disabled={!canSubmit}>
       {busy ? "处理中…" : "开始翻译"}
     </button>
+
+    {#if !api}
+      <!-- identity acquisition in flight (first mint, or a 401 recovery re-mint): without this the
+           disabled submit button gives zero indication of WHY the form is locked -->
+      <p class="status" aria-live="polite">正在初始化会话…</p>
+    {/if}
 
     {#if phase !== "idle"}
       <p class="status" aria-live="polite">{statusText}</p>
