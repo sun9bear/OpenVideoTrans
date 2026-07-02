@@ -296,10 +296,15 @@
       window.open(url, "_blank", "noopener");
     } catch (e) {
       // A rejected identity (e.g. key rotation completed while the page sat on `done`) also needs the
-      // recovery — otherwise every click re-sends the rejected id until a reload. Keep phase as-is
-      // (the artifacts of THIS job belong to the rejected id and are gone for this browser either way).
+      // recovery — otherwise every click re-sends the rejected id until a reload. The artifacts of
+      // THIS job belong to the rejected id, so drop the stale done-state too: leaving the download
+      // buttons up would just 404 under the new identity on the next click.
       if (isIdentityRejection(e)) {
-        errorMsg = "会话身份已失效，正在重置…（该任务的下载已不可用）";
+        stopPolling();
+        job = null;
+        phase = "idle";
+        statusText = "";
+        errorMsg = "会话身份已失效，正在重置…（该任务的下载已不可用，请重新提交任务）";
         void refreshIdentity(); // completion overwrites errorMsg with the honest outcome
         return;
       }
