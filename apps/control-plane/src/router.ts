@@ -7,7 +7,7 @@ import { logEvent, metricsEndpoint } from "./obs";
 import { providerAvailability, reportProviderExhausted } from "./providers";
 import { selectProducer } from "./queue";
 import { adminSetSetting, configEndpoint, getConfig, getSettingsAudit } from "./settings";
-import { adminTakedown } from "./admin_ops";
+import { adminSweep, adminTakedown } from "./admin_ops";
 import { signUpload } from "./uploads";
 import { claimNext, complete, createJob, download, fail, getJob, heartbeat } from "./jobs";
 
@@ -76,6 +76,9 @@ const ROUTES: Route[] = [
   // (operator-only, separate ADMIN_TOKEN). The public takedown INTAKE is the abuse contact in the
   // SPA privacy notice; the operator actions the request through this route.
   route("POST", "/internal/admin/takedown", "admin", adminTakedown),
+  // DEPLOY: external sweeper trigger (CF Cron omitted at launch). GitHub Actions (sweep.yml) calls
+  // this every 5 min with ADMIN_TOKEN to run the sweeper pass the scheduled() handler would.
+  route("POST", "/internal/admin/sweep", "admin", adminSweep),
 ];
 
 // Length-stable comparison so the internal-bearer check does not leak via timing.

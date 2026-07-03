@@ -1,9 +1,20 @@
 import type { Ctx } from "./core";
 import { HttpError, asObject, json, optString, reqString, readJson } from "./core";
-import { deletePrefix } from "./sweep";
+import { deletePrefix, runSweep } from "./sweep";
 import { refundJob } from "./caps";
 import { REFUNDABLE_ERROR_CODES, TAKEN_DOWN } from "./errors";
 import { logEvent } from "./obs";
+
+// POST /internal/admin/sweep (admin-authed) — run ONE sweeper pass on demand. The CF Cron trigger is
+// omitted at launch (account schedules API rejected it), so an external scheduler (GitHub Actions,
+// .github/workflows/sweep.yml, every 5 min) drives the sweeper by calling this. Identical work to the
+// scheduled() handler: TTL purge · lost-worker recovery · deadline enforcement · upload-orphan clean ·
+// queue reconcile. ctx.config is the same KV-over-defaults config the request path reads.
+export async function adminSweep(ctx: Ctx): Promise<Response> {
+  const summary = await runSweep(ctx.env, ctx.deps, ctx.config);
+  logEvent("admin_sweep", { count: summary.purged + summary.requeued + summary.workerLost });
+  return json({ ok: true, summary });
+}
 
 // M3 (#29) — operator takedown (DMCA/DSA / abuse). Admin-authed (router.ts "admin" = ADMIN_TOKEN,
 // separate from the worker bearer). Forcibly removes ONE job's media and terminalizes it.
