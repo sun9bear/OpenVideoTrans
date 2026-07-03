@@ -39,11 +39,10 @@
     "R2_BUCKET": "ovt-media",
     // M2-CLOSE PR-B (#26): mark this deploy as production so the anon-identity surface fails CLOSED
     // (503) until ANON_ID_HMAC_KEY is injected — getActor accepts a raw id only under OVT_ENV='dev'.
-    // ⚠⚠ GO-LIVE BLOCKER (owner-confirmed 2026-06-29): do NOT inject ANON_ID_HMAC_KEY and do NOT enable
-    // public production traffic until the web SPA is wired to mint a signed anon_id via POST /api/anon
-    // (apps/web/T2.6 follow-up). Safety-wise this is fail-CLOSED, not unsafe: with the key set but the
-    // SPA un-wired, prod browsers 401 (cannot run), and with no key prod actor routes 503 — neither
-    // admits a forgeable identity. Go-live is gated on (key injected AND SPA wired) together.
+    // ✅ SPA wiring landed (was the owner-confirmed 2026-06-29 GO-LIVE BLOCKER): apps/web now mints its
+    // anon_id via POST /api/anon (ensureServerAnonId) and recovers from a rejected id (401) by
+    // re-minting. DEPLOY must inject ANON_ID_HMAC_KEY (wrangler secret put) BEFORE opening public
+    // traffic — until then prod actor routes stay fail-closed 503, which is the intended posture.
     "OVT_ENV": "prod"
   }
 }

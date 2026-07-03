@@ -1,8 +1,11 @@
-// Anonymous-first identity (T2.6). The browser mints a 128-bit random anon_id and persists it in a
-// first-party cookie, sending it as X-OVT-Anon-Id (the control-plane's ownership scope for presign +
-// job access). A random UUID is unguessable, so it is practically unforgeable on its own; true
-// server-side HMAC signing/verification of the cookie needs a control-plane SECRET and is routed to
-// SECRETS / abuse-gate hardening (out of this frontend unit's apps/web/** file scope).
+// Anonymous-first identity (T2.6; server-mint wiring = M2-CLOSE PR-B follow-up, the go-live blocker).
+// The control plane is the identity authority: on first visit the SPA mints its anon id via
+// POST /api/anon, which returns a server-HMAC-signed `<base>.<sig>` id (and sets this same
+// first-party cookie). The id rides X-OVT-Anon-Id on every /api call and is verified server-side
+// (getActor) — a forged/unsigned id fails closed there (401). When the mint endpoint is unreachable
+// (offline dev, pre-deploy stubs) the SPA falls back to a locally-minted random id: the server
+// accepts a raw id ONLY in the explicit dev posture (OVT_ENV=dev, no ANON_ID_HMAC_KEY), so the
+// fallback can never weaken the prod trust boundary.
 export const ANON_COOKIE = "ovt_anon";
 const ONE_YEAR_SEC = 365 * 24 * 60 * 60;
 
@@ -53,11 +56,86 @@ export interface CookieJar {
   cookie: string;
 }
 
-// Read-or-create the stable anon id against a cookie holder.
+// Read-or-create a LOCAL anon id against a cookie holder. This is the offline/dev fallback building
+// block — the primary path is ensureServerAnonId below, which prefers the server-signed mint.
 export function ensureAnonId(jar: CookieJar, isSecure: boolean): string {
   const existing = readAnonId(jar.cookie);
   if (existing) return existing;
   const id = newAnonId();
   jar.cookie = anonCookie(id, { secure: isSecure });
   return id;
+}
+
+// Bound the mint round-trip: a HUNG connection (accepted but never answered) would otherwise leave
+// the awaited fetch pending for minutes — the promise never settles, the fallback never fires, and
+// the form stays locked (canSubmit gates on the identity). 10s is generous for one tiny POST.
+const MINT_TIMEOUT_MS = 10_000;
+
+// POST {base}/api/anon — mint a server-signed anon id. Returns null on ANY failure (network error,
+// timeout, non-2xx, malformed body) instead of throwing: the caller falls back to a local id and
+// the server stays the enforcement point (an id the server won't accept just 401s there; nothing
+// to enforce client-side).
+export async function mintServerAnonId(
+  baseUrl: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<string | null> {
+  try {
+    // AbortSignal.timeout is baseline in every browser shipping fetch we target; guarded anyway so
+    // an exotic embedder without it degrades to the unbounded fetch instead of throwing here.
+    const signal = typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(MINT_TIMEOUT_MS) : null;
+    const res = await fetchFn(`${baseUrl.replace(/\/+$/, "")}/api/anon`, { method: "POST", signal });
+    if (!res.ok) return null;
+    const body = (await res.json().catch(() => null)) as { anon_id?: unknown } | null;
+    return typeof body?.anon_id === "string" && body.anon_id !== "" ? body.anon_id : null;
+  } catch {
+    return null;
+  }
+}
+
+// Expire the anon cookie. Used when the server rejects the held id as invalid (401) — e.g. a
+// pre-HMAC legacy id after ANON_ID_HMAC_KEY was injected, or an id signed under a since-dropped key —
+// so a fresh signed id can be minted instead of every request 401ing until the user clears site data.
+export function clearAnonCookie(jar: CookieJar): void {
+  jar.cookie = `${ANON_COOKIE}=; Path=/; Max-Age=0; SameSite=Strict`;
+}
+
+// Recovery for a server-REJECTED id (401): clear the held cookie FIRST (an existing cookie would
+// short-circuit the read-or-mint back to the rejected id), then mint fresh. Never returns the old
+// id — on mint failure the fallback is a NEW local id (dev posture), not the rejected one.
+// `minted` reports provenance so the UI can be honest: in the prod posture a fallback local id is
+// guaranteed to be rejected again (unsigned), so "identity reset" must NOT be claimed on fallback.
+export async function recoverAnonId(
+  jar: CookieJar,
+  isSecure: boolean,
+  baseUrl: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<{ anonId: string; minted: boolean }> {
+  clearAnonCookie(jar);
+  const minted = await mintServerAnonId(baseUrl, fetchFn);
+  if (minted) {
+    jar.cookie = anonCookie(minted, { secure: isSecure });
+    return { anonId: minted, minted: true };
+  }
+  return { anonId: ensureAnonId(jar, isSecure), minted: false };
+}
+
+// Read-or-mint the anon id, preferring the server mint (the go-live identity path). An existing
+// cookie is reused as-is — the SPA cannot verify the HMAC client-side; the server verdict is
+// authoritative (see the 401 recovery in App.svelte). A minted id is ALSO persisted client-side:
+// the mint response sets the same cookie, but writing it here keeps the flow correct even if that
+// Set-Cookie is dropped, and keeps this testable against a plain cookie jar.
+export async function ensureServerAnonId(
+  jar: CookieJar,
+  isSecure: boolean,
+  baseUrl: string,
+  fetchFn: typeof fetch = fetch,
+): Promise<string> {
+  const existing = readAnonId(jar.cookie);
+  if (existing) return existing;
+  const minted = await mintServerAnonId(baseUrl, fetchFn);
+  if (minted) {
+    jar.cookie = anonCookie(minted, { secure: isSecure });
+    return minted;
+  }
+  return ensureAnonId(jar, isSecure); // offline/dev fallback (server accepts raw ids only in dev)
 }

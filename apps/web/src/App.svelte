@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { ApiClient, ApiError } from "./lib/api";
-  import { ensureAnonId } from "./lib/session";
+  import { ensureServerAnonId, recoverAnonId } from "./lib/session";
   import { longVideoWarning, oversizeWarning } from "./lib/caps";
   import { resolveUploadType, unsupportedTypeWarning } from "./lib/mime";
   import { OUTPUT_MODE_OPTIONS, SUBTITLE_DELIVERY_OPTIONS } from "./lib/modes";
@@ -54,8 +54,7 @@
   let pendingBody: CreateJobBody | null = null;
 
   onMount(() => {
-    const anonId = ensureAnonId(document, location.protocol === "https:");
-    api = new ApiClient(API_BASE, anonId);
+    void initIdentity();
     if (turnstileEnabled() && turnstileEl) {
       renderTurnstile(turnstileEl, onTurnstileToken, () => (turnstileToken = ""))
         .then((h) => {
@@ -69,6 +68,34 @@
     }
     return () => stopPolling();
   });
+
+  // Acquire the identity, then unlock the form (canSubmit gates on `api`). The server mint is the
+  // primary path (HMAC-signed id, the go-live posture); ensureServerAnonId falls back to a local id
+  // when the mint endpoint is unreachable — accepted server-side only in the dev posture.
+  async function initIdentity() {
+    const anonId = await ensureServerAnonId(document, location.protocol === "https:", API_BASE);
+    api = new ApiClient(API_BASE, anonId);
+  }
+
+  // The server rejected our held id (401 unauthenticated — e.g. a pre-HMAC legacy cookie after the
+  // key was injected, or an id signed under a dropped key). Clear it and mint a fresh signed id so
+  // the NEXT submit works; without this a bad cookie 401s every request until the user clears site
+  // data. Jobs owned by the rejected id were unreachable anyway (the server refused the id).
+  async function refreshIdentity() {
+    api = null; // block submits while the new identity is minted
+    const { anonId, minted } = await recoverAnonId(document, location.protocol === "https:", API_BASE);
+    api = new ApiClient(API_BASE, anonId);
+    // Honest outcome messaging: a fallback local id is guaranteed-rejected in the prod posture, so
+    // claiming "reset succeeded" would send the user into a doomed resubmit loop. Self-heals on the
+    // next 401 once /api/anon is reachable again.
+    errorMsg = minted
+      ? "会话身份已重置，请重新提交。"
+      : "会话身份重置未完成（身份服务暂时不可用），请稍后重试或刷新页面。";
+  }
+
+  function isIdentityRejection(e: unknown): boolean {
+    return e instanceof ApiError && e.status === 401 && e.code === "unauthenticated";
+  }
 
   // Turnstile solved (or refreshed): record the token and, if an uploaded job is waiting on it, create.
   function onTurnstileToken(token: string) {
@@ -98,7 +125,9 @@
   // token solved during the upload stays fresh. EXCEPT: if the Turnstile widget failed to load, no
   // token can ever arrive, so block submit BEFORE the user wastes an upload (vs. parking forever).
   const turnstileBroken = $derived(turnstileEnabled() && turnstileFailed);
-  const canSubmit = $derived(!!file && !typeWarn && !busy && !turnstileBroken);
+  // `api` is null until the identity mint resolves (and while a 401 recovery re-mints) — submits are
+  // blocked rather than silently no-oping inside submit().
+  const canSubmit = $derived(!!api && !!file && !typeWarn && !busy && !turnstileBroken);
 
   // If the widget breaks WHILE a submission is parked waiting for a token, fail it rather than leaving
   // the form stuck in `working` forever (R4-A). The upload is already spent; the user can reload/retry.
@@ -266,12 +295,30 @@
       const { url } = await api.downloadUrl(job.job_id, which);
       window.open(url, "_blank", "noopener");
     } catch (e) {
+      // A rejected identity (e.g. key rotation completed while the page sat on `done`) also needs the
+      // recovery — otherwise every click re-sends the rejected id until a reload. The artifacts of
+      // THIS job belong to the rejected id, so drop the stale done-state too: leaving the download
+      // buttons up would just 404 under the new identity on the next click.
+      if (isIdentityRejection(e)) {
+        stopPolling();
+        job = null;
+        phase = "idle";
+        statusText = "";
+        errorMsg = "会话身份已失效，正在重置…（该任务的下载已不可用，请重新提交任务）";
+        void refreshIdentity(); // completion overwrites errorMsg with the honest outcome
+        return;
+      }
       errorMsg = e instanceof ApiError ? `${e.message}（${e.code}）` : "下载链接获取失败，请重试。";
     }
   }
 
   function fail(e: unknown) {
     phase = "failed";
+    if (isIdentityRejection(e)) {
+      errorMsg = "会话身份已失效，正在重置…";
+      void refreshIdentity(); // completion overwrites errorMsg with the honest outcome
+      return;
+    }
     errorMsg = e instanceof ApiError ? `${e.message}（${e.code}）` : "网络错误，请稍后重试。";
   }
 </script>
@@ -345,6 +392,12 @@
     <button onclick={submit} disabled={!canSubmit}>
       {busy ? "处理中…" : "开始翻译"}
     </button>
+
+    {#if !api}
+      <!-- identity acquisition in flight (first mint, or a 401 recovery re-mint): without this the
+           disabled submit button gives zero indication of WHY the form is locked -->
+      <p class="status" aria-live="polite">正在初始化会话…</p>
+    {/if}
 
     {#if phase !== "idle"}
       <p class="status" aria-live="polite">{statusText}</p>
