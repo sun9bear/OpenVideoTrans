@@ -16,7 +16,10 @@
 # Build from the REPO ROOT (docker compose sets context ../..):
 #   docker build -f workers/media-worker/Dockerfile -t ovt/media-worker .
 
-FROM python:3.12-slim AS runtime
+# python 3.11 (not 3.12): piper-tts 1.2.0 -> piper-phonemize ships prebuilt wheels only up to cp311,
+# so on 3.12 the install falls back to a source build that fails in this slim image (CodeX #61 P1).
+# faster-whisper / ctranslate2 support 3.11 fine.
+FROM python:3.11-slim AS runtime
 
 # ffmpeg/ffprobe for the kernel + admission; curl only for build-time model fetch (removed below).
 RUN apt-get update -q \
