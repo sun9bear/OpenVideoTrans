@@ -20,32 +20,33 @@
   // T2.3 sweeper cadence. Every minute keeps lost-worker recovery latency under the 180s lease TTL;
   // the per-tick row cap (SWEEP_BATCH_LIMIT) bounds each run. Operational tuning is CFG-GUARD/DEPLOY's.
   "triggers": { "crons": ["* * * * *"] },
+  // Resources pre-created on the owner's independent CF account (2026-06-21); wired 2026-07-03.
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "ovt-control-plane",
-      "database_id": "0000-set-at-deploy",
+      "database_name": "ovt-db",
+      "database_id": "49afb39a-8386-40b2-b15e-a273b5c2bfb8",
       "migrations_dir": "migrations"
     }
   ],
-  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "ovt-media" }],
-  "kv_namespaces": [{ "binding": "CONFIG", "id": "0000-set-at-deploy" }],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "ovt-artifacts" }],
+  "kv_namespaces": [{ "binding": "CONFIG", "id": "f06aa6bcf0e642ff91da834e47be219c" }],
   // T2.5 queue_adapter (CF Queues Free). The SAME Worker is producer (createJob emits a wake) and the
   // thin consumer (the `queue` handler reconciles the wake against the authoritative D1 worklist —
   // it never mutates job state). D1 stays the source of truth, so this is a latency-shaving overlay:
   // queueBackend defaults to `d1`; CFG-GUARD locks prod to cf_queues with an audited break-glass.
   // max_batch_timeout bounds wake latency; max_retries small because the D1 long-poll is the backstop.
   "queues": {
-    "producers": [{ "binding": "JOB_QUEUE", "queue": "ovt-job-wake" }],
+    "producers": [{ "binding": "JOB_QUEUE", "queue": "ovt-jobs" }],
     "consumers": [
-      { "queue": "ovt-job-wake", "max_batch_size": 100, "max_batch_timeout": 5, "max_retries": 3 }
+      { "queue": "ovt-jobs", "max_batch_size": 100, "max_batch_timeout": 5, "max_retries": 3 }
     ]
   },
   "vars": {
     // Non-secret defaults; the authoritative runtime values come from the settings table / KV
     // (CFG-GUARD owns validation). R2 account id + bucket are non-secret deploy vars.
-    "R2_ACCOUNT_ID": "0000-set-at-deploy",
-    "R2_BUCKET": "ovt-media",
+    "R2_ACCOUNT_ID": "7dcd59cfc49c3458c870f5621dbf7263",
+    "R2_BUCKET": "ovt-artifacts",
     // M2-CLOSE PR-B (#26): mark this deploy as production so the anon-identity surface fails CLOSED
     // (503) until ANON_ID_HMAC_KEY is injected — getActor accepts a raw id only under OVT_ENV='dev'.
     // ✅ SPA wiring landed (was the owner-confirmed 2026-06-29 GO-LIVE BLOCKER): apps/web now mints its
