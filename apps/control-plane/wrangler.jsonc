@@ -8,6 +8,15 @@
   "compatibility_date": "2024-12-01",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  // DEPLOY (#28): the SAME Worker serves the SPA (same-origin — the posture App.svelte assumes; no
+  // CORS surface, SameSite=Strict anon cookie stays first-party). Static requests are answered from
+  // the built bundle; run_worker_first keeps the API + cron + queue paths in Worker code. Build the
+  // SPA first (pnpm --filter @open-video-trans/web build) — wrangler uploads apps/web/dist verbatim.
+  "assets": {
+    "directory": "../web/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/internal/*"]
+  },
   // T2.3 sweeper cadence. Every minute keeps lost-worker recovery latency under the 180s lease TTL;
   // the per-tick row cap (SWEEP_BATCH_LIMIT) bounds each run. Operational tuning is CFG-GUARD/DEPLOY's.
   "triggers": { "crons": ["* * * * *"] },

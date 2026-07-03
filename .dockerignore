@@ -1,0 +1,12 @@
+# Build context allowlist for workers/media-worker/Dockerfile (context = repo root).
+# Everything is excluded, then only the Python workspace subset the worker image needs is
+# re-included — keeps node_modules/.git/apps out of the daemon upload (hundreds of MB).
+*
+!pyproject.toml
+!uv.lock
+!packages
+!workers
+packages/schemas/node_modules
+**/__pycache__
+**/.venv
+**/.pytest_cache

@@ -1,0 +1,31 @@
+# DEPLOY (#28) — media-worker on the VPS (single box, single container).
+#
+# network_mode: host is LOAD-BEARING, not a convenience: the nftables egress backstop
+# (workers/media-worker/deploy/nftables-egress.nft) filters the OUTPUT hook. Bridge-networked
+# containers egress through the FORWARD hook and would BYPASS the allowlist entirely — host
+# networking keeps every worker connection under the default-drop policy.
+#
+# Bring-up (see docs/DEPLOY-RUNBOOK.md for the full ordered procedure):
+#   docker compose -f deploy/docker-compose/docker-compose.yml up -d --build
+services:
+  media-worker:
+    build:
+      context: ../..
+      dockerfile: workers/media-worker/Dockerfile
+    image: ovt/media-worker:latest
+    restart: unless-stopped
+    network_mode: host
+    # Bootstrap-only env (control-plane URL + internal token); R2/provider credentials are pulled
+    # from /internal/credentials at startup and held in memory (SECRETS) — never in this file.
+    env_file: /etc/ovt/worker.env
+    volumes:
+      - ovt-workdir:/var/lib/ovt/jobs
+    # 4GB box: leave ~1GB to the OS; the worker's admission bounds per-job memory, this is the
+    # backstop against a pathological ffmpeg allocation taking the whole host down.
+    mem_limit: 3g
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
+
+volumes:
+  ovt-workdir:
