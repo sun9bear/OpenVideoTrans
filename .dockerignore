@@ -1,11 +1,18 @@
 # Build context allowlist for workers/media-worker/Dockerfile (context = repo root).
 # Everything is excluded, then only the Python workspace subset the worker image needs is
 # re-included — keeps node_modules/.git/apps out of the daemon upload (hundreds of MB).
+#
+# Docker semantics: after `*` excludes everything, `!packages` re-includes the DIRECTORY ENTRY but
+# NOT its contents — the build would copy empty dirs and `uv sync` would fail (CodeX #61 P1). So the
+# re-includes must recurse (`!packages/**`); the heavy re-excludes come AFTER (last match wins).
 *
 !pyproject.toml
 !uv.lock
 !packages
+!packages/**
 !workers
+!workers/**
+# Re-exclude heavy/unneeded paths within the re-included trees (order: after the !includes above).
 packages/schemas/node_modules
 **/__pycache__
 **/.venv
