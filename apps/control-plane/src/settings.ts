@@ -28,6 +28,13 @@ function intBound(key: string, min: number, max: number): SettingValidator {
   };
 }
 
+function boolBound(key: string): SettingValidator {
+  return (raw) => {
+    if (typeof raw !== "boolean") throw invalid(`${key} must be a boolean`);
+    return raw;
+  };
+}
+
 function enumBound(key: string, allowed: readonly string[]): SettingValidator {
   return (raw) => {
     if (typeof raw !== "string" || !allowed.includes(raw)) {
@@ -93,6 +100,10 @@ export const MUTABLE_SETTINGS: Record<string, SettingValidator> = {
   dailyActorJobCap: intBound("dailyActorJobCap", 1, 1_000_000),
   dailyActorMinutesMsCap: intBound("dailyActorMinutesMsCap", 60_000, 10_000_000_000),
   dailyIpJobCap: intBound("dailyIpJobCap", 1, 1_000_000),
+  // M3 (#29) kill-switch. MUTABLE (an intake on/off knob, NOT a paid-API/AIGC red-line gate — the
+  // RED_LINE ∩ MUTABLE = ∅ CI invariant still holds), so an operator can pause/resume intake live
+  // with a full CFG-GUARD audit row.
+  servicePaused: boolBound("servicePaused"),
 };
 
 // Keys that encode a RED LINE and must never become a runtime config knob. allow_paid/paid_providers

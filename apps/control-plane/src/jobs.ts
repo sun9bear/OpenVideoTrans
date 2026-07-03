@@ -124,6 +124,11 @@ function defaultAigcMarking(outputMode: string): Job["aigc_marking"] {
 
 // POST /jobs — verify the upload (HEAD + cap), then create a queued job carrying all v4 fields.
 export async function createJob(ctx: Ctx): Promise<Response> {
+  // M3 kill-switch: refuse new work while paused. Checked before the abuse gate / reserve / upload
+  // consume so a paused service touches no counters and consumes no upload session.
+  if (ctx.config.servicePaused) {
+    throw new HttpError(503, "service_paused", "service is temporarily paused; please retry later");
+  }
   const actor = ctx.actor!;
   const body = asObject(await readJson(ctx.request));
   const uploadSessionId = reqString(body, "upload_session_id");

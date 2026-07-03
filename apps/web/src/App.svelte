@@ -6,7 +6,7 @@
   import { resolveUploadType, unsupportedTypeWarning } from "./lib/mime";
   import { OUTPUT_MODE_OPTIONS, SUBTITLE_DELIVERY_OPTIONS } from "./lib/modes";
   import { renderTurnstile, turnstileEnabled, type TurnstileHandle } from "./lib/turnstile";
-  import { COPY } from "./lib/copy";
+  import { ABUSE_CONTACT, COPY, LEGAL } from "./lib/copy";
   import type { CreateJobBody, JobView, OutputMode, SubtitleDelivery, SubtitleLang } from "./lib/types";
 
   // SAME-ORIGIN by default (""): the Worker serves both this SPA and /api, so the X-OVT-Anon-Id +
@@ -371,4 +371,17 @@
     <p class="aigc">{COPY.aigc}</p>
     <p>{COPY.privacy}</p>
   </section>
+
+  <!-- M3 (#29): 放量前的隐私政策 / 条款 / 下架入口。collapsed by default to keep the flow clean; a
+       public hosted service taking user uploads needs a reachable policy + a DMCA/DSA contact. -->
+  <details class="legal">
+    <summary>{LEGAL.heading}</summary>
+    <h2>{LEGAL.privacyTitle}</h2>
+    <ul>{#each LEGAL.privacy as p}<li>{p}</li>{/each}</ul>
+    <h2>{LEGAL.termsTitle}</h2>
+    <ul>{#each LEGAL.terms as t}<li>{t}</li>{/each}</ul>
+    <h2>{LEGAL.takedownTitle}</h2>
+    <ul>{#each LEGAL.takedown as t}<li>{t}</li>{/each}</ul>
+    <p><a href={`mailto:${ABUSE_CONTACT}`}>{ABUSE_CONTACT}</a></p>
+  </details>
 </main>
