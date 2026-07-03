@@ -1,0 +1,33 @@
+name: sweep
+
+# DEPLOY — external sweeper trigger. CF Cron Triggers are not deployed on this account (the schedules
+# API rejected the trigger), so drive the control-plane sweeper (TTL purge · lost-worker recovery ·
+# deadline enforcement · upload-orphan cleanup · queue reconcile) by calling POST /internal/admin/sweep
+# every 5 minutes. Admin-authed with ADMIN_TOKEN (repo secret; same value injected as the Worker's
+# ADMIN_TOKEN secret). 5 min is GitHub's minimum cron granularity — lost-worker recovery lags the
+# 180s lease TTL by up to a few minutes, acceptable at launch; move to CF Cron (1 min) on a plan that
+# supports it. Also runnable on demand via workflow_dispatch.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+# Don't pile up overlapping sweeps if one run is slow.
+concurrency:
+  group: ovt-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger sweeper
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          if [ -z "$ADMIN_TOKEN" ]; then echo "ADMIN_TOKEN not set — skipping sweep"; exit 0; fi
+          code=$(curl -sS -o /tmp/sweep.json -w "%{http_code}" \
+            -X POST https://openvideotrans.xyz/internal/admin/sweep \
+            -H "Authorization: Bearer $ADMIN_TOKEN")
+          echo "sweep HTTP $code"; cat /tmp/sweep.json 2>/dev/null || true
+          test "$code" = "200"

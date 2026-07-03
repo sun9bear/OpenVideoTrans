@@ -21,9 +21,11 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*", "/internal/*"]
   },
-  // T2.3 sweeper cadence. Every minute keeps lost-worker recovery latency under the 180s lease TTL;
-  // the per-tick row cap (SWEEP_BATCH_LIMIT) bounds each run. Operational tuning is CFG-GUARD/DEPLOY's.
-  "triggers": { "crons": ["* * * * *"] },
+  // T2.3 sweeper cadence — CF Cron Triggers are OMITTED at launch: the account's schedules API
+  // rejected the trigger deploy (free-tier / entitlement), so the sweeper is driven externally
+  // instead by .github/workflows/sweep.yml (scheduled) hitting POST /internal/admin/sweep with the
+  // admin token. The scheduled() handler stays in src/index.ts (dormant with no cron bound); re-add
+  // `"triggers": { "crons": ["* * * * *"] }` here if the account later supports cron triggers.
   // Resources pre-created on the owner's independent CF account (2026-06-21); wired 2026-07-03.
   "d1_databases": [
     {

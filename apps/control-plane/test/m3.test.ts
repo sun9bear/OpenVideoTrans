@@ -182,6 +182,17 @@ describe("M3 takedown", () => {
     expect(row.refunded).toBe(0); // a done job was never owed a refund; takedown must not create one
   });
 
+  it("admin sweep route runs a pass (200 with admin token, 401 without)", async () => {
+    const { env } = makeEnv({ adminToken: ADMIN, r2Creds: true });
+    const { deps } = makeClock(2_000_000);
+    const ok = await call(env, deps, "POST", "/internal/admin/sweep", { admin: ADMIN });
+    expect(ok.status).toBe(200);
+    expect(ok.json.ok).toBe(true);
+    expect(ok.json.summary).toHaveProperty("purged");
+    const noauth = await call(env, deps, "POST", "/internal/admin/sweep", {});
+    expect(noauth.status).toBe(401);
+  });
+
   it("404 for an unknown job; 401 without the admin token", async () => {
     const { env, raw } = makeEnv({ adminToken: ADMIN, r2Creds: true });
     const { deps } = makeClock(2_000_000);
