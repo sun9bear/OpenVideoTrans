@@ -35,17 +35,14 @@
   ],
   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "ovt-artifacts" }],
   "kv_namespaces": [{ "binding": "CONFIG", "id": "f06aa6bcf0e642ff91da834e47be219c" }],
-  // T2.5 queue_adapter (CF Queues Free). The SAME Worker is producer (createJob emits a wake) and the
-  // thin consumer (the `queue` handler reconciles the wake against the authoritative D1 worklist —
-  // it never mutates job state). D1 stays the source of truth, so this is a latency-shaving overlay:
-  // queueBackend defaults to `d1`; CFG-GUARD locks prod to cf_queues with an audited break-glass.
-  // max_batch_timeout bounds wake latency; max_retries small because the D1 long-poll is the backstop.
-  "queues": {
-    "producers": [{ "binding": "JOB_QUEUE", "queue": "ovt-jobs" }],
-    "consumers": [
-      { "queue": "ovt-jobs", "max_batch_size": 100, "max_batch_timeout": 5, "max_retries": 3 }
-    ]
-  },
+  // T2.5 queue_adapter (CF Queues) bindings are OMITTED at initial launch: `queueBackend` defaults to
+  // `d1` (config.ts), so the D1 jobs table is the authoritative worklist and the worker long-polls
+  // claim — the queue is only a latency-shaving overlay. CF Queues consumers additionally require the
+  // Workers PAID plan; this deploy is on the free tier, so the producer/consumer bindings are left out
+  // until the plan + the worker's queue subscription (deferred to M2-CLOSE/DEPLOY) are in place. The
+  // Worker's queue() handler stays dormant with no consumer bound; selectProducer() returns the D1
+  // no-op producer under queueBackend=d1. Re-add the "queues" block + flip queueBackend to cf_queues
+  // (via CFG-GUARD) once on a paid plan.
   "vars": {
     // Non-secret defaults; the authoritative runtime values come from the settings table / KV
     // (CFG-GUARD owns validation). R2 account id + bucket are non-secret deploy vars.
