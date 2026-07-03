@@ -1,0 +1,13 @@
+# DEPLOY (#28) — refresh the egress allowlist at boot and every 15 minutes thereafter
+# ("DNS 刷新不漏新 IP"): providers rotate IPs well inside a day; 15min keeps the window small
+# without hammering the pinned resolver.
+[Unit]
+Description=Periodic OVT egress allowlist DNS refresh
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

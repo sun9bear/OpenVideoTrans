@@ -1,0 +1,26 @@
+# /etc/ovt/egress-domains.txt — hostnames the worker box may reach (HTTPS only; everything else
+# is default-dropped by workers/media-worker/deploy/nftables-egress.nft). Refresh resolves these
+# via the pinned resolver every 15min. KEEP THIS MINIMAL — every entry widens the SSRF backstop.
+
+# Control plane (job claim/progress/complete + credentials pull).
+openvideotrans.xyz
+
+# R2 media bucket (S3 endpoint; account-scoped host).
+# Replace <account-id> with the real R2 account id at install:
+#<account-id>.r2.cloudflarestorage.com
+
+# Free providers actually enabled for this box (comment out the ones without keys):
+api.groq.com            # Groq ASR/MT (key-gated)
+api.cloudflare.com      # Cloudflare Workers AI ASR/MT/TTS (key-gated)
+api-free.deepl.com      # DeepL Free MT (:fx key only — red line pins the free endpoint)
+
+# Host maintenance lanes (apt updates, docker registry pulls) are DELIBERATELY OMITTED: adding them
+# widens the SSRF backstop so a compromised ffmpeg could reach a package/registry host. Do image
+# builds + apt BEFORE applying the egress table (or temporarily `nft delete table inet ovt_egress`,
+# do maintenance, re-apply) rather than allowlisting registries in steady state.
+#   (opt-in only, uncomment for a box that must self-update outside a maintenance window:)
+#mirror.hetzner.com
+#registry-1.docker.io
+#auth.docker.io
+#production.cloudflare.docker.com
+#ghcr.io

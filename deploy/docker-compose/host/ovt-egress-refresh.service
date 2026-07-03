@@ -1,0 +1,9 @@
+# DEPLOY (#28) — one-shot egress allowlist refresh; scheduled by ovt-egress-refresh.timer.
+[Unit]
+Description=OVT nftables egress allowlist DNS refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ovt-egress-refresh.sh

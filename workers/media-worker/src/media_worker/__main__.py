@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
+import threading
 from pathlib import Path
 
 from .control_plane import HttpControlPlane
@@ -60,9 +62,22 @@ def main() -> int:
         "pulled worker credentials: storage configured; free providers: %s",
         ", ".join(configured) or "(none)",
     )
+    # Graceful drain on `docker stop` / compose restart: SIGTERM sets the stop_event so run_forever
+    # stops CLAIMING new work and lets in-flight jobs finish (up to the platform's stop grace
+    # period), instead of being killed mid-job and relying on the lease sweeper to reclaim. SIGINT
+    # too, for an interactive Ctrl-C. run_forever checks stop_event between claims (worker.py).
+    stop_event = threading.Event()
+
+    def _drain(signum: int, _frame: object) -> None:
+        logger.info("received signal %s; draining (no new claims, finishing in-flight)", signum)
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _drain)
+    signal.signal(signal.SIGINT, _drain)
     run_forever(
         cp, storage, workdir_base=workdir,
         worker_concurrency=worker_concurrency, light_slot_reserve=light_slot_reserve,
+        stop_event=stop_event,
     )
     return 0
 
