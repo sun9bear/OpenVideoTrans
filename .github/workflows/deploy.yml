@@ -1,0 +1,57 @@
+name: deploy
+
+# DEPLOY (#28) — control-plane Worker + same-origin SPA to Cloudflare.
+# Manual only (workflow_dispatch): deploying is an explicit operator action, never automatic on push.
+# Auth uses the repo's existing CLOUDFLARE_API_TOKEN secret + CLOUDFLARE_ACCOUNT_ID var — the token is
+# never exposed to the agent; it lives in GitHub Actions. The token MUST carry Workers Scripts:Edit,
+# D1:Edit, KV:Edit, R2:Edit, Queues:Edit and Zone/Workers Routes for the custom domain — `mode: probe`
+# prints what it can see so an under-scoped token is diagnosed before a real deploy.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "probe (whoami + list resources, no changes) | migrate (apply D1 migrations) | deploy (build SPA + wrangler deploy)"
+        type: choice
+        options: [probe, migrate, deploy]
+        default: probe
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/control-plane
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+        working-directory: .
+
+      - name: Probe — identity + resource visibility (no changes)
+        run: |
+          echo "== whoami =="; pnpm dlx wrangler@4 whoami || true
+          echo "== d1 =="; pnpm dlx wrangler@4 d1 list || true
+          echo "== kv =="; pnpm dlx wrangler@4 kv namespace list || true
+          echo "== r2 =="; pnpm dlx wrangler@4 r2 bucket list || true
+          echo "== queues =="; pnpm dlx wrangler@4 queues list || true
+
+      - name: Apply D1 migrations (remote)
+        if: ${{ inputs.mode == 'migrate' }}
+        run: pnpm dlx wrangler@4 d1 migrations apply ovt-control-plane --remote
+
+      - name: Build SPA (same-origin assets)
+        if: ${{ inputs.mode == 'deploy' }}
+        run: pnpm --filter @open-video-trans/web build
+        working-directory: .
+        env:
+          VITE_TURNSTILE_SITE_KEY: ${{ vars.VITE_TURNSTILE_SITE_KEY }}
+
+      - name: Deploy Worker
+        if: ${{ inputs.mode == 'deploy' }}
+        run: pnpm dlx wrangler@4 deploy
