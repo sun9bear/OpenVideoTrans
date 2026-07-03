@@ -39,31 +39,34 @@ export async function adminTakedown(ctx: Ctx): Promise<Response> {
   if (!row) throw new HttpError(404, "not_found", "job not found");
 
   const now = ctx.deps.now();
-  // Step 1 — invalidate + terminalize. The `taken_down_at IS NULL` guard makes the cv bump + timestamp
-  // one-shot so a retry is idempotent (never re-bumps a live claim_version).
+  // Step 1 — invalidate + terminalize + make immediately TTL-eligible (expires_at = now). The cv bump
+  // stops the job being MARKED done (a mid-flight worker's /complete + /heartbeat now 409). But a
+  // worker's artifact upload goes DIRECT to R2 and is NOT claim_version-gated (CodeX #62 R2 P1): a
+  // worker uploading in the window around step 2 could still land bytes under artifacts/<job>/<oldcv>/
+  // AFTER our delete. Those bytes are already UNREACHABLE (download 409s on status='failed' / 410s once
+  // purged, and no API returns an R2 key), and setting expires_at=now makes the every-minute sweeper's
+  // purgeExpired RE-PURGE the whole artifacts/<job>/ prefix within ~1 min — reaping exactly such a
+  // race-orphan and stamping data_purged_at then. We therefore do NOT stamp data_purged_at here (that
+  // would exclude the row from purgeExpired's `data_purged_at IS NULL` scan and defeat the re-sweep).
+  // The `taken_down_at IS NULL` guard makes the cv bump + timestamp one-shot so a retry never re-bumps
+  // a live claim_version.
   await ctx.env.DB.prepare(
     `UPDATE jobs
        SET status = 'failed', error_code = ?, error_detail = NULL,
            claim_version = claim_version + (CASE WHEN taken_down_at IS NULL THEN 1 ELSE 0 END),
            taken_down_at = COALESCE(taken_down_at, ?),
-           lease_expires_at = NULL, finished_at = COALESCE(finished_at, ?)
+           expires_at = ?, lease_expires_at = NULL, finished_at = COALESCE(finished_at, ?)
      WHERE job_id = ?`,
   )
-    .bind(TAKEN_DOWN, now, now, jobId)
+    .bind(TAKEN_DOWN, now, now, now, jobId)
     .run();
 
-  // Step 2 — now no worker can add new artifacts; delete all attempts' artifacts + the source.
+  // Step 2 — immediate best-effort delete of all attempts' artifacts + the source. The sweeper is the
+  // backstop for the upload race above; this makes the common case (no in-flight worker) purge now.
   await deletePrefix(ctx.env.MEDIA, `artifacts/${jobId}/`);
   if (row.upload_session_id) {
     await ctx.env.MEDIA.delete(`uploads/${row.upload_session_id}`);
   }
-
-  // Step 3 — bytes are gone; mark purged (download 410s). Only reached on a successful delete.
-  await ctx.env.DB.prepare(
-    "UPDATE jobs SET data_purged_at = COALESCE(data_purged_at, ?) WHERE job_id = ?",
-  )
-    .bind(now, jobId)
-    .run();
 
   // Audit to the structured log (CF Logpush = the audit sink): job_id + actor only. `actor` is an
   // allowlisted token field (obs.ts); `reason` is free-text and intentionally NOT logged (the log is

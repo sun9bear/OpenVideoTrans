@@ -92,19 +92,41 @@ describe("M3 takedown", () => {
     expect(r2.has("uploads/us_seed")).toBe(false);
 
     const row = raw
-      .prepare("SELECT status, error_code, data_purged_at, taken_down_at, claim_version FROM jobs WHERE job_id = ?")
+      .prepare("SELECT status, error_code, data_purged_at, taken_down_at, claim_version, expires_at FROM jobs WHERE job_id = ?")
       .get("job_td") as any;
     expect(row.status).toBe("failed");
     expect(row.error_code).toBe("taken_down");
-    expect(row.data_purged_at).not.toBeNull();
     expect(row.taken_down_at).not.toBeNull();
     expect(row.claim_version).toBe(4); // bumped so an in-flight worker's writes 409
+    // data_purged_at is intentionally LEFT NULL + expires_at set to now: the job is now TTL-eligible
+    // so the every-minute sweeper re-purges the prefix (reaping any race-orphan a mid-upload worker
+    // writes after our delete) and stamps data_purged_at then.
+    expect(row.data_purged_at).toBeNull();
+    expect(row.expires_at).toBe(2_000_000);
 
-    // download is now DENIED: the job is terminalized (failed -> 409 not-done) and its data purged
-    // (410) — either way no signed URL is issued for taken-down content.
+    // download is DENIED immediately: terminalized (failed -> 409 not-done) — no URL for removed content.
     const dl = await call(env, deps, "GET", "/api/jobs/job_td/download/video", { actor: "anon_seed" });
     expect([409, 410]).toContain(dl.status);
     expect(dl.json?.url).toBeUndefined();
+  });
+
+  it("the TTL sweeper reaps a race-orphan uploaded AFTER takedown (write-race backstop)", async () => {
+    const { env, r2, raw } = makeEnv({ adminToken: ADMIN, r2Creds: true });
+    const { deps } = makeClock(2_000_000);
+    seedDoneJob(raw);
+    r2.putSized("artifacts/job_td/3/out.mp4", 100);
+    await call(env, deps, "POST", "/internal/admin/takedown", { admin: ADMIN, body: { job_id: "job_td" } });
+    // simulate a mid-upload worker (old claim_version) landing bytes AFTER the takedown delete
+    r2.putSized("artifacts/job_td/3/late-orphan.mp4", 100);
+    expect(r2.has("artifacts/job_td/3/late-orphan.mp4")).toBe(true);
+
+    // the every-minute sweeper's TTL purge (job is now expires_at<=now + data_purged_at NULL) re-purges the prefix
+    const { purgeExpired } = await import("../src/sweep");
+    await purgeExpired(env.DB, env.MEDIA, deps.now());
+
+    expect(r2.has("artifacts/job_td/3/late-orphan.mp4")).toBe(false); // race-orphan reaped
+    const after = raw.prepare("SELECT data_purged_at FROM jobs WHERE job_id = ?").get("job_td") as any;
+    expect(after.data_purged_at).not.toBeNull(); // sweeper stamped it
   });
 
   it("is idempotent — a second takedown still returns ok with nothing left to delete", async () => {
