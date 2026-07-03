@@ -63,9 +63,9 @@ def main() -> int:
         ", ".join(configured) or "(none)",
     )
     # Graceful drain on `docker stop` / compose restart: SIGTERM sets the stop_event so run_forever
-    # stops CLAIMING new work and lets in-flight jobs finish (up to the platform's stop grace period),
-    # instead of the process being killed mid-job and relying on the lease sweeper to reclaim. SIGINT
-    # too, for an interactive Ctrl-C. run_forever's loop checks stop_event between claims (worker.py).
+    # stops CLAIMING new work and lets in-flight jobs finish (up to the platform's stop grace
+    # period), instead of being killed mid-job and relying on the lease sweeper to reclaim. SIGINT
+    # too, for an interactive Ctrl-C. run_forever checks stop_event between claims (worker.py).
     stop_event = threading.Event()
 
     def _drain(signum: int, _frame: object) -> None:
