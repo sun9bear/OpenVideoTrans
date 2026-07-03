@@ -1,0 +1,20 @@
+# DEPLOY (#28) — install the base egress table at boot, BEFORE docker starts the worker.
+#
+# nftables rules are NOT persistent by default. Without this, after a reboot the ovt_egress table is
+# gone and docker's restart:unless-stopped brings the host-network worker back up with NO egress
+# policy at all (the load-bearing SSRF backstop silent-fails open), while the refresh timer just
+# errors on the missing table. Ordering Before=docker.service guarantees the default-drop table is in
+# place before any container can egress. The refresh timer then populates the allow sets.
+[Unit]
+Description=OVT apply nftables egress base table
+After=network-pre.target
+Before=docker.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/ovt/nftables-egress.nft
+
+[Install]
+WantedBy=multi-user.target

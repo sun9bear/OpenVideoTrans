@@ -44,15 +44,21 @@ npx wrangler secret put R2_SECRET_ACCESS_KEY
 npx wrangler secret put INTERNAL_TOKEN
 npx wrangler secret put ADMIN_TOKEN
 # provider keys（有则注，无则跳过——free-pool fail-to-error，绝不静默转付费）：
-npx wrangler secret put CF_AI_ACCOUNT_ID     # Workers AI（免费额度内 ASR/MT/TTS 主力）
-npx wrangler secret put CF_AI_API_TOKEN      # 权限最小化：Workers AI Read/Run
-npx wrangler secret put GROQ_API_KEY         # 可选
-npx wrangler secret put DEEPL_API_KEY        # 可选，必须 :fx free key
+# ⚠⚠ 红线（§1）：Cloudflare Workers AI 在 **Workers Free 计划**下超额只会限流/失败、绝不计费；
+#    但在 **Workers Paid 计划**下超出每日 10k neuron 免费额度会**自动计费**——那等于 allow_paid=false
+#    的同时静默产生付费调用，违红线。**因此：仅当该 CF 账号是 Workers Free 计划时才注入 CF_AI_*。**
+#    Paid 计划要用 CF AI 属 Tier-2 付费决策，不在本免费托管层注入。
+npx wrangler secret put CF_AI_ACCOUNT_ID     # 仅 Workers FREE 计划账号；Workers AI Read/Run 最小权限
+npx wrangler secret put CF_AI_API_TOKEN
+npx wrangler secret put GROQ_API_KEY         # 可选（德国 VPS 不受 CN geo-block 影响）
+npx wrangler secret put DEEPL_API_KEY        # 可选，必须 :fx free key（Pro key 被 adapter 判 unavailable）
 npx wrangler secret put TURNSTILE_SECRET_KEY # ⚠ Turnstile 是唯一 fail-OPEN 配置：不注则 bot 门静默失效
 ```
 
-**`ANON_ID_HMAC_KEY` 必须最后**（SPA `/api/anon` 接线已并 main 才可注入；注入前 prod 匿名面
-fail-closed 503 是预期姿态）：
+**`ANON_ID_HMAC_KEY` 必须最后，且有前置条件**：SPA 的 `/api/anon` 接线（PR #60）**必须先并入
+main 并随本次部署构建**，否则线上浏览器发的是裸 client id，注入 key 后全部 401。检查
+`git -C . grep -q ensureServerAnonId apps/web/src/App.svelte` 应命中；未命中说明 #60 未并，
+**先并 #60 再注入**。注入前 prod 匿名面 fail-closed 503 是预期姿态（不是故障）。
 
 ```sh
 npx wrangler secret put ANON_ID_HMAC_KEY
@@ -95,19 +101,26 @@ docker logs -f <container>   # 预期：credentials pulled → claim long-poll �
 ```sh
 ssh root@<vps> '
   apt-get install -y nftables dnsutils
+  # base 表放到 /etc/ovt/ 并装 boot-apply（重启后仍在，Before=docker）——否则重启后表丢、
+  # worker 以无 egress 策略起（backstop 静默失效）。
+  cp /opt/ovt/src/workers/media-worker/deploy/nftables-egress.nft /etc/ovt/nftables-egress.nft
   cp /opt/ovt/src/deploy/docker-compose/host/egress-refresh.sh /usr/local/bin/ovt-egress-refresh.sh && chmod +x /usr/local/bin/ovt-egress-refresh.sh
+  cp /opt/ovt/src/deploy/docker-compose/host/ovt-egress-apply.service /etc/systemd/system/
   cp /opt/ovt/src/deploy/docker-compose/host/ovt-egress-refresh.{service,timer} /etc/systemd/system/
   cp /opt/ovt/src/deploy/docker-compose/host/egress-domains.example.txt /etc/ovt/egress-domains.txt
   # 编辑 egress-domains.txt：控制面域名 + <account-id>.r2.cloudflarestorage.com + 已启用 provider
-  nft -f /opt/ovt/src/workers/media-worker/deploy/nftables-egress.nft   # 先装表（allow 集为空=全断）
-  /usr/local/bin/ovt-egress-refresh.sh                                  # 立即填充
-  systemctl daemon-reload && systemctl enable --now ovt-egress-refresh.timer
+  systemctl daemon-reload
+  systemctl enable --now ovt-egress-apply.service    # 装 base 表（allow 集为空=全断）+ 重启持久
+  /usr/local/bin/ovt-egress-refresh.sh               # 立即填充 allow 集
+  systemctl enable --now ovt-egress-refresh.timer    # 15min 周期刷新
 '
 ```
 
-⚠ 顺序注意：**先跑通 worker 再上 egress**（排障容易）；nft 装表后到 refresh 前有短暂全断窗口，
-established 连接不受影响。容器必须 `network_mode: host`（compose 已钉）——bridge 流量走
-FORWARD 会绕过 OUTPUT 兜底。DNS：`resolved.conf` 设 `DNS=1.1.1.1`（表只放行 1.1.1.1:53）。
+⚠ 顺序注意：**先跑通 worker 再上 egress**（排障容易）；build/apt 要么在装表前做、要么临时
+`nft delete table inet ovt_egress` 后做（egress-domains 默认不含 registry/apt 域，避免扩大 SSRF 面）。
+装 base 表到 refresh 前有短暂全断窗口，established 连接不受影响。容器必须 `network_mode: host`
+（compose 已钉）——bridge 流量走 FORWARD 会绕过 OUTPUT 兜底。DNS：`resolved.conf` 设
+`DNS=1.1.1.1`（表只放行 1.1.1.1:53）。
 
 ## 7. 端到端冒烟（验收门）
 
@@ -135,5 +148,11 @@ FORWARD 会绕过 OUTPUT 兜底。DNS：`resolved.conf` 设 `DNS=1.1.1.1`（表�
 - 多 admin 并发写未串行化（settings.ts:194）——单 operator 姿态。
 - piper 单 voice/箱：默认 zh；其他 locale 配音走 Workers AI TTS（en/es/fr/ja/ko）或 rebuild
   换 voice。faster_whisper base 已 bake（Groq 从 CN 运营商侧 geo-block，但 VPS 在德国不受影响）。
-- 模型 sha256：构建期 TOFU 记录于镜像 `/opt/ovt/models/MANIFEST.sha256`；策划级 pin 表
-  （supply_chain._PINNED）仍空，跨 rebuild 比对 MANIFEST 是 operator 手工步骤。
+- 模型 sha256：构建期 TOFU 记录于镜像 `/opt/ovt/models/MANIFEST.sha256`；piper voice 走 HF
+  `v1.0.0` release tag、faster-whisper/piper-tts **包版本已钉**（1.0.3/1.2.0），运行期
+  `HF_HUB_OFFLINE=1` 只读 baked cache（cache-miss 快失败不联网）。策划级 pin 表
+  （supply_chain._PINNED）仍空、运行期未接 verify_pinned——跨 rebuild 比对 MANIFEST + 首建时把
+  记录的 sha 存档作为 known-good 基线，是 operator 手工步骤（红线相关硬化的后续单元）。
+- **host-net + `oif lo accept`**：被攻陷的 worker 能触达 VPS 上 `127.0.0.1` 的服务——**worker VPS
+  上不要跑任何 localhost 管理守护/内网服务**（本机就一个 worker 容器，入站仅 SSH）。
+- CF Workers AI 仅在 **Workers Free 计划**注入（见 §3 红线注释）：Paid 计划超额自动计费 = 违红线。

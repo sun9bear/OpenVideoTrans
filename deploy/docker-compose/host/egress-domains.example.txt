@@ -14,10 +14,13 @@ api.groq.com            # Groq ASR/MT (key-gated)
 api.cloudflare.com      # Cloudflare Workers AI ASR/MT/TTS (key-gated)
 api-free.deepl.com      # DeepL Free MT (:fx key only — red line pins the free endpoint)
 
-# Host maintenance lanes (apt security updates, compose rebuild pulls). Comment out for the
-# strictest posture and run maintenance with the table temporarily relaxed instead.
-mirror.hetzner.com
-registry-1.docker.io
-auth.docker.io
-production.cloudflare.docker.com
-ghcr.io
+# Host maintenance lanes (apt updates, docker registry pulls) are DELIBERATELY OMITTED: adding them
+# widens the SSRF backstop so a compromised ffmpeg could reach a package/registry host. Do image
+# builds + apt BEFORE applying the egress table (or temporarily `nft delete table inet ovt_egress`,
+# do maintenance, re-apply) rather than allowlisting registries in steady state.
+#   (opt-in only, uncomment for a box that must self-update outside a maintenance window:)
+#mirror.hetzner.com
+#registry-1.docker.io
+#auth.docker.io
+#production.cloudflare.docker.com
+#ghcr.io

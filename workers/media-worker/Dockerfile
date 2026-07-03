@@ -38,8 +38,11 @@ COPY workers/media-worker ./workers/media-worker
 # (faster_whisper ASR fallback + piper TTS) which provider-adapters keeps optional by design
 # (lazy `has_module()` imports — a bare library install stays light; the hosted image is the
 # deployment that actually runs them).
+# PINNED versions: piper-tts 1.2.0 still ships the `piper` console script the adapter shells out to
+# (tts.py) — 1.3.0 removed it and would break synthesis at runtime, not build. faster-whisper pinned
+# so the baked weights + the ctranslate2/onnxruntime stack are reproducible across rebuilds.
 RUN uv sync --frozen --no-dev --package media-worker \
-    && uv pip install faster-whisper piper-tts
+    && uv pip install "faster-whisper==1.0.3" "piper-tts==1.2.0"
 
 # ---- Baked models -------------------------------------------------------------------------------
 # Default dub locale voice (zh-Hans primary audience). Override at build for another locale; the
@@ -62,15 +65,27 @@ RUN mkdir -p "$OVT_MODEL_DIR/piper" \
 
 # Baked-model env contract consumed by provider-adapters (tts.py FVD_PIPER_MODEL; asr.py
 # FVD_WHISPER_MODEL resolves through the baked HF_HOME cache — no runtime download).
+# FVD_PIPER_LANG pins the baked voice's language: the file is stored as voice.onnx (not piper's
+# lang-encoded standard name), so piper_model_language() cannot infer it and would otherwise let
+# piper_model_covers() return True for EVERY language — routing e.g. a German dub to the zh voice.
+# The build arg must match PIPER_VOICE_URL's language (CodeX DEPLOY P2).
+ARG PIPER_VOICE_LANG=zh
 ENV FVD_PIPER_MODEL=/opt/ovt/models/piper/voice.onnx \
+    FVD_PIPER_LANG=${PIPER_VOICE_LANG} \
     FVD_WHISPER_MODEL=base \
     OVT_WORKDIR=/var/lib/ovt/jobs \
     PATH=/app/.venv/bin:$PATH
 
-# Non-root: the worker only writes its job workdir; models are read-only.
+# HF_HUB_OFFLINE: at runtime the egress allowlist blocks huggingface.co, so faster_whisper must use
+# the BAKED cache only. Setting this makes a cache-miss fail FAST/closed instead of hanging on a
+# blocked network fetch (the baked HF_HOME is authoritative).
+ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+
+# Non-root: the worker only writes its job workdir. Models are read-only — but the bake ran as root,
+# so chown the model cache to the runtime user or faster_whisper/piper cannot read it.
 RUN useradd -r -m -d /home/ovt ovt \
     && mkdir -p /var/lib/ovt/jobs \
-    && chown -R ovt:ovt /var/lib/ovt /home/ovt \
+    && chown -R ovt:ovt /var/lib/ovt /home/ovt /opt/ovt/models \
     && apt-get purge -y curl >/dev/null 2>&1 || true
 USER ovt
 
