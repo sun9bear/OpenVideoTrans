@@ -1,0 +1,14 @@
+-- M3 (#29): DMCA/DSA takedown. Additive forward migration (never edits earlier files).
+--
+-- taken_down_at marks a job an operator forcibly removed for a legal/abuse takedown, distinct from a
+-- normal TTL purge (data_purged_at): it records that the removal was a deliberate takedown (audit /
+-- "content removed" vs "expired"). A taken-down job is terminalized (status='failed',
+-- error_code='taken_down'), its claim_version bumped (any in-flight worker's complete/heartbeat 409s),
+-- and expires_at set to now. Download is denied IMMEDIATELY by the status!='done' -> 409 branch; the
+-- handler deliberately leaves data_purged_at NULL so the every-minute purgeExpired sweeper (scan:
+-- data_purged_at IS NULL AND expires_at<=now AND status terminal) RE-PURGES the artifacts/<job>/
+-- prefix within ~1 min and stamps data_purged_at then — the backstop for a race-orphan a worker may
+-- upload direct-to-R2 after the handler's own delete. DO NOT change the handler to stamp
+-- data_purged_at at takedown time: that would exclude the row from the sweeper scan and defeat the
+-- re-purge (see admin_ops.ts).
+ALTER TABLE jobs ADD COLUMN taken_down_at INTEGER;

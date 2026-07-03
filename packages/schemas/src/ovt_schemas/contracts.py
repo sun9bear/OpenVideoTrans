@@ -96,7 +96,7 @@ ErrorCode = Literal["over_duration", "unsupported_format", "upload_too_large",
                     "source_verify_failed", "source_fetch_failed", "unsupported_language_pair",
                     "no_tts_model_for_language", "free_pool_exhausted", "worker_lost",
                     "processing_timeout", "daily_cap_reached", "internal_error",
-                    "deadline_exceeded"]
+                    "deadline_exceeded", "taken_down"]
 
 
 class UploadSession(BaseModel):

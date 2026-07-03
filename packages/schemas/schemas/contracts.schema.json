@@ -106,7 +106,8 @@
         "processing_timeout",
         "daily_cap_reached",
         "internal_error",
-        "deadline_exceeded"
+        "deadline_exceeded",
+        "taken_down"
       ]
     },
     "UploadSession": {

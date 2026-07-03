@@ -7,6 +7,7 @@ import { logEvent, metricsEndpoint } from "./obs";
 import { providerAvailability, reportProviderExhausted } from "./providers";
 import { selectProducer } from "./queue";
 import { adminSetSetting, configEndpoint, getConfig, getSettingsAudit } from "./settings";
+import { adminTakedown } from "./admin_ops";
 import { signUpload } from "./uploads";
 import { claimNext, complete, createJob, download, fail, getJob, heartbeat } from "./jobs";
 
@@ -71,6 +72,10 @@ const ROUTES: Route[] = [
   // balance · global-minute gauge · worker liveness) + live alerts. ADMIN auth (operator-only;
   // workers don't hold ADMIN_TOKEN) — deliberately NOT worker-pullable. Serves aggregates only.
   route("GET", "/internal/admin/metrics", "admin", metricsEndpoint),
+  // M3 (#29): DMCA/DSA / abuse takedown — forcibly purge a job's media + terminalize it. ADMIN auth
+  // (operator-only, separate ADMIN_TOKEN). The public takedown INTAKE is the abuse contact in the
+  // SPA privacy notice; the operator actions the request through this route.
+  route("POST", "/internal/admin/takedown", "admin", adminTakedown),
 ];
 
 // Length-stable comparison so the internal-bearer check does not leak via timing.

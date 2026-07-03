@@ -28,6 +28,11 @@ export function requireR2(env: Env): R2Creds {
 // scoped to a fresh source key. The declared size/type are a fast pre-check only; the authoritative
 // cap is enforced by the HEAD-after-PUT in verifyUpload.
 export async function signUpload(ctx: Ctx): Promise<Response> {
+  // M3 kill-switch: refuse new intake BEFORE creating an upload session, so a paused service does not
+  // hand out presigned PUTs or accumulate orphan sessions. In-flight jobs are unaffected.
+  if (ctx.config.servicePaused) {
+    throw new HttpError(503, "service_paused", "service is temporarily paused; please retry later");
+  }
   const actor = ctx.actor!;
   const body = asObject(await readJson(ctx.request));
   const declaredBytes = reqInt(body, "declared_bytes");

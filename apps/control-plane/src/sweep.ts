@@ -54,7 +54,7 @@ interface ArtifactRow {
 
 // Delete every object under an R2 prefix (paginated). Idempotent: a re-run deletes a smaller/empty
 // set. Used to reap ALL of a job's attempt artifacts, not just the keys recorded on the job row.
-async function deletePrefix(r2: R2Bucket, prefix: string): Promise<void> {
+export async function deletePrefix(r2: R2Bucket, prefix: string): Promise<void> {
   let cursor: string | undefined;
   do {
     const opts: { prefix: string; limit: number; cursor?: string } = { prefix, limit: 1000 };

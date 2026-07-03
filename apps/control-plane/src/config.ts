@@ -42,6 +42,12 @@ export interface RuntimeConfig {
   dailyActorJobCap: number;
   dailyActorMinutesMsCap: number;
   dailyIpJobCap: number;
+  // M3 (#29) kill-switch: when true, the control plane stops ACCEPTING new work — /api/uploads/sign
+  // and /api/jobs return 503 service_paused. In-flight jobs (claimed/running) keep going, downloads
+  // and status polls keep working; this is a "stop the intake" lever for an incident or a takedown
+  // sweep, not a hard shutdown. MUTABLE (an operational knob, not a red-line/AIGC gate) so an operator
+  // can flip it live via CFG-GUARD with a full audit trail.
+  servicePaused: boolean;
 }
 
 export const DEFAULT_CONFIG: RuntimeConfig = {
@@ -84,4 +90,5 @@ export const DEFAULT_CONFIG: RuntimeConfig = {
   dailyActorJobCap: 10,
   dailyActorMinutesMsCap: 120 * 60 * 1000, // 120 min/day per anon/user
   dailyIpJobCap: 20,
+  servicePaused: false, // M3 kill-switch default OPEN; operator flips true via CFG-GUARD to pause intake
 };
