@@ -84,6 +84,9 @@ export function parseProgressMeta(raw: unknown): string | null {
 // dropped — so neither a leaky value under an allowed key nor a leaky new key reaches the log sink.
 const TOKEN_KEYS = new Set([
   "job_id", "code", "error_code", "method", "route", "alert", "severity", "free_pool_result", "name",
+  // M3 (#29): the operator identity on an admin takedown audit (a bounded operator id, token-shaped
+  // and TOKEN_RE-validated — NOT free text; the takedown `reason` free-text is never logged).
+  "actor",
 ]);
 const NUMERIC_KEYS = new Set([
   "status", "stage_elapsed_ms", "claim_latency_ms", "attempt", "claim_version", "chunk_index",

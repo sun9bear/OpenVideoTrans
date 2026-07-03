@@ -18,12 +18,12 @@ describe("error-code registry (single source of truth, PR-C consolidation)", () 
     expect(new Set(ERROR_CODES).size).toBe(ERROR_CODES.length);
   });
 
-  it("ERROR_CODES is exactly the frozen-contract set + deadline_exceeded (13 codes)", () => {
+  it("ERROR_CODES is exactly the frozen-contract set + deadline_exceeded + taken_down (14 codes)", () => {
     const expected = [
       "over_duration", "unsupported_format", "upload_too_large", "source_verify_failed",
       "source_fetch_failed", "unsupported_language_pair", "no_tts_model_for_language",
       "free_pool_exhausted", "worker_lost", "processing_timeout", "daily_cap_reached",
-      "internal_error", "deadline_exceeded",
+      "internal_error", "deadline_exceeded", "taken_down",
     ];
     expect([...ERROR_CODES].sort()).toEqual([...expected].sort());
   });
@@ -43,15 +43,17 @@ describe("error-code registry (single source of truth, PR-C consolidation)", () 
     expect(REFUNDABLE_ERROR_CODES).not.toContain("source_verify_failed");
   });
 
-  it("WORKER_REPORTABLE excludes the CP-sweeper-only codes (worker_lost / deadline_exceeded)", () => {
-    // Both are REFUNDABLE codes the sweeper alone may emit; a worker must not be able to self-report
-    // them via /fail and trigger a refund of a job it actually claimed/ran (CodeX R2).
+  it("WORKER_REPORTABLE excludes the CP-sweeper-only codes (worker_lost / deadline_exceeded / taken_down)", () => {
+    // Each is a control-plane-only terminal a worker must not self-report via /fail: worker_lost /
+    // deadline_exceeded are REFUNDABLE (self-reporting would refund a job it actually ran, CodeX R2);
+    // taken_down is an operator DMCA/abuse terminal (M3) a worker has no business emitting.
     expect(WORKER_REPORTABLE_ERROR_CODES).not.toContain("worker_lost");
     expect(WORKER_REPORTABLE_ERROR_CODES).not.toContain("deadline_exceeded");
+    expect(WORKER_REPORTABLE_ERROR_CODES).not.toContain("taken_down");
     // it is otherwise the full registry: every worker-reportable code is a registry code, and the only
-    // two omissions are the CP-sweeper terminals.
+    // omissions are the CP-sweeper/admin terminals.
     for (const c of WORKER_REPORTABLE_ERROR_CODES) expect(ERROR_CODES).toContain(c);
-    expect(WORKER_REPORTABLE_ERROR_CODES.length).toBe(ERROR_CODES.length - 2);
+    expect(WORKER_REPORTABLE_ERROR_CODES.length).toBe(ERROR_CODES.length - 3);
   });
 
   it("the /fail endpoint validates error_code against the consolidated registry", async () => {

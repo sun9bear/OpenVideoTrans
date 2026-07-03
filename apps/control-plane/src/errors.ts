@@ -22,6 +22,7 @@ export const ERROR_CODES = [
   "daily_cap_reached",
   "internal_error",
   "deadline_exceeded",
+  "taken_down",
 ] as const satisfies readonly ErrorCode[];
 
 export type JobErrorCode = (typeof ERROR_CODES)[number];
@@ -55,13 +56,16 @@ export const REFUNDABLE_ERROR_CODES = [
 //   • deadline_exceeded — enforceDeadlines, a non-terminal job past its deadline_at.
 export const WORKER_LOST: JobErrorCode = "worker_lost";
 export const DEADLINE_EXCEEDED: JobErrorCode = "deadline_exceeded";
+// M3 (#29): an operator DMCA/abuse takedown terminal, written only by /internal/admin/takedown.
+// NOT refundable (a deliberate removal, not our-fault infra) and NOT worker-reportable.
+export const TAKEN_DOWN: JobErrorCode = "taken_down";
 
 // Both CP-sweeper terminals are REFUNDABLE, so a worker must NOT be able to report them via
 // POST /internal/jobs/:id/fail — that would let an authenticated worker terminalize + refund a job it
 // actually claimed/ran, breaking the no-output-refund invariant the sweeper alone upholds (CodeX R2).
 // The worker /fail allowlist is therefore the registry MINUS these CP-internal codes; jobs.ts fail()
 // validates `error_code` against THIS set, not the full ERROR_CODES.
-const CP_SWEEPER_ONLY: readonly JobErrorCode[] = [WORKER_LOST, DEADLINE_EXCEEDED];
+const CP_SWEEPER_ONLY: readonly JobErrorCode[] = [WORKER_LOST, DEADLINE_EXCEEDED, TAKEN_DOWN];
 export const WORKER_REPORTABLE_ERROR_CODES: readonly JobErrorCode[] = ERROR_CODES.filter(
   (c) => !CP_SWEEPER_ONLY.includes(c),
 );
