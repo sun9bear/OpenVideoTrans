@@ -5,6 +5,10 @@
   // provider keys are gated to the SECRETS unit — this file references binding/var NAMES only.
   "name": "ovt-control-plane",
   "main": "src/index.ts",
+  // Serve the Worker (API + same-origin SPA) on the owner's independent domain (AD-15). custom_domain
+  // makes wrangler create the DNS record + edge cert for the apex on deploy (zone is in this account).
+  // This is ALSO the go-live domain binding — the SPA + /api are same-origin here, so no CORS surface.
+  "routes": [{ "pattern": "openvideotrans.xyz", "custom_domain": true }],
   "compatibility_date": "2024-12-01",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
