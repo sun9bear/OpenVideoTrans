@@ -43,7 +43,7 @@ jobs:
 
       - name: Apply D1 migrations (remote)
         if: ${{ inputs.mode == 'migrate' }}
-        run: pnpm dlx wrangler@4 d1 migrations apply ovt-control-plane --remote
+        run: pnpm dlx wrangler@4 d1 migrations apply ovt-db --remote
 
       - name: Build SPA (same-origin assets)
         if: ${{ inputs.mode == 'deploy' }}
