@@ -296,6 +296,27 @@ describe("admin route POST /internal/admin/settings (admin-auth, separate from w
     expect(res.json.error.code).toBe("admin_unconfigured");
   });
 
+  it("decodes a percent-encoded X-OVT-Actor into the audit 'who' (codex P2, non-ASCII names)", async () => {
+    const { env } = makeEnv({ adminToken: ADMIN });
+    const { deps } = makeClock(T0);
+    // The console percent-encodes the actor so a non-ASCII (e.g. Chinese) name is a valid header value.
+    const res = await call(env, deps, "POST", "/internal/admin/settings", {
+      admin: ADMIN,
+      headers: { "X-OVT-Actor": encodeURIComponent("张三") },
+      body: { key: "maxAttempts", value: 3, reason: "非 ASCII 操作者" },
+    });
+    expect(res.status).toBe(200);
+    const audit = await readSettingsAudit(env, "maxAttempts");
+    expect(audit[0]).toMatchObject({ changed_by: "张三" }); // decoded, not the %-encoded bytes
+    // A plain ASCII header (the curl path) decodes to itself.
+    await call(env, deps, "POST", "/internal/admin/settings", {
+      admin: ADMIN,
+      headers: { "X-OVT-Actor": "ops-bot" },
+      body: { key: "maxAttempts", value: 2 },
+    });
+    expect((await readSettingsAudit(env, "maxAttempts"))[0]).toMatchObject({ changed_by: "ops-bot" });
+  });
+
   it("exposes the audit log over GET /internal/admin/settings/audit", async () => {
     const { env } = makeEnv({ adminToken: ADMIN });
     const { deps } = makeClock(T0);

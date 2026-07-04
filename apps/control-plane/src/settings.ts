@@ -366,7 +366,18 @@ export async function adminSetSetting(ctx: Ctx): Promise<Response> {
   const body = asObject(await readJson(ctx.request));
   const key = reqString(body, "key");
   const reason = optString(body, "reason");
-  const actor = ctx.request.headers.get("X-OVT-Actor") ?? "operator";
+  // The admin console percent-encodes X-OVT-Actor so a non-ASCII operator name (e.g. Chinese) is a
+  // valid header ByteString; decode it back for the audit "who". Defensive: a plain ASCII header (the
+  // curl path) decodes to itself, and a malformed %-sequence falls back to the raw value.
+  const rawActor = ctx.request.headers.get("X-OVT-Actor");
+  let actor = "operator";
+  if (rawActor) {
+    try {
+      actor = decodeURIComponent(rawActor);
+    } catch {
+      actor = rawActor;
+    }
+  }
   const config = await applySettingChange(ctx.env, ctx.deps, {
     key,
     value: body.value,

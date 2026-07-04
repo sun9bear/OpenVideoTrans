@@ -198,7 +198,10 @@
       async function api(method, path, body) {
         var init = { method: method, headers: { Authorization: "Bearer " + token() } };
         var a = actor();
-        if (a) init.headers["X-OVT-Actor"] = a;
+        // Percent-encode: HTTP header values must be ByteString (Latin1), so a non-ASCII name (e.g. a
+        // Chinese operator name) assigned raw makes fetch() throw before sending. The server decodes it
+        // back for the audit "who". encodeURIComponent leaves plain ASCII names unchanged.
+        if (a) init.headers["X-OVT-Actor"] = encodeURIComponent(a);
         if (body !== undefined) { init.headers["content-type"] = "application/json"; init.body = JSON.stringify(body); }
         var res;
         try { res = await fetch(path, init); }

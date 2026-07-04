@@ -271,6 +271,7 @@ export interface CallOpts {
   admin?: string;
   body?: unknown;
   ip?: string;
+  headers?: Record<string, string>;
   verifyTurnstile?: TurnstileVerifier;
 }
 
@@ -287,6 +288,7 @@ export async function call(
   if (opts.worker !== undefined) headers["Authorization"] = `Bearer ${opts.worker}`;
   if (opts.admin !== undefined) headers["Authorization"] = `Bearer ${opts.admin}`;
   if (opts.ip !== undefined) headers["CF-Connecting-IP"] = opts.ip;
+  if (opts.headers) Object.assign(headers, opts.headers);
   let body: string | undefined;
   if (opts.body !== undefined) {
     headers["content-type"] = "application/json";
