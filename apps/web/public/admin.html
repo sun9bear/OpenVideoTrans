@@ -521,7 +521,13 @@
       });
       $("actorInput").addEventListener("keydown", function (e) { if (e.key === "Enter") $("tokenInput").focus(); });
       $("tokenInput").addEventListener("keydown", function (e) { if (e.key === "Enter") $("connectBtn").click(); });
-      $("logoutBtn").addEventListener("click", function () { sessionStorage.removeItem(TOKEN_KEY); showGate(); });
+      $("logoutBtn").addEventListener("click", function () {
+        // Clear BOTH so a shared browser doesn't attribute the next operator's changes to the previous
+        // one: dropping only the token would let showGate() prefill the stale actor and re-save it.
+        sessionStorage.removeItem(TOKEN_KEY);
+        sessionStorage.removeItem(ACTOR_KEY);
+        showGate();
+      });
       $("saveBtn").addEventListener("click", save);
       $("metricsBtn").addEventListener("click", loadMetrics);
 
