@@ -268,53 +268,68 @@
         onDirty();
       }
 
-      // Compute the pending changes by comparing each input against the loaded config.
-      function computeChanges() {
+      // Compute the operator's INTENTS vs the loaded baseline: touched scalars, plus which mode(s) of
+      // the object setting maxVideoDurationMs were touched. save() merges the touched modes onto a FRESH
+      // read (not this page's load-time copy) so an untouched mode is never regressed.
+      function computeIntents() {
         var cfg = state.config;
-        var changes = [];
-        var durChanged = false;
-        var dur = { subtitle_only: 0, dub_only: 0, both: 0 };
+        var scalars = [];
+        var durModes = {}; // touched modes only: { mode: canonicalMs }
         GROUPS.forEach(function (g) { g.fields.forEach(function (f) {
           if (!editable(f.key)) return;
           var input = state.inputs[f.key];
           if (f.type === "bool") {
-            if (!!getCanonical(cfg, f.key) !== input.checked) changes.push({ key: f.key, value: input.checked });
+            if (!!getCanonical(cfg, f.key) !== input.checked) scalars.push({ key: f.key, value: input.checked });
           } else if (f.type === "enum") {
-            if (getCanonical(cfg, f.key) !== input.value) changes.push({ key: f.key, value: input.value });
-          } else {
-            var factor = Number(input.dataset.factor);
-            var cur = getCanonical(cfg, f.key);
-            var val = Math.round(Number(input.value) * factor);
+            if (getCanonical(cfg, f.key) !== input.value) scalars.push({ key: f.key, value: input.value });
+          } else if (input.value !== "") {
+            var val = Math.round(Number(input.value) * Number(input.dataset.factor));
             if (f.key.indexOf("maxVideoDurationMs.") === 0) {
-              var mode = f.key.split(".")[1]; dur[mode] = val;
-              if (val !== cur) durChanged = true;
-            } else if (input.value !== "" && val !== cur) {
-              changes.push({ key: f.key, value: val });
+              if (val !== getCanonical(cfg, f.key)) durModes[f.key.split(".")[1]] = val;
+            } else if (val !== getCanonical(cfg, f.key)) {
+              scalars.push({ key: f.key, value: val });
             }
           }
         }); });
-        if (durChanged) changes.push({ key: "maxVideoDurationMs", value: dur });
-        return changes;
+        return { scalars: scalars, durModes: durModes };
       }
 
+      function intentCount(it) { return it.scalars.length + (Object.keys(it.durModes).length ? 1 : 0); }
+
       function onDirty() {
-        var changes = computeChanges();
-        var n = changes.length;
-        var dirtyKeys = {};
-        changes.forEach(function (c) { dirtyKeys[c.key] = true; });
+        var it = computeIntents();
+        var dirty = {};
+        it.scalars.forEach(function (c) { dirty[c.key] = true; });
         document.querySelectorAll(".field").forEach(function (row) {
           var k = row.dataset.key;
-          var base = k.indexOf(".") >= 0 ? "maxVideoDurationMs" : k;
-          row.classList.toggle("dirty", !!dirtyKeys[base] || (base === "maxVideoDurationMs" && !!dirtyKeys["maxVideoDurationMs"] && isDurRowDirty(k)));
+          if (k.indexOf("maxVideoDurationMs.") === 0) {
+            row.classList.toggle("dirty", Object.prototype.hasOwnProperty.call(it.durModes, k.split(".")[1]));
+          } else {
+            row.classList.toggle("dirty", !!dirty[k]);
+          }
         });
+        var n = intentCount(it);
         $("dirtyCount").textContent = n ? (n + " 处待保存") : "无改动";
         $("saveBtn").disabled = n === 0;
       }
-      function isDurRowDirty(key) {
-        var mode = key.split(".")[1];
-        var input = state.inputs[key];
-        var factor = Number(input.dataset.factor);
-        return Math.round(Number(input.value) * factor) !== getCanonical(state.config, key);
+
+      // Re-apply the operator's un-applied edits to the inputs AFTER loadSettings(), so a mid-save error
+      // never silently wipes unsaved values — the fields show dirty again for a retry.
+      function reapplyIntents(changes) {
+        changes.forEach(function (c) {
+          if (c.key === "maxVideoDurationMs") {
+            ["subtitle_only", "dub_only", "both"].forEach(function (m) {
+              var inp = state.inputs["maxVideoDurationMs." + m];
+              if (inp && c.value[m] != null) inp.value = fmt(c.value[m] / Number(inp.dataset.factor));
+            });
+            return;
+          }
+          var input = state.inputs[c.key];
+          if (!input) return;
+          if (input.type === "checkbox") input.checked = !!c.value;
+          else if (input.tagName === "SELECT") input.value = c.value;
+          else input.value = fmt(c.value / Number(input.dataset.factor));
+        });
       }
 
       function showMsg(box, kind, text) {
@@ -324,19 +339,35 @@
       function clearMsg(box) { $(box).innerHTML = ""; }
 
       async function save() {
-        var changes = computeChanges();
-        if (!changes.length) return;
+        var it = computeIntents();
+        if (!intentCount(it)) return;
         var reason = $("reason").value.trim();
         $("saveBtn").disabled = true;
         clearMsg("topMsg");
+        // Re-anchor to FRESH D1 truth before writing: for the object setting maxVideoDurationMs, merge
+        // ONLY the operator's touched mode(s) onto the CURRENT object, so an untouched mode keeps its
+        // latest value (a concurrent change / a second open tab is not clobbered by this page's load-time
+        // copy). Scalars are last-writer-wins — the operator set each explicitly.
+        var fresh;
+        try {
+          fresh = (await api("GET", "/internal/admin/settings")).config;
+        } catch (e) {
+          showMsg("topMsg", "err", "无法读取当前配置：" + e.message);
+          onDirty();
+          return;
+        }
+        var changes = it.scalars.slice();
+        if (Object.keys(it.durModes).length) {
+          changes.push({ key: "maxVideoDurationMs", value: Object.assign({}, fresh.maxVideoDurationMs, it.durModes) });
+        }
         // The API applies ONE key per POST and validates each against the live config, incl. cross-key
-        // invariants (leaseTtlMs >= 2x heartbeat · jobHardTimeoutMs >= lease · jobTtl >= deadline). So a
-        // valid FINAL pair can be transiently rejected if its partner hasn't applied yet (e.g. lowering
-        // both lease and heartbeat, lease-first). Fix: multiple passes — an `invalid_setting` rejection is
-        // retried on a later pass once its partner has landed; a genuinely out-of-bounds value never makes
-        // progress and is reported when a pass advances nothing. Non-validation errors (auth/network/
-        // unknown/red-line) are terminal and abort. Rejected POSTs write nothing server-side (no audit),
-        // so retries are safe and leave no trace.
+        // invariants (leaseTtlMs >= 2x heartbeat · jobHardTimeoutMs >= lease · jobTtl >= deadline). A valid
+        // FINAL pair can be transiently rejected if its partner hasn't applied yet (e.g. lowering both
+        // lease and heartbeat, lease-first). So: multiple passes — an `invalid_setting` rejection is retried
+        // on a later pass once its partner lands; a genuinely out-of-bounds value never makes progress and
+        // is reported when a pass advances nothing. Non-validation errors (auth/network/unknown/red-line)
+        // are terminal: carry the untried tail into the report and stop. Rejected POSTs write nothing
+        // server-side (no audit), so retries are safe and leave no trace.
         var pending = changes.slice();
         var applied = 0, lastErr = null, terminal = false;
         while (pending.length && !terminal) {
@@ -349,13 +380,15 @@
             } catch (e) {
               lastErr = e;
               if (e.code === "invalid_setting") next.push(c); // maybe just ordering — retry next pass
-              else { terminal = true; next.push(c); break; } // auth/network/unknown/red-line — stop
+              else { terminal = true; next = next.concat(pending.slice(i)); break; } // auth/network/etc — carry untried tail, stop
             }
           }
           pending = next;
           if (!progress) break; // no change applied this pass -> the rest are genuine failures
         }
         await loadSettings();
+        if (pending.length) reapplyIntents(pending); // keep un-applied edits across the reload (retry-able)
+        onDirty();
         await loadAudit();
         if (pending.length) {
           var keys = pending.map(function (c) { return c.key; }).join("、");
