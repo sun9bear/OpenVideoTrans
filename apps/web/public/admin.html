@@ -329,23 +329,41 @@
         var reason = $("reason").value.trim();
         $("saveBtn").disabled = true;
         clearMsg("topMsg");
-        var applied = 0;
-        for (var i = 0; i < changes.length; i++) {
-          var c = changes[i];
-          try {
-            await api("POST", "/internal/admin/settings", { key: c.key, value: c.value, reason: reason || undefined });
-            applied++;
-          } catch (e) {
-            await loadSettings(); // reflect whatever DID apply
-            showMsg("topMsg", "err", "已保存 " + applied + "/" + changes.length + " 项后中止：键「" + c.key + "」— " + e.message);
-            await loadAudit();
-            return;
+        // The API applies ONE key per POST and validates each against the live config, incl. cross-key
+        // invariants (leaseTtlMs >= 2x heartbeat · jobHardTimeoutMs >= lease · jobTtl >= deadline). So a
+        // valid FINAL pair can be transiently rejected if its partner hasn't applied yet (e.g. lowering
+        // both lease and heartbeat, lease-first). Fix: multiple passes — an `invalid_setting` rejection is
+        // retried on a later pass once its partner has landed; a genuinely out-of-bounds value never makes
+        // progress and is reported when a pass advances nothing. Non-validation errors (auth/network/
+        // unknown/red-line) are terminal and abort. Rejected POSTs write nothing server-side (no audit),
+        // so retries are safe and leave no trace.
+        var pending = changes.slice();
+        var applied = 0, lastErr = null, terminal = false;
+        while (pending.length && !terminal) {
+          var next = [], progress = false;
+          for (var i = 0; i < pending.length; i++) {
+            var c = pending[i];
+            try {
+              await api("POST", "/internal/admin/settings", { key: c.key, value: c.value, reason: reason || undefined });
+              applied++; progress = true;
+            } catch (e) {
+              lastErr = e;
+              if (e.code === "invalid_setting") next.push(c); // maybe just ordering — retry next pass
+              else { terminal = true; next.push(c); break; } // auth/network/unknown/red-line — stop
+            }
           }
+          pending = next;
+          if (!progress) break; // no change applied this pass -> the rest are genuine failures
         }
-        $("reason").value = "";
         await loadSettings();
         await loadAudit();
-        showMsg("topMsg", "ok", "已保存 " + applied + " 处改动。配置已即时生效。");
+        if (pending.length) {
+          var keys = pending.map(function (c) { return c.key; }).join("、");
+          showMsg("topMsg", "err", "已保存 " + applied + "/" + changes.length + " 项；未通过：「" + keys + "」— " + (lastErr ? lastErr.message : ""));
+        } else {
+          $("reason").value = "";
+          showMsg("topMsg", "ok", "已保存 " + applied + " 处改动。配置已即时生效。");
+        }
       }
 
       async function loadSettings() {
