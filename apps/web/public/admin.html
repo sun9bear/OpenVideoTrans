@@ -396,12 +396,19 @@
           await loadSettings();
           if (pending.length) reapplyIntents(pending); // reload re-rendered — restore un-applied edits
         } catch (e) {
-          reloadErr = e; // inputs left as-is (edits intact); nothing to reapply
+          reloadErr = e;
+          // Reload failed -> state.config is still the pre-save baseline. Patch it with the changes that
+          // DID apply, so onDirty() doesn't re-flag already-committed keys as dirty (a retry would then
+          // re-POST them: no-op audit rows + settingsVersion bumps). Un-applied edits stay dirty/retry-able.
+          var unapplied = {};
+          pending.forEach(function (c) { unapplied[c.key] = true; });
+          changes.forEach(function (c) { if (!unapplied[c.key]) state.config[c.key] = c.value; });
         }
         onDirty();
         await loadAudit();
         if (reloadErr) {
-          showMsg("topMsg", "err", "已保存 " + applied + "/" + changes.length + " 项；刷新配置失败：" + reloadErr.message + "。你的修改仍在表单中，可重试。");
+          var tail = pending.length ? "。未应用的修改仍在表单中，可重试。" : "（显示可能非最新，可刷新页面确认）。";
+          showMsg("topMsg", "err", "已保存 " + applied + "/" + changes.length + " 项；刷新配置失败：" + reloadErr.message + tail);
         } else if (pending.length) {
           var keys = pending.map(function (c) { return c.key; }).join("、");
           showMsg("topMsg", "err", "已保存 " + applied + "/" + changes.length + " 项；未通过：「" + keys + "」— " + (lastErr ? lastErr.message : ""));
