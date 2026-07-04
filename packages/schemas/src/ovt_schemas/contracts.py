@@ -120,6 +120,8 @@ class AigcMarking(BaseModel):
     explicit: bool
     form: Literal["tail_notice", "corner_label", "disclosure_only"]
     applied: bool | None = None
+    subtitle_enabled: bool = True
+    subtitle_text: str | None = None
 
 
 class JobPlan(BaseModel):

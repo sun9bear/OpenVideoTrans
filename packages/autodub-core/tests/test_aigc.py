@@ -85,6 +85,44 @@ def test_subtitle_disclosure_text_only_when_enabled() -> None:
     assert aigc.subtitle_disclosure(None) is None
 
 
+def test_subtitle_disclosure_respects_subtitle_enabled_and_custom_text() -> None:
+    # §14 owner-authorized reconfiguration: custom text is used when set.
+    m = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only",
+        subtitle_enabled=True, subtitle_text="本视频由 AI 翻译",
+    )
+    assert aigc.subtitle_disclosure(m) == "本视频由 AI 翻译"
+    # Per-channel off: subtitle_enabled=False -> None even though the master `enabled` is on.
+    off = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only", subtitle_enabled=False,
+    )
+    assert aigc.subtitle_disclosure(off) is None
+    # Blank/whitespace custom text falls back to the kernel default line.
+    blank = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only", subtitle_text="   ",
+    )
+    assert aigc.subtitle_disclosure(blank) == "本字幕由机器翻译生成"
+
+
+def test_subtitle_disabled_does_not_over_claim_embed_method() -> None:
+    # aigcSubtitleEnabled=false on a subtitle_only job: no cue, and the AUDIT method must be None
+    # (not mt_disclosure) so the manifest never over-claims an embedded disclosure the SRT lacks.
+    off = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only", subtitle_enabled=False,
+    )
+    assert aigc.subtitle_disclosure(off) is None
+    assert aigc.embed_method(off, "subtitle_only") is None
+    assert aigc.metadata_args(off, "subtitle_only") == []
+    # The dub/both video channel is independent of subtitle_enabled.
+    assert aigc.embed_method(off, "dub_only") == "av_voice_mark"
+    # Custom subtitle text also flows into the container metadata comment (matches the cue).
+    custom = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only",
+        subtitle_text="本视频由 AI 翻译",
+    )
+    assert any("本视频由 AI 翻译" in a for a in aigc.metadata_args(custom, "subtitle_only"))
+
+
 # --------------------------------------------------------------------------- #
 # mux applies the mark by mode
 # --------------------------------------------------------------------------- #
@@ -331,6 +369,28 @@ def test_mux_marking_change_invalidates_cache(tmp_path: Path, monkeypatch) -> No
     stages.mux(paths, output_mode="both", marking=marking)  # marked -> key differs -> re-mux
     assert any("aigc_mark=av_voice_mark" in a for a in captured["metadata"])  # re-muxed marked
     assert marking.applied is True
+
+
+def test_mux_subtitle_text_change_invalidates_cache(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # §14: changing the subtitle cue text must force a re-mux, not serve a stale SRT — the cache key
+    # folds in the visible subtitle cue (for `both`, embed_method alone would not change).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    captured: dict = {}
+    _mock_video_ffmpeg(monkeypatch, captured)
+    m1 = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="tail_notice", subtitle_text="旧文案",
+    )
+    stages.mux(paths, output_mode="both", marking=m1)  # first run writes marker with subcue=旧文案
+    captured.clear()
+    m2 = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="tail_notice", subtitle_text="新文案",
+    )
+    stages.mux(paths, output_mode="both", marking=m2)  # cue text differs -> key differs -> re-mux
+    assert "metadata" in captured  # ff.mux WAS called again (not a stale cache hit)
+    srt = paths.subtitles.read_text(encoding="utf-8")
+    assert "新文案" in srt and "旧文案" not in srt  # SRT carries the NEW cue, not the stale one
 
 
 def test_run_pipeline_defaults_to_marked_when_none_given(

@@ -26,10 +26,6 @@ _MT_DISCLOSURE = "本字幕由机器翻译生成"
 _DUB_MODES = ("dub_only", "both")
 
 
-def _on(marking: AigcMarking | None) -> bool:
-    return bool(marking and marking.enabled)
-
-
 def default_marking(output_mode: str) -> AigcMarking:
     """The default-ON AIGC marking for the ad-hoc / no-job path (red line §3, 默认开).
 
@@ -43,14 +39,18 @@ def default_marking(output_mode: str) -> AigcMarking:
 
 
 def embed_method(marking: AigcMarking | None, output_mode: str) -> str | None:
-    """The marking method recorded for this output, or None when marking is off.
+    """The marking method recorded for this output, or None when nothing is marked.
 
-    A dubbed output carries an AV voice mark; a subtitle-only output carries the
-    machine-translation disclosure (red line §3, conditional on output_mode).
+    Dubbed output → an AV voice mark; subtitle-only → the machine-translation disclosure. §14: the
+    subtitle channel also honors ``subtitle_enabled`` — a disabled subtitle disclosure records NO
+    method for subtitle-only output, so the manifest/audit never over-claims a disclosure the SRT
+    lacks. The dub/both video channel is independent of ``subtitle_enabled``.
     """
-    if not _on(marking):
+    if marking is None or not marking.enabled:
         return None
-    return "av_voice_mark" if output_mode in _DUB_MODES else "mt_disclosure"
+    if output_mode in _DUB_MODES:
+        return "av_voice_mark"
+    return "mt_disclosure" if marking.subtitle_enabled else None
 
 
 def metadata_args(marking: AigcMarking | None, output_mode: str) -> list[str]:
@@ -63,12 +63,27 @@ def metadata_args(marking: AigcMarking | None, output_mode: str) -> list[str]:
     mark stays auditable from the container (the manifest's ``aigc_embed_method``
     remains the authoritative record).
     """
-    if not _on(marking):
+    method = embed_method(marking, output_mode)
+    if method is None or marking is None:
         return []
-    notice = _DUB_NOTICE if output_mode in _DUB_MODES else _MT_DISCLOSURE
-    return ["-metadata", f"comment=AIGC: {notice} (aigc_mark={embed_method(marking, output_mode)})"]
+    # Consistent with embed_method + the SRT cue: when marking is off (incl. subtitle-only with the
+    # subtitle channel disabled), method is None ⇒ no metadata (no over-claim). The subtitle notice
+    # uses the operator's custom text (blank ⇒ default), mirroring the visible cue.
+    if output_mode in _DUB_MODES:
+        notice = _DUB_NOTICE
+    else:
+        notice = (marking.subtitle_text or "").strip() or _MT_DISCLOSURE
+    return ["-metadata", f"comment=AIGC: {notice} (aigc_mark={method})"]
 
 
 def subtitle_disclosure(marking: AigcMarking | None) -> str | None:
-    """The machine-translation disclosure line that leads an AIGC-marked subtitle."""
-    return _MT_DISCLOSURE if _on(marking) else None
+    """The machine-translation disclosure line that leads an AIGC-marked subtitle.
+
+    §14 operator-configurable (owner-authorized reconfiguration): gated by BOTH the master
+    ``enabled`` and the per-channel ``subtitle_enabled``, and uses the custom ``subtitle_text``
+    when set (a null/empty custom text falls back to the default MT-disclosure line). The
+    video/dub channel is independent and unaffected by ``subtitle_enabled``.
+    """
+    if marking is None or not marking.enabled or not marking.subtitle_enabled:
+        return None
+    return (marking.subtitle_text or "").strip() or _MT_DISCLOSURE

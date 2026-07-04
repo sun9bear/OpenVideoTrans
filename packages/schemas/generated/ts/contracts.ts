@@ -82,6 +82,8 @@ export interface AigcMarking {
   explicit: boolean;
   form: "tail_notice" | "corner_label" | "disclosure_only";
   applied?: boolean | null;
+  subtitle_enabled?: boolean;
+  subtitle_text?: string | null;
 }
 
 /** Chosen provider plan. tts is null for subtitle_only jobs. */
