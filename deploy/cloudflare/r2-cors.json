@@ -1,0 +1,11 @@
+[
+  {
+    "allowed": {
+      "origins": ["https://openvideotrans.xyz"],
+      "methods": ["GET", "PUT", "HEAD"],
+      "headers": ["content-type"]
+    },
+    "exposeHeaders": ["ETag"],
+    "maxAgeSeconds": 3600
+  }
+]
