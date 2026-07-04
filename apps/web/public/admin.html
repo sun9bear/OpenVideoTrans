@@ -190,6 +190,9 @@
 
       function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
       function actor() { return sessionStorage.getItem(ACTOR_KEY) || ""; }
+      // Token + actor are cleared TOGETHER — on explicit logout AND on rejected/failed auth — so a shared
+      // tab never leaves a stale operator name that showGate() would prefill and silently re-attribute.
+      function clearCreds() { sessionStorage.removeItem(TOKEN_KEY); sessionStorage.removeItem(ACTOR_KEY); }
 
       // One typed fetch to the admin surface. Throws {status, code, message} on a non-2xx so callers
       // can show the server's exact message (e.g. an out-of-bounds 400 that names the allowed range).
@@ -502,7 +505,7 @@
           showConsole();
           await loadAudit();
         } catch (e) {
-          sessionStorage.removeItem(TOKEN_KEY);
+          clearCreds();
           if (e.status === 401) showGate("凭证无效。请检查 ADMIN_TOKEN。");
           else if (e.status === 503) showGate("控制面尚未配置 ADMIN_TOKEN（管理接口未启用）。");
           else showGate(e.message || "连接失败。");
@@ -521,13 +524,7 @@
       });
       $("actorInput").addEventListener("keydown", function (e) { if (e.key === "Enter") $("tokenInput").focus(); });
       $("tokenInput").addEventListener("keydown", function (e) { if (e.key === "Enter") $("connectBtn").click(); });
-      $("logoutBtn").addEventListener("click", function () {
-        // Clear BOTH so a shared browser doesn't attribute the next operator's changes to the previous
-        // one: dropping only the token would let showGate() prefill the stale actor and re-save it.
-        sessionStorage.removeItem(TOKEN_KEY);
-        sessionStorage.removeItem(ACTOR_KEY);
-        showGate();
-      });
+      $("logoutBtn").addEventListener("click", function () { clearCreds(); showGate(); });
       $("saveBtn").addEventListener("click", save);
       $("metricsBtn").addEventListener("click", loadMetrics);
 
