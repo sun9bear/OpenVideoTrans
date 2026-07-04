@@ -710,11 +710,16 @@ def run_pipeline(
               subtitle_lang=subtitle_lang, subtitle_delivery=subtitle_delivery,
               marking=aigc_marking, burn_font=burn_font, watermark_font=watermark_font)
     if job is not None:
-        # Record the embed method only when a mark was actually applied (mux sets
-        # marking.applied on the non-empty deliverable set), so the manifest never
-        # over-claims. worker_meta.ffprobe blob is deferred to T1.4 worker
-        # integration; models[] sha256 pins land in T1.3g.
-        method = (aigc.embed_method(aigc_marking, output_mode)
-                  if aigc_marking is not None and aigc_marking.applied else None)
+        # Record the embed method only when a mark was actually applied (mux sets marking.applied on
+        # the non-empty deliverable set), so the manifest never over-claims. §3 also forbids the
+        # inverse UNDER-claim: a visible watermark can be the ONLY applied mark — for a
+        # subtitle_only+burned job with the subtitle cue off, embed_method() is None yet the burned
+        # video visibly carries the drawtext overlay. applied=True with a None embed_method can ONLY
+        # arise that way (applied = want_method-non-empty OR watermark-applied, and want_method is
+        # empty exactly when embed_method is None), so record "visible_watermark" rather than a
+        # self-contradictory None. worker_meta.ffprobe blob is deferred to T1.4; models[] to T1.3g.
+        method: str | None = None
+        if aigc_marking is not None and aigc_marking.applied:
+            method = aigc.embed_method(aigc_marking, output_mode) or "visible_watermark"
         write_manifest(paths, job, WorkerMeta(aigc_embed_method=method))
     return out

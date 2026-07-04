@@ -530,3 +530,38 @@ def test_mux_burned_forwards_watermark_to_burn(tmp_path: Path, monkeypatch) -> N
     assert "watermark" not in captured  # no separate second pass
     wm = captured["burn_watermark"]
     assert wm is not None and wm.text == "AI 水印" and wm.fontfile == "/f/noto.ttc"
+
+
+def test_run_pipeline_records_visible_watermark_as_only_applied_mark(
+    tmp_path: Path, monkeypatch  # noqa: ANN001
+) -> None:
+    # §3 audit accuracy: subtitle_only + burned with the subtitle cue OFF but the watermark ON — the
+    # burned video visibly carries the drawtext overlay while embed_method() is None. The manifest
+    # must record "visible_watermark", never a self-contradictory None (applied=True + method=None).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    marking = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only",
+        subtitle_enabled=False, video_watermark_enabled=True,
+    )
+    job = Job(
+        job_id="job_wm", anon_or_user_id="anon", tier="tier1", status="done", source_type="upload",
+        upload_session_id="up", target_lang="zh-Hans", output_mode="subtitle_only",
+        subtitle_delivery="burned", subtitle_lang="target",
+        plan=JobPlan(asr="a", mt="b", tts=None), settings_version=1, aigc_marking=marking,
+        priority=0, enqueue_at=0, deadline_at=0, created_at=0, expires_at=0,
+        artifacts=JobArtifacts(), attempt=1, claim_version=1,
+        counted_job=True, counted_minutes=True, refunded=False,
+    )
+    monkeypatch.setattr(stages, "ingest", lambda *a, **k: None)  # noqa: ARG005
+    monkeypatch.setattr(stages, "prepare", lambda *a, **k: None)  # noqa: ARG005
+
+    def fake_burn(video, srt, out, **kwargs):  # noqa: ANN001,ANN003,ANN202
+        Path(out).write_bytes(b"burned")
+
+    monkeypatch.setattr(stages.ff, "burn_subtitles", fake_burn)
+    stages.run_pipeline(paths, _Resolver(), source="x", target_lang="zh-Hans", job=job)
+    assert marking.applied is True
+    manifest = Manifest.model_validate(read_json(paths.manifest))
+    # NOT None — §3 forbids under-claiming a mark the artifact visibly carries.
+    assert manifest.worker_meta.aigc_embed_method == "visible_watermark"
