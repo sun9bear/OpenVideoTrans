@@ -371,6 +371,28 @@ def test_mux_marking_change_invalidates_cache(tmp_path: Path, monkeypatch) -> No
     assert marking.applied is True
 
 
+def test_mux_subtitle_text_change_invalidates_cache(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # §14: changing the subtitle cue text must force a re-mux, not serve a stale SRT — the cache key
+    # folds in the visible subtitle cue (for `both`, embed_method alone would not change).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    captured: dict = {}
+    _mock_video_ffmpeg(monkeypatch, captured)
+    m1 = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="tail_notice", subtitle_text="旧文案",
+    )
+    stages.mux(paths, output_mode="both", marking=m1)  # first run writes marker with subcue=旧文案
+    captured.clear()
+    m2 = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="tail_notice", subtitle_text="新文案",
+    )
+    stages.mux(paths, output_mode="both", marking=m2)  # cue text differs -> key differs -> re-mux
+    assert "metadata" in captured  # ff.mux WAS called again (not a stale cache hit)
+    srt = paths.subtitles.read_text(encoding="utf-8")
+    assert "新文案" in srt and "旧文案" not in srt  # SRT carries the NEW cue, not the stale one
+
+
 def test_run_pipeline_defaults_to_marked_when_none_given(
     tmp_path: Path, monkeypatch  # noqa: ANN001
 ) -> None:

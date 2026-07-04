@@ -228,7 +228,11 @@ def test_mux_cached_when_both_outputs_exist(tmp_path: Path) -> None:
     paths = JobPaths(tmp_path).ensure()
     paths.dubbed_video.write_bytes(b"\x00")
     paths.subtitles.write_text("1\n", encoding="utf-8")
-    (paths.output / ".mux_cache").write_text("av_voice_mark|both|target|srt", encoding="utf-8")
+    # §14: the key now folds in the subtitle cue (default-on -> default MT disclosure), so a
+    # subtitle_text / enabled change forces a re-mux; the marker must include the subcue part.
+    (paths.output / ".mux_cache").write_text(
+        "av_voice_mark|both|target|srt|subcue:本字幕由机器翻译生成", encoding="utf-8"
+    )
     assert stages.mux(paths, force=False) == paths.dubbed_video
 
 

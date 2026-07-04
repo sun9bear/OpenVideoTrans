@@ -446,6 +446,12 @@ def mux(
     # rewrite (CodeX R3/R5) — the cache never serves a deliverable built for other
     # settings, and never over-/under-claims the §3 mark.
     cache_key_parts = [want_method, output_mode, subtitle_lang, subtitle_delivery]
+    # §14: the subtitle cue (custom text + on/off) shapes the SRT/burned output but is NOT
+    # in want_method — for `both`, embed_method stays av_voice_mark regardless of the
+    # subtitle channel, and want_method ignores custom cue text. Fold the cue into the key
+    # so a subtitle_enabled / subtitle_text change forces a re-mux, not a stale subtitle.
+    if want_srt or want_burn:
+        cache_key_parts.append(f"subcue:{aigc.subtitle_disclosure(marking) or ''}")
     if want_burn:
         # The burn re-encode caps shape the pixels too, so fold them into the key — but ONLY
         # when burning, so a non-burn job's key stays byte-identical to before (no needless
