@@ -144,7 +144,9 @@
           "type": "string",
           "enum": ["tail_notice", "corner_label", "disclosure_only"]
         },
-        "applied": { "type": ["boolean", "null"], "default": null }
+        "applied": { "type": ["boolean", "null"], "default": null },
+        "subtitle_enabled": { "type": "boolean", "default": true, "description": "AIGC subtitle disclosure cue on/off. §14 operator-configurable via CFG-GUARD (default-on, audited); independent of the video/dub channel." },
+        "subtitle_text": { "type": ["string", "null"], "default": null, "description": "Custom AIGC subtitle disclosure text; null/empty uses the kernel default MT-disclosure line." }
       },
       "required": ["enabled", "implicit", "explicit", "form"]
     },

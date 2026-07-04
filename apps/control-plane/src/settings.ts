@@ -44,6 +44,16 @@ function enumBound(key: string, allowed: readonly string[]): SettingValidator {
   };
 }
 
+// A bounded free-text string (length cap only). Backs the operator-configurable AIGC subtitle
+// disclosure text (§14) — the owner owns the wording, so there is no content restriction beyond length.
+function strBound(key: string, maxLen: number): SettingValidator {
+  return (raw) => {
+    if (typeof raw !== "string") throw invalid(`${key} must be a string`);
+    if (raw.length > maxLen) throw invalid(`${key} must be at most ${maxLen} characters`);
+    return raw;
+  };
+}
+
 const MODE_KEYS = ["subtitle_only", "dub_only", "both"] as const;
 
 // maxVideoDurationMs is a per-output_mode object; validate each mode's cap and reject extra keys so a
@@ -104,25 +114,27 @@ export const MUTABLE_SETTINGS: Record<string, SettingValidator> = {
   // RED_LINE ∩ MUTABLE = ∅ CI invariant still holds), so an operator can pause/resume intake live
   // with a full CFG-GUARD audit row.
   servicePaused: boolBound("servicePaused"),
+  // §14 AIGC subtitle marking — OWNER-AUTHORIZED §3 reconfiguration (2026-07-04). MUTABLE + audited
+  // (every change writes a CFG-GUARD audit row: who/when/old→new/reason) + DEFAULT-ON (config.ts). The
+  // project owner explicitly owns the legal risk; routing the toggle through this guard makes disabling
+  // a RECORDED, auditable act — exactly the "audited acknowledgment" red line 3 asked for. This is NOT a
+  // paid-API gate: allow_paid/paid_providers remain the ONLY hard-immutable red-line keys (§1).
+  aigcSubtitleEnabled: boolBound("aigcSubtitleEnabled"),
+  aigcSubtitleText: strBound("aigcSubtitleText", 200),
 };
 
-// Keys that encode a RED LINE and must never become a runtime config knob. allow_paid/paid_providers
-// are hard-immutable (allow_paid 恒 false, §1). The aigc_* names are rejected because AIGC legal
-// marking is NOT a global runtime setting — it is decided PER JOB by output_mode (§3, owned by
-// autodub-core T1.3b / the T2.6 UI), and red line 3's "disable needs audited acknowledgment" path
-// lives in that per-job mechanism. A global CFG-GUARD aigc override would be a single kill-switch for
-// the legal marking, so it is denied here (a DISTINCT 403, not a generic 400). Adding an audited
-// GLOBAL override is a compliance-sensitive decision routed to the project owner, not something this
-// config guard introduces autonomously. The empty intersection with MUTABLE_SETTINGS is asserted in CI.
-export const RED_LINE_KEYS = [
-  "allow_paid",
-  "paid_providers",
-  "aigc_enabled",
-  "aigc_marking",
-  "aigc_disclosure",
-  "aigc_implicit",
-  "aigc_explicit",
-] as const;
+// Keys that encode a RED LINE and must never become a runtime config knob. Only the PAID-API gate
+// remains here: allow_paid is hard-immutable (allow_paid 恒 false, §1) and paid_providers cannot be
+// flipped at runtime — a media-worker or admin compromise must never be able to turn on paid calls.
+//
+// AIGC legal marking (§3) is DELIBERATELY NO LONGER a red-line key (owner decision, 2026-07-04): the
+// project owner — who explicitly owns the legal/compliance risk — authorized reconfiguring it. The
+// design always reserved this "audited AIGC toggle" for the owner (母文档 §3 "关闭需 audited
+// acknowledgment"; the log's "AIGC 审计化全局禁用机制 → 归项目主"). It is now a MUTABLE + audited +
+// default-on setting (aigcSubtitleEnabled / aigcSubtitleText above; video watermark in a follow-up),
+// so every change is recorded who/when/old→new/reason — the audit trail IS the acknowledgment. The
+// empty intersection RED_LINE ∩ MUTABLE is still asserted in CI (settings.guard.test.ts).
+export const RED_LINE_KEYS = ["allow_paid", "paid_providers"] as const;
 
 // Validate a single change. Order matters: a red-line key is a distinct 403 even though it is also
 // "not mutable", so the audit/telemetry can tell a red-line attempt from a typo.

@@ -85,6 +85,25 @@ def test_subtitle_disclosure_text_only_when_enabled() -> None:
     assert aigc.subtitle_disclosure(None) is None
 
 
+def test_subtitle_disclosure_respects_subtitle_enabled_and_custom_text() -> None:
+    # §14 owner-authorized reconfiguration: custom text is used when set.
+    m = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only",
+        subtitle_enabled=True, subtitle_text="本视频由 AI 翻译",
+    )
+    assert aigc.subtitle_disclosure(m) == "本视频由 AI 翻译"
+    # Per-channel off: subtitle_enabled=False -> None even though the master `enabled` is on.
+    off = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only", subtitle_enabled=False,
+    )
+    assert aigc.subtitle_disclosure(off) is None
+    # Blank/whitespace custom text falls back to the kernel default line.
+    blank = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only", subtitle_text="   ",
+    )
+    assert aigc.subtitle_disclosure(blank) == "本字幕由机器翻译生成"
+
+
 # --------------------------------------------------------------------------- #
 # mux applies the mark by mode
 # --------------------------------------------------------------------------- #

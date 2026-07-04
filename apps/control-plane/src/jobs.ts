@@ -117,9 +117,21 @@ function defaultPlan(outputMode: string): { asr: string; mt: string; tts: string
 
 // AIGC legal marking is DEFAULT-ON (red line 3). Form is conditioned on output_mode: a dub gets a
 // tail/voice notice; subtitle-only gets light disclosure. The worker sets `applied` once embedded.
-function defaultAigcMarking(outputMode: string): Job["aigc_marking"] {
+// §14 (owner-authorized §3 reconfiguration, 2026-07-04): the SUBTITLE channel's on/off + custom text
+// are baked in here from the config IN FORCE at creation (per-job snapshot ⇒ non-drift; a later config
+// change never retro-alters a queued job). The master `enabled` + the video/dub channel stay
+// default-on (video watermark config is a follow-up); disabling is recorded in the CFG-GUARD audit.
+function defaultAigcMarking(outputMode: string, config: Ctx["config"]): Job["aigc_marking"] {
   const form = outputMode === "subtitle_only" ? "disclosure_only" : "tail_notice";
-  return { enabled: true, implicit: true, explicit: true, form, applied: null };
+  return {
+    enabled: true,
+    implicit: true,
+    explicit: true,
+    form,
+    applied: null,
+    subtitle_enabled: config.aigcSubtitleEnabled,
+    subtitle_text: config.aigcSubtitleText,
+  };
 }
 
 // POST /jobs — verify the upload (HEAD + cap), then create a queued job carrying all v4 fields.
@@ -188,7 +200,7 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   // INSERT is the lone OUR-fault step that can orphan the reserve, so ONLY it is wrapped; wake + the
   // response read live OUTSIDE (fail-closed: a post-commit blip fails the response, but the count stands).
   const plan = defaultPlan(outputMode);
-  const aigc = defaultAigcMarking(outputMode);
+  const aigc = defaultAigcMarking(outputMode, ctx.config);
   const deadlineAt = now + ctx.config.deadlineMaxWaitMs;
   const expiresAt = now + ctx.config.jobTtlMs;
 

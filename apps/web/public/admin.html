@@ -114,15 +114,7 @@
         <div id="topMsg"></div>
         <div id="groups"></div>
 
-        <!-- AIGC — locked, read-only. Honest boundary: red line 3. -->
-        <div class="card locked">
-          <h2>AIGC 合成内容标识 — 法律要求，已锁定</h2>
-          <div class="body">
-            <p style="margin-top:0">生成的字幕 / 配音会带有 AIGC 合成内容标识（字幕首条披露「本字幕由机器翻译生成」、配音语音标识），这是《生成式人工智能服务管理暂行办法》《互联网信息服务深度合成管理规定》的<strong>显著标识</strong>要求。</p>
-            <p><strong>默认开启，前台与后台均不可关闭。</strong>配置守卫对 <code>aigc_enabled / aigc_marking / aigc_disclosure</code> 等键一律拒绝（<code>403 forbidden_setting</code>），CI 断言它们永不可成为运行时开关（红线 3）。这里不提供开关，是刻意为之，不是遗漏。</p>
-            <p style="margin-bottom:0" class="meta">如需调整披露<strong>文案 / 形式</strong>（仍保留标识），属 autodub-core 源码层改动，请单独处理——不在本管理台范围内。</p>
-          </div>
-        </div>
+        <!-- AIGC marking is now an editable group in #groups (owner-authorized §3 reconfiguration). -->
 
         <!-- System snapshot (read-only aggregates) -->
         <div class="card">
@@ -179,7 +171,11 @@
         ]},
         { title: "服务", fields: [
           { key: "queueBackend", name: "队列后端", type: "enum", values: ["d1", "cf_queues"], hint: "cf_queues 需付费套餐 + 队列绑定，否则保持 d1" },
-          { key: "servicePaused", name: "暂停接单（急停开关）", type: "bool", hint: "开启后 /api/uploads/sign 与 /api/jobs 返回 503；进行中的任务、下载、状态查询不受影响" },
+          { key: "servicePaused", name: "暂停接单（急停开关）", type: "bool", boolLabels: { on: "已暂停", off: "运行中" }, hint: "开启后 /api/uploads/sign 与 /api/jobs 返回 503；进行中的任务、下载、状态查询不受影响" },
+        ]},
+        { title: "AIGC 合成内容标识 · 字幕", note: "法律要求（《生成式人工智能服务管理暂行办法》《互联网信息服务深度合成管理规定》的显著标识）。默认开启；关闭或改文案由业主承担合规责任，每次改动记入下方审计。视频可视水印将在后续版本加入。", fields: [
+          { key: "aigcSubtitleEnabled", name: "字幕 AIGC 披露", type: "bool", boolLabels: { on: "开启", off: "关闭" }, hint: "关闭后，生成的字幕不再带「机器翻译」披露标识。" },
+          { key: "aigcSubtitleText", name: "披露文案", type: "text", hint: "留空 = 默认「本字幕由机器翻译生成」。最多 200 字。" },
         ]},
       ];
 
@@ -242,6 +238,7 @@
         GROUPS.forEach(function (g) {
           var card = document.createElement("div"); card.className = "card";
           var h = document.createElement("h2"); h.textContent = g.title; card.appendChild(h);
+          if (g.note) { var gn = document.createElement("div"); gn.className = "meta"; gn.style.margin = "-6px 0 14px"; gn.textContent = g.note; card.appendChild(gn); }
           g.fields.forEach(function (f) {
             var canonical = getCanonical(cfg, f.key);
             var row = document.createElement("div"); row.className = "field"; row.dataset.key = f.key;
@@ -252,16 +249,23 @@
             var input;
             var canEdit = editable(f.key);
             if (f.type === "bool") {
+              var lbls = f.boolLabels || { on: "开", off: "关" };
               input = document.createElement("input"); input.type = "checkbox"; input.checked = !!canonical;
               var sw = document.createElement("label"); sw.className = "switch";
               sw.appendChild(input);
-              var t = document.createElement("span"); t.className = "unit"; t.textContent = canonical ? "已暂停" : "运行中";
-              input.addEventListener("change", function () { t.textContent = input.checked ? "已暂停" : "运行中"; onDirty(); });
+              var t = document.createElement("span"); t.className = "unit"; t.textContent = canonical ? lbls.on : lbls.off;
+              input.addEventListener("change", function () { t.textContent = input.checked ? lbls.on : lbls.off; onDirty(); });
               sw.appendChild(t); ctl.appendChild(sw);
             } else if (f.type === "enum") {
               input = document.createElement("select");
               f.values.forEach(function (v) { var o = document.createElement("option"); o.value = v; o.textContent = v; if (v === canonical) o.selected = true; input.appendChild(o); });
               input.addEventListener("change", onDirty); ctl.appendChild(input);
+            } else if (f.type === "text") {
+              input = document.createElement("input"); input.type = "text"; input.maxLength = f.maxLength || 200;
+              input.value = canonical == null ? "" : String(canonical);
+              input.style.width = "260px"; input.style.textAlign = "left";
+              input.addEventListener("input", onDirty);
+              ctl.appendChild(input);
             } else {
               input = document.createElement("input"); input.type = "number"; input.step = "any"; input.min = "0";
               input.value = fmt(canonical / f.factor);
@@ -295,6 +299,9 @@
             if (!!getCanonical(cfg, f.key) !== input.checked) scalars.push({ key: f.key, value: input.checked });
           } else if (f.type === "enum") {
             if (getCanonical(cfg, f.key) !== input.value) scalars.push({ key: f.key, value: input.value });
+          } else if (f.type === "text") {
+            // Free text: empty IS a valid value (kernel falls back to its default), so don't skip "".
+            if ((getCanonical(cfg, f.key) || "") !== input.value) scalars.push({ key: f.key, value: input.value });
           } else if (input.value !== "") {
             var val = Math.round(Number(input.value) * Number(input.dataset.factor));
             if (f.key.indexOf("maxVideoDurationMs.") === 0) {
@@ -343,6 +350,7 @@
           var input = state.inputs[c.key];
           if (!input) return;
           if (input.type === "checkbox") input.checked = !!c.value;
+          else if (input.type === "text") input.value = c.value == null ? "" : String(c.value);
           else if (input.tagName === "SELECT") input.value = c.value;
           else input.value = fmt(c.value / Number(input.dataset.factor));
         });

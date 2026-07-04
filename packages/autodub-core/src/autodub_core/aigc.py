@@ -70,5 +70,13 @@ def metadata_args(marking: AigcMarking | None, output_mode: str) -> list[str]:
 
 
 def subtitle_disclosure(marking: AigcMarking | None) -> str | None:
-    """The machine-translation disclosure line that leads an AIGC-marked subtitle."""
-    return _MT_DISCLOSURE if _on(marking) else None
+    """The machine-translation disclosure line that leads an AIGC-marked subtitle.
+
+    §14 operator-configurable (owner-authorized reconfiguration): gated by BOTH the master
+    ``enabled`` and the per-channel ``subtitle_enabled``, and uses the custom ``subtitle_text``
+    when set (a null/empty custom text falls back to the default MT-disclosure line). The
+    video/dub channel is independent and unaffected by ``subtitle_enabled``.
+    """
+    if marking is None or not marking.enabled or not marking.subtitle_enabled:
+        return None
+    return (marking.subtitle_text or "").strip() or _MT_DISCLOSURE

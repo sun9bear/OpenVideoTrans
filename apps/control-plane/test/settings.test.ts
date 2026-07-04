@@ -27,6 +27,13 @@ describe("validateSettingChange", () => {
     expect(validateSettingChange("queueBackend", "cf_queues")).toBe("cf_queues");
   });
 
+  it("accepts the operator-configurable AIGC subtitle settings (owner-authorized §3 reconfiguration)", () => {
+    expect(validateSettingChange("aigcSubtitleEnabled", false)).toBe(false);
+    expect(validateSettingChange("aigcSubtitleText", "本视频由 AI 翻译")).toBe("本视频由 AI 翻译");
+    expect(() => validateSettingChange("aigcSubtitleText", "x".repeat(201))).toThrow(HttpError); // >200
+    expect(() => validateSettingChange("aigcSubtitleEnabled", "yes")).toThrow(HttpError); // not a bool
+  });
+
   it("rejects an out-of-bounds value (400 invalid_setting)", () => {
     expect(() => validateSettingChange("maxUploadBytes", 10)).toThrow(HttpError);
     try {
@@ -54,7 +61,8 @@ describe("validateSettingChange", () => {
   });
 
   it("rejects a RED-LINE key with a DISTINCT 403 forbidden_setting", () => {
-    for (const key of ["allow_paid", "aigc_enabled", "aigc_marking", "paid_providers"]) {
+    // Only the PAID-API gate is red-line now; AIGC keys were reconfigured to mutable+audited (§3, owner).
+    for (const key of ["allow_paid", "paid_providers"]) {
       try {
         validateSettingChange(key, false);
         throw new Error(`expected ${key} to be rejected`);
@@ -262,9 +270,10 @@ describe("admin route POST /internal/admin/settings (admin-auth, separate from w
     // The UI drives editable-vs-locked off these server-truth lists.
     expect(res.json.mutableKeys).toContain("maxUploadBytes");
     expect(res.json.mutableKeys).toContain("maxVideoDurationMs");
-    expect(res.json.mutableKeys).not.toContain("aigc_enabled");
-    expect(res.json.redLineKeys).toContain("aigc_enabled");
-    expect(res.json.redLineKeys).toContain("allow_paid");
+    expect(res.json.mutableKeys).toContain("aigcSubtitleEnabled"); // AIGC now operator-mutable (§3 reconfig)
+    expect(res.json.mutableKeys).toContain("aigcSubtitleText");
+    expect(res.json.redLineKeys).toContain("allow_paid"); // paid-API gate stays red-line
+    expect(res.json.redLineKeys).not.toContain("aigc_enabled");
   });
 
   it("GET /internal/admin/settings reads D1 truth even when the KV hot cache is stale (codex P2)", async () => {

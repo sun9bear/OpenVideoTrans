@@ -48,6 +48,14 @@ export interface RuntimeConfig {
   // sweep, not a hard shutdown. MUTABLE (an operational knob, not a red-line/AIGC gate) so an operator
   // can flip it live via CFG-GUARD with a full audit trail.
   servicePaused: boolean;
+  // §14 AIGC marking — OWNER-AUTHORIZED reconfiguration (2026-07-04): the legal synthetic-content mark
+  // is DEFAULT-ON; the project owner (who explicitly owns the legal risk) may reconfigure it via
+  // CFG-GUARD with a full audit trail. This is the §3 "audited AIGC toggle" the design reserved for the
+  // owner — NOT a paid-API gate (red line 1 / allow_paid stays hard-immutable, never mutable). `subtitle`
+  // = the machine-translation disclosure cue prepended to the SRT; empty text falls back to the kernel
+  // default. (Video visual watermark position/size/color/opacity is PR-2.)
+  aigcSubtitleEnabled: boolean;
+  aigcSubtitleText: string;
 }
 
 export const DEFAULT_CONFIG: RuntimeConfig = {
@@ -91,4 +99,6 @@ export const DEFAULT_CONFIG: RuntimeConfig = {
   dailyActorMinutesMsCap: 120 * 60 * 1000, // 120 min/day per anon/user
   dailyIpJobCap: 20,
   servicePaused: false, // M3 kill-switch default OPEN; operator flips true via CFG-GUARD to pause intake
+  aigcSubtitleEnabled: true, // §3 legal mark DEFAULT-ON; owner may disable via CFG-GUARD (audited)
+  aigcSubtitleText: "本字幕由机器翻译生成", // default MT-disclosure; matches autodub-core _MT_DISCLOSURE
 };
