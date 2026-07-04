@@ -96,6 +96,7 @@
         <div class="wordmark"><b>OpenVideoTrans</b> · 管理台</div>
         <div class="card">
           <p style="margin-top:0;font-size:14px">粘贴 <code style="font-family:var(--mono)">ADMIN_TOKEN</code> 以连接。仅保存在本次浏览器会话（sessionStorage），刷新页面后需重新输入，不会落盘。</p>
+          <input id="actorInput" type="text" autocomplete="off" placeholder="操作者名（可选，记入改动审计的“谁”）" />
           <input id="tokenInput" type="password" autocomplete="off" placeholder="ADMIN_TOKEN" />
           <button class="primary" id="connectBtn" style="width:100%">连接</button>
           <div id="gateMsg"></div>
@@ -106,7 +107,7 @@
       <div id="console" class="hidden">
         <header>
           <div class="wordmark"><b>OpenVideoTrans</b> · 管理台</div>
-          <div class="meta">配置版本 <span id="ver">—</span> · <button class="link" id="logoutBtn">清除凭证</button></div>
+          <div class="meta"><span id="who"></span>配置版本 <span id="ver">—</span> · <button class="link" id="logoutBtn">清除凭证</button></div>
         </header>
         <p class="sub">运行时配置守卫（CFG-GUARD）。每次改动经服务端校验 + 审计（谁 / 何时 / 旧→新 / 原因）+ 版本快照；旧任务锁定其创建时的配置，不受后续改动影响。</p>
 
@@ -183,15 +184,21 @@
       ];
 
       var TOKEN_KEY = "ovt_admin_token";
+      var ACTOR_KEY = "ovt_admin_actor";
       var $ = function (id) { return document.getElementById(id); };
       var state = { config: null, mutableKeys: [], inputs: {} };
 
       function token() { return sessionStorage.getItem(TOKEN_KEY) || ""; }
+      function actor() { return sessionStorage.getItem(ACTOR_KEY) || ""; }
 
       // One typed fetch to the admin surface. Throws {status, code, message} on a non-2xx so callers
       // can show the server's exact message (e.g. an out-of-bounds 400 that names the allowed range).
+      // X-OVT-Actor carries the operator name into the CFG-GUARD audit "who" (adminSetSetting); without
+      // it the server records "operator", which loses the trail when the token is shared by >1 operator.
       async function api(method, path, body) {
         var init = { method: method, headers: { Authorization: "Bearer " + token() } };
+        var a = actor();
+        if (a) init.headers["X-OVT-Actor"] = a;
         if (body !== undefined) { init.headers["content-type"] = "application/json"; init.body = JSON.stringify(body); }
         var res;
         try { res = await fetch(path, init); }
@@ -478,9 +485,13 @@
       function showGate(msg, kind) {
         $("gate").classList.remove("hidden"); $("console").classList.add("hidden");
         if (msg) showMsg("gateMsg", kind || "err", msg); else clearMsg("gateMsg");
+        $("actorInput").value = actor(); // prefill last-used operator name
         $("tokenInput").focus();
       }
-      function showConsole() { $("gate").classList.add("hidden"); $("console").classList.remove("hidden"); }
+      function showConsole() {
+        $("gate").classList.add("hidden"); $("console").classList.remove("hidden");
+        $("who").textContent = actor() ? ("操作者 " + actor() + " · ") : "";
+      }
 
       async function connect() {
         try {
@@ -500,9 +511,12 @@
         var v = $("tokenInput").value.trim();
         if (!v) { showMsg("gateMsg", "err", "请输入 ADMIN_TOKEN。"); return; }
         sessionStorage.setItem(TOKEN_KEY, v);
+        var a = $("actorInput").value.trim();
+        if (a) sessionStorage.setItem(ACTOR_KEY, a); else sessionStorage.removeItem(ACTOR_KEY);
         $("tokenInput").value = "";
         connect();
       });
+      $("actorInput").addEventListener("keydown", function (e) { if (e.key === "Enter") $("tokenInput").focus(); });
       $("tokenInput").addEventListener("keydown", function (e) { if (e.key === "Enter") $("connectBtn").click(); });
       $("logoutBtn").addEventListener("click", function () { sessionStorage.removeItem(TOKEN_KEY); showGate(); });
       $("saveBtn").addEventListener("click", save);
