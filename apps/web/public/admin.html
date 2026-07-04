@@ -386,11 +386,23 @@
           pending = next;
           if (!progress) break; // no change applied this pass -> the rest are genuine failures
         }
-        await loadSettings();
-        if (pending.length) reapplyIntents(pending); // keep un-applied edits across the reload (retry-able)
+        // Refresh from server truth — but GUARD it: if this reload ALSO fails (token rotated mid-save,
+        // outage persists), it must not throw out of save() and leave the button disabled with no banner.
+        // On reload failure the inputs are untouched (edits already intact), so we skip reapply, still run
+        // onDirty() to re-enable the button, and report. On success we reapply un-applied edits (the reload
+        // re-rendered the form). loadAudit() is self-guarded (never throws).
+        var reloadErr = null;
+        try {
+          await loadSettings();
+          if (pending.length) reapplyIntents(pending); // reload re-rendered — restore un-applied edits
+        } catch (e) {
+          reloadErr = e; // inputs left as-is (edits intact); nothing to reapply
+        }
         onDirty();
         await loadAudit();
-        if (pending.length) {
+        if (reloadErr) {
+          showMsg("topMsg", "err", "已保存 " + applied + "/" + changes.length + " 项；刷新配置失败：" + reloadErr.message + "。你的修改仍在表单中，可重试。");
+        } else if (pending.length) {
           var keys = pending.map(function (c) { return c.key; }).join("、");
           showMsg("topMsg", "err", "已保存 " + applied + "/" + changes.length + " 项；未通过：「" + keys + "」— " + (lastErr ? lastErr.message : ""));
         } else {
