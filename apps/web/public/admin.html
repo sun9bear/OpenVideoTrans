@@ -95,7 +95,7 @@
       <div id="gate" class="gate hidden">
         <div class="wordmark"><b>OpenVideoTrans</b> · 管理台</div>
         <div class="card">
-          <p style="margin-top:0;font-size:14px">粘贴 <code style="font-family:var(--mono)">ADMIN_TOKEN</code> 以连接。仅保存在本次浏览器会话（sessionStorage），刷新页面后需重新输入，不会落盘。</p>
+          <p style="margin-top:0;font-size:14px">粘贴 <code style="font-family:var(--mono)">ADMIN_TOKEN</code> 以连接。仅存于本次浏览器会话（sessionStorage）：刷新页面仍在，<strong>关闭标签页</strong>或点「清除凭证」即失，不落盘。共用电脑请用完点「清除凭证」。</p>
           <input id="actorInput" type="text" autocomplete="off" placeholder="操作者名（可选，记入改动审计的“谁”）" />
           <input id="tokenInput" type="password" autocomplete="off" placeholder="ADMIN_TOKEN" />
           <button class="primary" id="connectBtn" style="width:100%">连接</button>

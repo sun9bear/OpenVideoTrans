@@ -105,7 +105,7 @@ curl -sI -X OPTIONS "<presigned-put-url>" -H "Origin: https://openvideotrans.xyz
 读接口 `GET /internal/admin/settings`（admin 鉴权）。
 
 - **登录**：浏览器打开 `/admin.html`，粘贴 `ADMIN_TOKEN`（§3 里 `wrangler secret put` 的那个值）。
-  Token 仅存本次浏览器会话的 sessionStorage、刷新即失、不落盘。`ADMIN_TOKEN` 未配置 → 页面报 503。
+  Token 仅存本次浏览器会话的 sessionStorage：刷新页面仍在，关闭标签页或点「清除凭证」即失，不落盘。共用电脑请用完清除。`ADMIN_TOKEN` 未配置 → 页面报 503。
   可选填「操作者名」——经 `X-OVT-Actor` 记入改动审计的“谁”（多人共用一个 token 时用于区分；留空记为 `operator`）。
 - **可设置**：上传大小上限、三档时长 cap（纯字幕/配音/两者）、每日额度（全局/单用户/单 IP）、各类
   TTL/超时、`queueBackend`、`servicePaused` 急停开关。改动经服务端校验 + 审计 + 版本快照，即时生效；
