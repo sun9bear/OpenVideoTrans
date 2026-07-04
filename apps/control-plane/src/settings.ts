@@ -383,13 +383,19 @@ export async function getSettingsAudit(ctx: Ctx): Promise<Response> {
 }
 
 // GET /internal/admin/settings — the admin console's read side (admin-auth). Returns the LIVE config
-// (ctx.config, already composed by the router) plus which keys are operator-tunable and which are
-// red-line-locked, so the UI renders each field editable or read-only from server truth (never a
-// client-side guess). The worker's own read is /internal/config (worker-auth); this is its admin twin
-// so the console never needs the worker bearer. Read-only: no write, no version bump, no audit row.
-export function adminGetSettings(ctx: Ctx): Response {
+// plus which keys are operator-tunable and which are red-line-locked, so the UI renders each field
+// editable or read-only from server truth (never a client-side guess). The worker's own read is
+// /internal/config (worker-auth); this is its admin twin so the console never needs the worker bearer.
+// Reads from D1 (authoritative), NOT ctx.config (the KV `runtime_config` hot cache): KV is eventually
+// consistent, so right after a POST the cache may still hold the pre-write snapshot. Serving that to the
+// console is not just a stale display — the operator would then edit ONE mode of an object setting
+// (maxVideoDurationMs) and the page re-posts the WHOLE object built from stale values, silently
+// regressing the untouched modes' newer D1 values. The worker hot path tolerates KV lag; this must not.
+// Read-only: no write, no version bump, no audit row.
+export async function adminGetSettings(ctx: Ctx): Promise<Response> {
+  const config = await loadConfigFromD1(ctx.env);
   return json({
-    config: ctx.config,
+    config,
     mutableKeys: Object.keys(MUTABLE_SETTINGS).sort(),
     redLineKeys: [...RED_LINE_KEYS],
   });

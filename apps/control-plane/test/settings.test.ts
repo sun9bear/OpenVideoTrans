@@ -267,6 +267,22 @@ describe("admin route POST /internal/admin/settings (admin-auth, separate from w
     expect(res.json.redLineKeys).toContain("allow_paid");
   });
 
+  it("GET /internal/admin/settings reads D1 truth even when the KV hot cache is stale (codex P2)", async () => {
+    const { env, kv, raw } = makeEnv({ adminToken: ADMIN });
+    const { deps } = makeClock(T0);
+    // D1 is authoritative with a fresh value...
+    raw
+      .prepare("INSERT INTO settings (key, value, updated_at, updated_by) VALUES (?,?,?,?)")
+      .run("maxUploadBytes", String(300 * 1024 * 1024), T0, "op");
+    // ...but the KV hot cache still holds a STALE snapshot (KV lag / a failed CONFIG.put). The worker
+    // hot path would serve this; the admin console must NOT (else editing one mode of an object setting
+    // re-posts the whole stale object and regresses untouched modes).
+    kv.setJson("runtime_config", { ...DEFAULT_CONFIG, maxUploadBytes: 999 * 1024 * 1024 });
+    const res = await call(env, deps, "GET", "/internal/admin/settings", { admin: ADMIN });
+    expect(res.status).toBe(200);
+    expect(res.json.config.maxUploadBytes).toBe(300 * 1024 * 1024); // D1 truth, not the 999 KV value
+  });
+
   it("GET /internal/admin/settings rejects the worker bearer (401) and fails closed unconfigured (503)", async () => {
     const { deps } = makeClock(T0);
     const withWorker = makeEnv({ adminToken: ADMIN, internalToken: WORKER });
