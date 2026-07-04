@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "web", "runtimeExecutable": "pnpm", "runtimeArgs": ["--filter", "@open-video-trans/web", "exec", "vite", "--port", "5178", "--strictPort"], "port": 5178 }
+  ]
+}

@@ -3,7 +3,65 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="OpenVideoTrans — 开源、免费、可自托管的视频翻译与配音工具。" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#fbfbf9" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#121312" media="(prefers-color-scheme: dark)" />
     <title>OpenVideoTrans — 视频翻译 · 配音</title>
+    <style>
+      /* Design tokens. Ink-on-paper with a single muted green accent; monospace for wordmark + labels
+         gives a CLI/dev-tool character without ornament. Dark mode mirrors the same restraint. */
+      :root {
+        --bg: #fbfbf9;
+        --panel: #ffffff;
+        --ink: #1b1b19;
+        --muted: #6d6d66;
+        --faint: #90908a;
+        --line: #e6e5df;
+        --line-strong: #d7d6cf;
+        --accent: #1f6f52;
+        --accent-ink: #175840;
+        --warn: #8a5a1a;
+        --warn-bg: #faf1e2;
+        --radius: 6px;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Code", Consolas,
+          "Liberation Mono", "Noto Sans Mono CJK SC", monospace;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #121312;
+          --panel: #1a1b18;
+          --ink: #e9e8e2;
+          --muted: #9b9b92;
+          --faint: #74746c;
+          --line: #2a2b27;
+          --line-strong: #3b3c37;
+          --accent: #5fb58e;
+          --accent-ink: #86cfac;
+          --warn: #d6a253;
+          --warn-bg: #241d10;
+        }
+      }
+      * { box-sizing: border-box; }
+      html { -webkit-text-size-adjust: 100%; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--sans);
+        font-size: 15px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+      a { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+      a:hover { text-decoration-color: var(--accent); }
+      :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+      /* Tint native controls with the accent instead of custom widgets — clean, not ornamental. */
+      input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
+    </style>
   </head>
   <body>
     <div id="app"></div>
