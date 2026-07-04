@@ -398,11 +398,22 @@
         } catch (e) {
           reloadErr = e;
           // Reload failed -> state.config is still the pre-save baseline. Patch it with the changes that
-          // DID apply, so onDirty() doesn't re-flag already-committed keys as dirty (a retry would then
-          // re-POST them: no-op audit rows + settingsVersion bumps). Un-applied edits stay dirty/retry-able.
+          // DID apply, so onDirty() doesn't re-flag already-committed keys (a retry would re-POST them:
+          // no-op audit rows + settingsVersion bumps). Un-applied edits stay dirty/retry-able. For the
+          // object setting maxVideoDurationMs, patch ONLY the operator's touched modes (it.durModes), NOT
+          // the full fresh-merged object: the untouched-mode inputs still show baseline (no re-render), so
+          // patching fresh values there would mark them dirty and a retry could re-POST stale untouched
+          // values, undoing a concurrent change. Keep state.config aligned with what the inputs display.
           var unapplied = {};
           pending.forEach(function (c) { unapplied[c.key] = true; });
-          changes.forEach(function (c) { if (!unapplied[c.key]) state.config[c.key] = c.value; });
+          changes.forEach(function (c) {
+            if (unapplied[c.key]) return;
+            if (c.key === "maxVideoDurationMs") {
+              state.config.maxVideoDurationMs = Object.assign({}, state.config.maxVideoDurationMs, it.durModes);
+            } else {
+              state.config[c.key] = c.value;
+            }
+          });
         }
         onDirty();
         await loadAudit();
