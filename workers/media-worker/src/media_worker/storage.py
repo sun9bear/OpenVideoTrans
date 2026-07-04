@@ -14,6 +14,10 @@ from typing import Any, Protocol
 
 from .sigv4 import sign_request
 
+# Cloudflare's edge blocks the default "Python-urllib/x.y" User-Agent (403); R2 is behind Cloudflare
+# too, so send a normal app UA on every object request. Not part of the SigV4 SignedHeaders set.
+USER_AGENT = "OpenVideoTrans-Worker/1.0"
+
 _REGION = "auto"  # R2 uses region "auto" for SigV4
 _SERVICE = "s3"
 
@@ -114,6 +118,7 @@ class S3Storage:
         req = urllib.request.Request(url, method="HEAD")
         for name, value in headers.items():
             req.add_header(name, value)
+        req.add_header("User-Agent", USER_AGENT)
         try:
             with self._opener.open(req, timeout=self._timeout) as resp:
                 length = resp.headers.get("Content-Length")
@@ -131,6 +136,7 @@ class S3Storage:
         req = urllib.request.Request(url, method="GET")
         for name, value in headers.items():
             req.add_header(name, value)
+        req.add_header("User-Agent", USER_AGENT)
         with self._opener.open(req, timeout=self._timeout) as resp:
             if max_bytes is None:
                 return resp.read()
@@ -145,6 +151,7 @@ class S3Storage:
         req = urllib.request.Request(url, data=data, method="PUT")
         for name, value in headers.items():
             req.add_header(name, value)
+        req.add_header("User-Agent", USER_AGENT)
         with self._opener.open(req, timeout=self._timeout) as resp:
             resp.read()
 
@@ -154,5 +161,6 @@ class S3Storage:
         req = urllib.request.Request(url, method="DELETE")
         for name, value in headers.items():
             req.add_header(name, value)
+        req.add_header("User-Agent", USER_AGENT)
         with self._opener.open(req, timeout=self._timeout) as resp:
             resp.read()
