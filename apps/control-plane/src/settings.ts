@@ -366,7 +366,18 @@ export async function adminSetSetting(ctx: Ctx): Promise<Response> {
   const body = asObject(await readJson(ctx.request));
   const key = reqString(body, "key");
   const reason = optString(body, "reason");
-  const actor = ctx.request.headers.get("X-OVT-Actor") ?? "operator";
+  // The admin console percent-encodes X-OVT-Actor so a non-ASCII operator name (e.g. Chinese) is a
+  // valid header ByteString; decode it back for the audit "who". Defensive: a plain ASCII header (the
+  // curl path) decodes to itself, and a malformed %-sequence falls back to the raw value.
+  const rawActor = ctx.request.headers.get("X-OVT-Actor");
+  let actor = "operator";
+  if (rawActor) {
+    try {
+      actor = decodeURIComponent(rawActor);
+    } catch {
+      actor = rawActor;
+    }
+  }
   const config = await applySettingChange(ctx.env, ctx.deps, {
     key,
     value: body.value,
@@ -380,6 +391,25 @@ export async function adminSetSetting(ctx: Ctx): Promise<Response> {
 export async function getSettingsAudit(ctx: Ctx): Promise<Response> {
   const key = ctx.url.searchParams.get("key") ?? undefined;
   return json({ audit: await readSettingsAudit(ctx.env, key) });
+}
+
+// GET /internal/admin/settings — the admin console's read side (admin-auth). Returns the LIVE config
+// plus which keys are operator-tunable and which are red-line-locked, so the UI renders each field
+// editable or read-only from server truth (never a client-side guess). The worker's own read is
+// /internal/config (worker-auth); this is its admin twin so the console never needs the worker bearer.
+// Reads from D1 (authoritative), NOT ctx.config (the KV `runtime_config` hot cache): KV is eventually
+// consistent, so right after a POST the cache may still hold the pre-write snapshot. Serving that to the
+// console is not just a stale display — the operator would then edit ONE mode of an object setting
+// (maxVideoDurationMs) and the page re-posts the WHOLE object built from stale values, silently
+// regressing the untouched modes' newer D1 values. The worker hot path tolerates KV lag; this must not.
+// Read-only: no write, no version bump, no audit row.
+export async function adminGetSettings(ctx: Ctx): Promise<Response> {
+  const config = await loadConfigFromD1(ctx.env);
+  return json({
+    config,
+    mutableKeys: Object.keys(MUTABLE_SETTINGS).sort(),
+    redLineKeys: [...RED_LINE_KEYS],
+  });
 }
 
 // GET /internal/config[?version=N] — the worker's config read (worker-auth). Without ?version it

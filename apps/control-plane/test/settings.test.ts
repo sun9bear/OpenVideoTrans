@@ -247,6 +247,76 @@ describe("admin route POST /internal/admin/settings (admin-auth, separate from w
     expect(bad.json.error.code).toBe("invalid_setting");
   });
 
+  it("GET /internal/admin/settings returns live config + mutable/red-line key lists (admin-auth)", async () => {
+    const { env } = makeEnv({ adminToken: ADMIN });
+    const { deps } = makeClock(T0);
+    // A prior change so the read reflects live D1 truth, not just defaults.
+    await call(env, deps, "POST", "/internal/admin/settings", {
+      admin: ADMIN,
+      body: { key: "maxUploadBytes", value: 200 * 1024 * 1024, reason: "tighten" },
+    });
+    const res = await call(env, deps, "GET", "/internal/admin/settings", { admin: ADMIN });
+    expect(res.status).toBe(200);
+    expect(res.json.config.maxUploadBytes).toBe(200 * 1024 * 1024);
+    expect(res.json.config.settingsVersion).toBe(DEFAULT_CONFIG.settingsVersion + 1);
+    // The UI drives editable-vs-locked off these server-truth lists.
+    expect(res.json.mutableKeys).toContain("maxUploadBytes");
+    expect(res.json.mutableKeys).toContain("maxVideoDurationMs");
+    expect(res.json.mutableKeys).not.toContain("aigc_enabled");
+    expect(res.json.redLineKeys).toContain("aigc_enabled");
+    expect(res.json.redLineKeys).toContain("allow_paid");
+  });
+
+  it("GET /internal/admin/settings reads D1 truth even when the KV hot cache is stale (codex P2)", async () => {
+    const { env, kv, raw } = makeEnv({ adminToken: ADMIN });
+    const { deps } = makeClock(T0);
+    // D1 is authoritative with a fresh value...
+    raw
+      .prepare("INSERT INTO settings (key, value, updated_at, updated_by) VALUES (?,?,?,?)")
+      .run("maxUploadBytes", String(300 * 1024 * 1024), T0, "op");
+    // ...but the KV hot cache still holds a STALE snapshot (KV lag / a failed CONFIG.put). The worker
+    // hot path would serve this; the admin console must NOT (else editing one mode of an object setting
+    // re-posts the whole stale object and regresses untouched modes).
+    kv.setJson("runtime_config", { ...DEFAULT_CONFIG, maxUploadBytes: 999 * 1024 * 1024 });
+    const res = await call(env, deps, "GET", "/internal/admin/settings", { admin: ADMIN });
+    expect(res.status).toBe(200);
+    expect(res.json.config.maxUploadBytes).toBe(300 * 1024 * 1024); // D1 truth, not the 999 KV value
+  });
+
+  it("GET /internal/admin/settings rejects the worker bearer (401) and fails closed unconfigured (503)", async () => {
+    const { deps } = makeClock(T0);
+    const withWorker = makeEnv({ adminToken: ADMIN, internalToken: WORKER });
+    const rejected = await call(withWorker.env, deps, "GET", "/internal/admin/settings", {
+      worker: WORKER,
+    });
+    expect(rejected.status).toBe(401);
+    const unconfigured = makeEnv({ internalToken: WORKER }); // no ADMIN_TOKEN
+    const res = await call(unconfigured.env, deps, "GET", "/internal/admin/settings", { admin: ADMIN });
+    expect(res.status).toBe(503);
+    expect(res.json.error.code).toBe("admin_unconfigured");
+  });
+
+  it("decodes a percent-encoded X-OVT-Actor into the audit 'who' (codex P2, non-ASCII names)", async () => {
+    const { env } = makeEnv({ adminToken: ADMIN });
+    const { deps } = makeClock(T0);
+    // The console percent-encodes the actor so a non-ASCII (e.g. Chinese) name is a valid header value.
+    const res = await call(env, deps, "POST", "/internal/admin/settings", {
+      admin: ADMIN,
+      headers: { "X-OVT-Actor": encodeURIComponent("张三") },
+      body: { key: "maxAttempts", value: 3, reason: "非 ASCII 操作者" },
+    });
+    expect(res.status).toBe(200);
+    const audit = await readSettingsAudit(env, "maxAttempts");
+    expect(audit[0]).toMatchObject({ changed_by: "张三" }); // decoded, not the %-encoded bytes
+    // A plain ASCII header (the curl path) decodes to itself.
+    await call(env, deps, "POST", "/internal/admin/settings", {
+      admin: ADMIN,
+      headers: { "X-OVT-Actor": "ops-bot" },
+      body: { key: "maxAttempts", value: 2 },
+    });
+    expect((await readSettingsAudit(env, "maxAttempts"))[0]).toMatchObject({ changed_by: "ops-bot" });
+  });
+
   it("exposes the audit log over GET /internal/admin/settings/audit", async () => {
     const { env } = makeEnv({ adminToken: ADMIN });
     const { deps } = makeClock(T0);

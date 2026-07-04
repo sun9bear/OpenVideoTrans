@@ -6,7 +6,7 @@ import { credentials } from "./credentials";
 import { logEvent, metricsEndpoint } from "./obs";
 import { providerAvailability, reportProviderExhausted } from "./providers";
 import { selectProducer } from "./queue";
-import { adminSetSetting, configEndpoint, getConfig, getSettingsAudit } from "./settings";
+import { adminGetSettings, adminSetSetting, configEndpoint, getConfig, getSettingsAudit } from "./settings";
 import { adminSweep, adminTakedown } from "./admin_ops";
 import { signUpload } from "./uploads";
 import { claimNext, complete, createJob, download, fail, getJob, heartbeat } from "./jobs";
@@ -66,6 +66,7 @@ const ROUTES: Route[] = [
   // — never a raw D1 edit. ADMIN auth (a SEPARATE ADMIN_TOKEN, not the shared worker bearer) so a
   // media-worker compromise can't mutate config; the named operator rides in X-OVT-Actor for audit.
   // Red-line keys are rejected 403 here.
+  route("GET", "/internal/admin/settings", "admin", adminGetSettings),
   route("POST", "/internal/admin/settings", "admin", adminSetSetting),
   route("GET", "/internal/admin/settings/audit", "admin", getSettingsAudit),
   // OBS (#24): the observability snapshot (job counts · claim latency · stage timings · free-pool

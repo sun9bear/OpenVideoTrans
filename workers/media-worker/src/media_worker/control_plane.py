@@ -18,12 +18,12 @@ from typing import Any, Protocol
 from ovt_schemas import Job
 
 from .config import WorkerConfig, parse_config
+from .storage import R2Settings
 
 # Sent on every outbound HTTP request. Cloudflare's edge blocks the default "Python-urllib/x.y"
 # User-Agent (managed bot rule → 403 before the request reaches the Worker); a normal app UA clears
-# it. Shared by the control-plane client and the R2 storage client.
+# it. storage.py carries its own copy for its own requests; this one is the control-plane client's.
 USER_AGENT = "OpenVideoTrans-Worker/1.0"
-from .storage import R2Settings
 
 
 @dataclass(frozen=True)
