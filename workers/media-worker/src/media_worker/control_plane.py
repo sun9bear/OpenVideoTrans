@@ -18,6 +18,11 @@ from typing import Any, Protocol
 from ovt_schemas import Job
 
 from .config import WorkerConfig, parse_config
+
+# Sent on every outbound HTTP request. Cloudflare's edge blocks the default "Python-urllib/x.y"
+# User-Agent (managed bot rule → 403 before the request reaches the Worker); a normal app UA clears
+# it. Shared by the control-plane client and the R2 storage client.
+USER_AGENT = "OpenVideoTrans-Worker/1.0"
 from .storage import R2Settings
 
 
@@ -207,6 +212,9 @@ class HttpControlPlane:
     def _send(self, method: str, path: str, data: bytes | None, auth: str) -> dict[str, Any]:
         req = urllib.request.Request(f"{self._base}{path}", data=data, method=method)
         req.add_header("Authorization", auth)
+        # Explicit User-Agent: the default "Python-urllib/x.y" is blocked at the Cloudflare edge
+        # (managed bot rule) with a 403 before reaching the Worker. A normal app UA clears it.
+        req.add_header("User-Agent", USER_AGENT)
         if data is not None:
             req.add_header("Content-Type", "application/json")
         try:
