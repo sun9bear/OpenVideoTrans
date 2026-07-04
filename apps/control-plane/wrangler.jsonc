@@ -37,6 +37,22 @@
   ],
   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "ovt-artifacts" }],
   "kv_namespaces": [{ "binding": "CONFIG", "id": "f06aa6bcf0e642ff91da834e47be219c" }],
+  // Owner-provided secrets live in the account Secrets Store (scope: Workers), NOT as plain wrangler
+  // secrets — so bind them here and resolveSecrets() (core.ts, at each entry) turns them into the
+  // plain env strings the code reads. store_id = the account Secrets Store. The self-generated
+  // INTERNAL_TOKEN / ADMIN_TOKEN / ANON_ID_HMAC_KEY are plain `wrangler secret put` secrets (injected
+  // by the deploy `secrets` step) and need no binding here. ASSEMBLYAI_API_KEY is intentionally NOT
+  // bound: it is a PAID provider and never used by the free-pool routing (red line).
+  "secrets_store_secrets": [
+    { "binding": "SS_R2_ACCESS_KEY_ID", "store_id": "78d1fc96c03044c2bf20f9dce7a47340", "secret_name": "R2_ACCESS_KEY_ID" },
+    { "binding": "SS_R2_SECRET_ACCESS_KEY", "store_id": "78d1fc96c03044c2bf20f9dce7a47340", "secret_name": "R2_SECRET_ACCESS_KEY" },
+    { "binding": "SS_DEEPL_API_KEY", "store_id": "78d1fc96c03044c2bf20f9dce7a47340", "secret_name": "DEEPL_API_KEY" }
+    // SS_TURNSTILE_SECRET_KEY deliberately NOT bound yet: the Turnstile widget's hostname is still the
+    // `localhost` placeholder (prep manifest), so it cannot mint valid tokens on openvideotrans.xyz —
+    // binding the secret would fail-CLOSE job creation (challenge_required). The gate stays fail-open
+    // (bounded by the daily per-IP/global caps) until the owner points the widget at the live domain +
+    // sets VITE_TURNSTILE_SITE_KEY; then add this binding back.
+  ],
   // T2.5 queue_adapter (CF Queues) bindings are OMITTED at initial launch: `queueBackend` defaults to
   // `d1` (config.ts), so the D1 jobs table is the authoritative worklist and the worker long-polls
   // claim — the queue is only a latency-shaving overlay. CF Queues consumers additionally require the
