@@ -27,6 +27,39 @@ interface ErrorBody {
 
 type FetchFn = typeof fetch;
 
+// Upload progress fraction in [0, 1], reported as bytes stream out.
+export type UploadProgress = (fraction: number) => void;
+
+// The direct-to-R2 PUT uploader. Split out (and injectable) because fetch() CANNOT report upload
+// progress — only XMLHttpRequest exposes upload.onprogress. The default is the real XHR impl; tests
+// inject a fake so the flow stays network-free. Resolves on a 2xx, rejects with ApiError otherwise
+// (matching the prior fetch-based error contract: code "upload_put_failed").
+export type Uploader = (
+  url: string,
+  body: Blob,
+  contentType: string,
+  onProgress?: UploadProgress,
+) => Promise<void>;
+
+const xhrUpload: Uploader = (url, body, contentType, onProgress) =>
+  new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("content-type", contentType);
+    if (onProgress) {
+      xhr.upload.onprogress = (e: ProgressEvent) => {
+        if (e.lengthComputable && e.total > 0) onProgress(Math.min(1, e.loaded / e.total));
+      };
+    }
+    xhr.onload = () =>
+      xhr.status >= 200 && xhr.status < 300
+        ? resolve()
+        : reject(new ApiError(xhr.status, "upload_put_failed", `直传失败（${xhr.status}）`));
+    xhr.onerror = () => reject(new ApiError(0, "upload_put_failed", "直传失败（网络错误）"));
+    xhr.ontimeout = () => reject(new ApiError(0, "upload_put_failed", "直传超时"));
+    xhr.send(body);
+  });
+
 export class ApiClient {
   private readonly baseUrl: string;
   constructor(
@@ -37,6 +70,8 @@ export class ApiClient {
     // invocation" (fetch must run with `this` = window) — before any request is even sent. The wrapper
     // calls the global fetch bare (correct `this`). Tests inject their own fetchFn, overriding this.
     private readonly fetchFn: FetchFn = (input, init) => fetch(input, init),
+    // Injectable so tests stay network-free; the default is the real XHR uploader (progress-capable).
+    private readonly uploadFn: Uploader = xhrUpload,
   ) {
     // Trim trailing slashes so a configured VITE_API_BASE like "https://cp.example/" does not produce
     // "https://cp.example//api/..." — the Worker router matches the exact "/api/..." path and would 404.
@@ -70,13 +105,15 @@ export class ApiClient {
   }
 
   // Direct-to-R2 PUT of the file bytes (no anon header — the URL itself is the SigV4 capability).
-  async putSource(putUrl: string, file: Blob, contentType: string): Promise<void> {
-    const res = await this.fetchFn(putUrl, {
-      method: "PUT",
-      headers: { "content-type": contentType },
-      body: file,
-    });
-    if (!res.ok) throw new ApiError(res.status, "upload_put_failed", `直传失败（${res.status}）`);
+  // Delegates to the XHR uploader so `onProgress` can report the completion fraction as bytes stream
+  // out (fetch cannot); rejects with ApiError("upload_put_failed") on a non-2xx / network error.
+  async putSource(
+    putUrl: string,
+    file: Blob,
+    contentType: string,
+    onProgress?: UploadProgress,
+  ): Promise<void> {
+    await this.uploadFn(putUrl, file, contentType, onProgress);
   }
 
   // POST /api/jobs — create the queued job (HEAD-verified server-side).
