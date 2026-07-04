@@ -104,6 +104,25 @@ def test_subtitle_disclosure_respects_subtitle_enabled_and_custom_text() -> None
     assert aigc.subtitle_disclosure(blank) == "本字幕由机器翻译生成"
 
 
+def test_subtitle_disabled_does_not_over_claim_embed_method() -> None:
+    # aigcSubtitleEnabled=false on a subtitle_only job: no cue, and the AUDIT method must be None
+    # (not mt_disclosure) so the manifest never over-claims an embedded disclosure the SRT lacks.
+    off = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only", subtitle_enabled=False,
+    )
+    assert aigc.subtitle_disclosure(off) is None
+    assert aigc.embed_method(off, "subtitle_only") is None
+    assert aigc.metadata_args(off, "subtitle_only") == []
+    # The dub/both video channel is independent of subtitle_enabled.
+    assert aigc.embed_method(off, "dub_only") == "av_voice_mark"
+    # Custom subtitle text also flows into the container metadata comment (matches the cue).
+    custom = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only",
+        subtitle_text="本视频由 AI 翻译",
+    )
+    assert any("本视频由 AI 翻译" in a for a in aigc.metadata_args(custom, "subtitle_only"))
+
+
 # --------------------------------------------------------------------------- #
 # mux applies the mark by mode
 # --------------------------------------------------------------------------- #
