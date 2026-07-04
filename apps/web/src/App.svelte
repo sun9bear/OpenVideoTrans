@@ -323,73 +323,75 @@
   }
 </script>
 
-<main>
-  <header>
+<main class="wrap">
+  <header class="masthead">
     <h1>OpenVideoTrans</h1>
     <p class="tagline">{COPY.tagline}</p>
   </header>
 
   <section class="card">
     <label class="field">
-      <span>选择视频文件</span>
-      <input type="file" accept="video/*,audio/*" onchange={onFile} disabled={busy} />
+      <span class="label">选择视频文件</span>
+      <input class="control file" type="file" accept="video/*,audio/*" onchange={onFile} disabled={busy} />
     </label>
     {#if sizeWarn}<p class="warn" role="alert">{sizeWarn}</p>{/if}
     {#if typeWarn}<p class="warn" role="alert">{typeWarn}</p>{/if}
 
-    <fieldset class="field">
-      <legend>输出模式</legend>
+    <fieldset class="field group">
+      <legend class="label">输出模式</legend>
       {#each OUTPUT_MODE_OPTIONS as opt (opt.value)}
-        <label class="radio">
+        <label class="opt">
           <input type="radio" name="mode" value={opt.value} bind:group={outputMode} disabled={busy} />
-          <span>{opt.label}</span>
-          <small>{opt.hint}</small>
+          <span class="opt-main">{opt.label}</span>
+          <span class="opt-hint">{opt.hint}</span>
         </label>
       {/each}
     </fieldset>
 
-    <fieldset class="field">
-      <legend>字幕形式</legend>
+    <fieldset class="field group">
+      <legend class="label">字幕形式</legend>
       {#each SUBTITLE_DELIVERY_OPTIONS as opt (opt.value)}
-        <label class="radio" class:disabled={opt.disabled}>
+        <label class="opt" class:disabled={opt.disabled}>
           <input type="radio" name="delivery" value={opt.value} bind:group={subtitleDelivery} disabled={opt.disabled || busy} />
-          <span>{opt.label}</span>
+          <span class="opt-main">{opt.label}</span>
         </label>
       {/each}
     </fieldset>
 
-    <label class="field">
-      <span>目标语言</span>
-      <select bind:value={targetLang} disabled={busy}>
-        {#each TARGET_LANGS as lang (lang.value)}
-          <option value={lang.value}>{lang.label}</option>
-        {/each}
-      </select>
-    </label>
+    <div class="row2">
+      <label class="field">
+        <span class="label">目标语言</span>
+        <select class="control" bind:value={targetLang} disabled={busy}>
+          {#each TARGET_LANGS as lang (lang.value)}
+            <option value={lang.value}>{lang.label}</option>
+          {/each}
+        </select>
+      </label>
 
-    <label class="field">
-      <span>字幕语言</span>
-      <select bind:value={subtitleLang} disabled={busy}>
-        <option value="target">仅目标语言</option>
-        <option value="bilingual">双语（源 + 目标）</option>
-      </select>
-    </label>
+      <label class="field">
+        <span class="label">字幕语言</span>
+        <select class="control" bind:value={subtitleLang} disabled={busy}>
+          <option value="target">仅目标语言</option>
+          <option value="bilingual">双语（源 + 目标）</option>
+        </select>
+      </label>
+    </div>
 
     {#if durationWarn}<p class="warn" role="alert">{durationWarn}</p>{/if}
 
     {#if turnstileEnabled()}
       <div class="field">
-        <span>人机验证</span>
+        <span class="label">人机验证</span>
         <div bind:this={turnstileEl}></div>
         {#if turnstileBroken}
           <p class="warn" role="alert">人机验证加载失败，请检查网络或刷新页面后重试。</p>
         {:else}
-          <small>可在上传期间完成；验证通过后会自动继续提交。</small>
+          <small class="hint">可在上传期间完成；验证通过后会自动继续提交。</small>
         {/if}
       </div>
     {/if}
 
-    <button onclick={submit} disabled={!canSubmit}>
+    <button class="submit" onclick={submit} disabled={!canSubmit}>
       {busy ? "处理中…" : "开始翻译"}
     </button>
 
@@ -406,12 +408,12 @@
 
     {#if phase === "done" && job}
       <div class="downloads">
-        <p>处理完成（成片与源文件 24 小时后自动删除，请尽快下载）：</p>
+        <p class="done-note">处理完成（成片与源文件 24 小时后自动删除，请尽快下载）：</p>
         {#if job.artifacts.srt_key}
-          <button onclick={() => downloadArtifact("srt")}>下载字幕（SRT）</button>
+          <button class="btn-ghost" onclick={() => downloadArtifact("srt")}>下载字幕（SRT）</button>
         {/if}
         {#if job.artifacts.video_key}
-          <button onclick={() => downloadArtifact("video")}>下载配音视频</button>
+          <button class="btn-ghost" onclick={() => downloadArtifact("video")}>下载配音视频</button>
         {/if}
       </div>
     {/if}
@@ -437,4 +439,273 @@
     <ul>{#each LEGAL.takedown as t}<li>{t}</li>{/each}</ul>
     <p><a href={`mailto:${ABUSE_CONTACT}`}>{ABUSE_CONTACT}</a></p>
   </details>
+
+  <footer class="foot">开源 · 免费 · 可自托管 · AGPL</footer>
 </main>
+
+<style>
+  .wrap {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 56px 20px 72px;
+  }
+
+  /* Masthead — monospace wordmark for a CLI/tool character; no logo, no ornament. */
+  .masthead {
+    margin-bottom: 26px;
+  }
+  h1 {
+    font-family: var(--mono);
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
+  .tagline {
+    color: var(--muted);
+    font-size: 14px;
+    margin: 6px 0 0;
+  }
+
+  /* Form card — one hairline-bordered panel, generous vertical rhythm. */
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    min-width: 0;
+  }
+  .label {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.01em;
+    font-weight: 500;
+    color: var(--muted);
+  }
+  .hint {
+    font-size: 12px;
+    color: var(--faint);
+  }
+
+  .control {
+    font: inherit;
+    color: var(--ink);
+    background: var(--bg);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    padding: 9px 10px;
+    width: 100%;
+  }
+  select.control {
+    cursor: pointer;
+  }
+  .file {
+    padding: 8px 10px;
+  }
+  .file::file-selector-button {
+    font: inherit;
+    margin: -2px 12px -2px 0;
+    padding: 5px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: 5px;
+    background: var(--panel);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .file::file-selector-button:hover {
+    border-color: var(--accent);
+  }
+
+  /* Radio groups — native radios tinted via accent-color; rows highlight on hover. */
+  .group {
+    gap: 2px;
+  }
+  .opt {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    column-gap: 10px;
+    padding: 8px 10px;
+    margin: 0 -6px;
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+  .opt:hover {
+    background: var(--bg);
+  }
+  .opt input {
+    margin: 0;
+    grid-row: 1 / -1;
+  }
+  .opt-main {
+    font-size: 14px;
+  }
+  .opt-hint {
+    grid-column: 2;
+    font-size: 12px;
+    color: var(--faint);
+    margin-top: 1px;
+  }
+  .opt.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .row2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  /* Primary action — solid ink, no gradient. Disabled reads clearly inert. */
+  .submit {
+    font: inherit;
+    font-weight: 600;
+    margin-top: 2px;
+    padding: 11px 18px;
+    border: 1px solid var(--ink);
+    border-radius: var(--radius);
+    background: var(--ink);
+    color: var(--bg);
+    cursor: pointer;
+    transition: opacity 0.12s ease;
+  }
+  .submit:hover:not(:disabled) {
+    opacity: 0.86;
+  }
+  .submit:disabled {
+    background: var(--line);
+    color: var(--faint);
+    border-color: var(--line-strong);
+    cursor: not-allowed;
+  }
+
+  .status {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--muted);
+    margin: 0;
+  }
+  .warn {
+    font-size: 13px;
+    color: var(--warn);
+    background: var(--warn-bg);
+    border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+    border-radius: 5px;
+    padding: 8px 10px;
+    margin: 0;
+  }
+
+  .downloads {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    border-top: 1px solid var(--line);
+    padding-top: 16px;
+  }
+  .done-note {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 0;
+  }
+  .btn-ghost {
+    font: inherit;
+    padding: 8px 14px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--accent-ink);
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+  .btn-ghost:hover {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+
+  /* Notices — quiet fine print; the AIGC legal line is a touch stronger. */
+  .notices {
+    margin: 24px 2px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .notices p {
+    font-size: 12.5px;
+    color: var(--faint);
+    line-height: 1.55;
+    margin: 0;
+  }
+  .notices .aigc {
+    color: var(--muted);
+  }
+
+  /* Legal — a mono disclosure toggle with a rotating caret; content stays compact. */
+  .legal {
+    margin: 18px 2px 0;
+    font-size: 13px;
+  }
+  .legal summary {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    cursor: pointer;
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+  }
+  .legal summary::-webkit-details-marker {
+    display: none;
+  }
+  .legal summary::before {
+    content: "▸";
+    margin-right: 8px;
+    transition: transform 0.12s ease;
+  }
+  .legal[open] summary::before {
+    transform: rotate(90deg);
+  }
+  .legal h2 {
+    font-size: 13px;
+    font-weight: 600;
+    margin: 18px 0 6px;
+  }
+  .legal ul {
+    margin: 0 0 8px;
+    padding-left: 18px;
+    color: var(--muted);
+  }
+  .legal li {
+    margin: 4px 0;
+  }
+
+  .foot {
+    margin: 40px 2px 0;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    color: var(--faint);
+  }
+
+  @media (max-width: 480px) {
+    .wrap {
+      padding: 36px 16px 56px;
+    }
+    .row2 {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
