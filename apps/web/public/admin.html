@@ -315,12 +315,15 @@
 
       // Re-apply the operator's un-applied edits to the inputs AFTER loadSettings(), so a mid-save error
       // never silently wipes unsaved values — the fields show dirty again for a retry.
-      function reapplyIntents(changes) {
+      function reapplyIntents(changes, durModes) {
         changes.forEach(function (c) {
           if (c.key === "maxVideoDurationMs") {
-            ["subtitle_only", "dub_only", "both"].forEach(function (m) {
+            // Reapply ONLY the operator's touched modes (durModes), not every mode from the merged
+            // c.value: an untouched mode was reloaded fresh and may reflect a concurrent change, so
+            // rewriting it from the pre-save value would clobber that and re-mark it dirty.
+            Object.keys(durModes || {}).forEach(function (m) {
               var inp = state.inputs["maxVideoDurationMs." + m];
-              if (inp && c.value[m] != null) inp.value = fmt(c.value[m] / Number(inp.dataset.factor));
+              if (inp) inp.value = fmt(durModes[m] / Number(inp.dataset.factor));
             });
             return;
           }
@@ -394,7 +397,7 @@
         var reloadErr = null;
         try {
           await loadSettings();
-          if (pending.length) reapplyIntents(pending); // reload re-rendered — restore un-applied edits
+          if (pending.length) reapplyIntents(pending, it.durModes); // reload re-rendered — restore un-applied edits (touched modes only)
         } catch (e) {
           reloadErr = e;
           // Reload failed -> state.config is still the pre-save baseline. Patch it with the changes that
