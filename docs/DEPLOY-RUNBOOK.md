@@ -13,19 +13,23 @@
 
 ## 1. Cloudflare 资源（一次性）
 
+> **实况（2026-07-04 上线）**：资源用 owner 2026-06-21 预建的 `ovt-db` / `ovt-config`(KV) /
+> `ovt-artifacts`(R2) / `ovt-jobs`(Queue)；`wrangler.jsonc` 已写死其真实 id（D1 `49afb39a…`、
+> KV `f06aa6bc…`、`R2_ACCOUNT_ID 7dcd59cf…`、bucket `ovt-artifacts`）。全新账号才需 create：
+
 ```sh
 cd apps/control-plane
-npx wrangler d1 create ovt-control-plane        # → database_id 填入 wrangler.jsonc
-npx wrangler kv namespace create CONFIG         # → id 填入 wrangler.jsonc
-npx wrangler r2 bucket create ovt-media
-npx wrangler queues create ovt-job-wake
+npx wrangler d1 create ovt-db
+npx wrangler kv namespace create CONFIG          # 命名空间名 ovt-config → id 填入 wrangler.jsonc
+npx wrangler r2 bucket create ovt-artifacts
+npx wrangler queues create ovt-jobs              # 需 Workers 付费；免费层可省（queueBackend=d1，wrangler.jsonc 未绑 queues）
 ```
 
-`wrangler.jsonc` 三处 `0000-set-at-deploy` 换成真实值：D1 `database_id`、KV `id`、
-`vars.R2_ACCOUNT_ID`（dashboard → R2 → 右上角 Account ID）。
-
 R2 S3 凭据：dashboard → R2 → Manage R2 API Tokens → Create（**Object Read & Write，仅限
-`ovt-media` bucket**）→ 记下 Access Key ID / Secret（下一步注入，不落盘）。
+`ovt-artifacts` bucket**）→ 记下 Access Key ID / Secret。**⚠ 密钥存放：owner 密钥（R2 S3、DeepL、
+Turnstile）放 CF **Secrets Store**（scope: Workers），经 `wrangler.jsonc` 的 `secrets_store_secrets`
+绑定 + `resolveSecrets()`（core.ts 入口）解析成明文 env——**不是** `wrangler secret put`。只有自生成的
+`INTERNAL_TOKEN`/`ADMIN_TOKEN`/`ANON_ID_HMAC_KEY` 走 plain `wrangler secret put`（deploy `secrets` 模式，见 §3）。
 
 ## 2. D1 迁移
 
@@ -72,10 +76,27 @@ pnpm --filter @open-video-trans/web build     # Turnstile 站点键：VITE_TURNS
 cd apps/control-plane && npx wrangler deploy
 ```
 
-域名接线（dashboard 或一次性 API）：Workers & Pages → ovt-control-plane → Settings →
-Domains & Routes → **Add Custom Domain** `openvideotrans.xyz`（自动建 DNS + TLS）。
+域名接线：本仓库把 Worker 绑到自定义域名是**声明式**的——`wrangler.jsonc` 的
+`routes: [{ pattern: "openvideotrans.xyz", custom_domain: true }]`,`wrangler deploy` 时自动建
+DNS + edge cert（需 token 有 Zone 级 **Workers Routes:Edit + DNS:Edit**，见 §0/prep）。换域名就改这行。
 
-验证：`curl -s https://openvideotrans.xyz/api/anon -X POST` 返回 `{"anon_id":"anon_….sig"}`；
+### 4b. R2 CORS（浏览器直传必需，别漏）
+SPA 是浏览器**直传 R2**（预签 PUT 到 `*.r2.cloudflarestorage.com`，**跨域**）。桶必须放行站点 origin，
+否则浏览器 preflight 403 → 上传报"网络错误"（server-side curl 不受 CORS 约束，API 冒烟**不会**暴露此洞）。
+应用 `deploy/cloudflare/r2-cors.json`（放行 `GET/PUT/HEAD`、origin=`https://openvideotrans.xyz`）：
+
+```sh
+# 经 deploy workflow：mode=cors      # 或本地：
+npx wrangler r2 bucket cors set ovt-artifacts --file deploy/cloudflare/r2-cors.json --force
+```
+
+**换域名时同步改 `r2-cors.json` 里的 origin 并重跑。** 验证（应见 `Access-Control-Allow-Origin`）：
+```sh
+curl -sI -X OPTIONS "<presigned-put-url>" -H "Origin: https://openvideotrans.xyz" \
+  -H "Access-Control-Request-Method: PUT" | grep -i access-control
+```
+
+验证 Worker：`curl -s https://openvideotrans.xyz/api/anon -X POST` 返回 `{"anon_id":"anon_….sig"}`；
 首页返回 SPA HTML；`/internal/config` 无 token 返回 401/403。
 
 ## 5. VPS worker
