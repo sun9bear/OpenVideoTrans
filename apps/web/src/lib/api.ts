@@ -32,7 +32,11 @@ export class ApiClient {
   constructor(
     baseUrl: string,
     private readonly anonId: string,
-    private readonly fetchFn: FetchFn = fetch,
+    // Default MUST be a wrapper, not the bare global `fetch`: this.fetchFn(...) is a METHOD call, so a
+    // stored native fetch would be invoked with `this` = ApiClient and throw "TypeError: Illegal
+    // invocation" (fetch must run with `this` = window) — before any request is even sent. The wrapper
+    // calls the global fetch bare (correct `this`). Tests inject their own fetchFn, overriding this.
+    private readonly fetchFn: FetchFn = (input, init) => fetch(input, init),
   ) {
     // Trim trailing slashes so a configured VITE_API_BASE like "https://cp.example/" does not produce
     // "https://cp.example//api/..." — the Worker router matches the exact "/api/..." path and would 404.
