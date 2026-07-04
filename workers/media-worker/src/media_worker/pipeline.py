@@ -418,6 +418,18 @@ def run_real_pipeline(
     # (Latin) or is uncatalogued; the kernel then uses the libass default.
     burn_cap = get_capability(job.target_lang)
     burn_font = burn_cap.burn_font if burn_cap is not None else None
+    # PR-2 visible AIGC watermark font: a DEPLOYMENT-WIDE font PATH (env OVT_WATERMARK_FONT) so the
+    # burned-in overlay can render CJK. Unlike burn_font it is NOT per-locale — the operator's
+    # watermark text (default zh) is independent of the target language. A missing/unset/non-file
+    # path leaves it None (drawtext falls back to the ffmpeg default face) rather than failing every
+    # watermarked job on a misconfigured box.
+    watermark_font = os.environ.get("OVT_WATERMARK_FONT") or None
+    if watermark_font is not None and not Path(watermark_font).is_file():
+        logger.warning(
+            "OVT_WATERMARK_FONT %s is not a file; AIGC watermark falls back to the ffmpeg default "
+            "face (CJK may not render)", watermark_font,
+        )
+        watermark_font = None
     paths = JobPaths(Path(workdir) / "pipeline").ensure()
     kinds = _stage_kinds(job.output_mode)
     excluded: dict[str, set[str]] = {k: set() for k in _STAGE_KINDS}
@@ -439,7 +451,8 @@ def run_real_pipeline(
             # target_lang is a REQUIRED kwarg of autodub_core.run_pipeline (it derives the rest from
             # `job`, but the signature still requires it) — omitting it raises TypeError (CodeX P1).
             run_fn(paths, kernel_resolver, source=str(in_path),
-                   target_lang=routed.target_lang, job=routed, burn_font=burn_font)
+                   target_lang=routed.target_lang, job=routed, burn_font=burn_font,
+                   watermark_font=watermark_font)
             return _collect(storage, job, claim_version, paths, make_key)
         except FreePoolExhausted:
             # A sentinel-routed MT/TTS stage the kernel actually REACHED (the job had speech /

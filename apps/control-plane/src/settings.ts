@@ -54,6 +54,17 @@ function strBound(key: string, maxLen: number): SettingValidator {
   };
 }
 
+// A #RRGGBB hex color (PR-2 watermark color). Normalized to uppercase so the stored value is stable;
+// the strict 6-digit form keeps a malformed color out of the ffmpeg drawtext filter downstream.
+function hexColorBound(key: string): SettingValidator {
+  return (raw) => {
+    if (typeof raw !== "string" || !/^#[0-9a-fA-F]{6}$/.test(raw)) {
+      throw invalid(`${key} must be a #RRGGBB hex color`);
+    }
+    return raw.toUpperCase();
+  };
+}
+
 const MODE_KEYS = ["subtitle_only", "dub_only", "both"] as const;
 
 // maxVideoDurationMs is a per-output_mode object; validate each mode's cap and reject extra keys so a
@@ -121,6 +132,22 @@ export const MUTABLE_SETTINGS: Record<string, SettingValidator> = {
   // paid-API gate: allow_paid/paid_providers remain the ONLY hard-immutable red-line keys (§1).
   aigcSubtitleEnabled: boolBound("aigcSubtitleEnabled"),
   aigcSubtitleText: strBound("aigcSubtitleText", 200),
+  // §14 AIGC VIDEO watermark (PR-2) — same owner-authorized, MUTABLE + audited posture as the subtitle
+  // keys. DEFAULT-OFF (config.ts); enabling it STRENGTHENS the mark (a visible burned-in overlay), so
+  // it is even less sensitive than the subtitle toggle — and still NOT a red-line key (the only ones
+  // are allow_paid / paid_providers, §1). Bounds mirror the schema + the kernel drawtext expectations.
+  aigcVideoWatermarkEnabled: boolBound("aigcVideoWatermarkEnabled"),
+  aigcVideoWatermarkText: strBound("aigcVideoWatermarkText", 100),
+  aigcVideoWatermarkPosition: enumBound("aigcVideoWatermarkPosition", [
+    "top_left",
+    "top_right",
+    "bottom_left",
+    "bottom_right",
+    "center",
+  ]),
+  aigcVideoWatermarkFontSize: intBound("aigcVideoWatermarkFontSize", 1, 20),
+  aigcVideoWatermarkOpacity: intBound("aigcVideoWatermarkOpacity", 5, 100),
+  aigcVideoWatermarkColor: hexColorBound("aigcVideoWatermarkColor"),
 };
 
 // Keys that encode a RED LINE and must never become a runtime config knob. Only the PAID-API gate

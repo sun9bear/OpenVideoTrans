@@ -84,6 +84,12 @@ export interface AigcMarking {
   applied?: boolean | null;
   subtitle_enabled?: boolean;
   subtitle_text?: string | null;
+  video_watermark_enabled?: boolean;
+  video_watermark_text?: string | null;
+  video_watermark_position?: "top_left" | "top_right" | "bottom_left" | "bottom_right" | "center";
+  video_watermark_font_size?: number;
+  video_watermark_opacity?: number;
+  video_watermark_color?: string;
 }
 
 /** Chosen provider plan. tts is null for subtitle_only jobs. */

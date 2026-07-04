@@ -173,9 +173,17 @@
           { key: "queueBackend", name: "队列后端", type: "enum", values: ["d1", "cf_queues"], hint: "cf_queues 需付费套餐 + 队列绑定，否则保持 d1" },
           { key: "servicePaused", name: "暂停接单（急停开关）", type: "bool", boolLabels: { on: "已暂停", off: "运行中" }, hint: "开启后 /api/uploads/sign 与 /api/jobs 返回 503；进行中的任务、下载、状态查询不受影响" },
         ]},
-        { title: "AIGC 合成内容标识 · 字幕", note: "法律要求（《生成式人工智能服务管理暂行办法》《互联网信息服务深度合成管理规定》的显著标识）。默认开启；关闭或改文案由业主承担合规责任，每次改动记入下方审计。视频可视水印将在后续版本加入。", fields: [
+        { title: "AIGC 合成内容标识 · 字幕", note: "法律要求（《生成式人工智能服务管理暂行办法》《互联网信息服务深度合成管理规定》的显著标识）。默认开启；关闭或改文案由业主承担合规责任，每次改动记入下方审计。", fields: [
           { key: "aigcSubtitleEnabled", name: "字幕 AIGC 披露", type: "bool", boolLabels: { on: "开启", off: "关闭" }, hint: "关闭后，生成的字幕不再带「机器翻译」披露标识。" },
           { key: "aigcSubtitleText", name: "披露文案", type: "text", hint: "留空 = 默认「本字幕由机器翻译生成」。最多 200 字。" },
+        ]},
+        { title: "AIGC 合成内容标识 · 视频水印", note: "在导出视频画面上烧录可见水印（drawtext）。默认关闭：开启会触发一次重编码，且容器元数据里的法定标识始终保留——开启只是更强的“可见”标识形式。开启/改动均记入下方审计，由业主承担合规责任。", fields: [
+          { key: "aigcVideoWatermarkEnabled", name: "视频可见水印", type: "bool", boolLabels: { on: "开启", off: "关闭" }, hint: "默认关闭。开启后配音/烧录字幕的视频画面会烧录下方水印（需重编码，仅对有视频产物的任务生效）。" },
+          { key: "aigcVideoWatermarkText", name: "水印文字", type: "text", maxLength: 100, hint: "留空 = 默认「本视频由 AI 合成」。最多 100 字。" },
+          { key: "aigcVideoWatermarkPosition", name: "位置", type: "enum", values: ["top_left", "top_right", "bottom_left", "bottom_right", "center"], hint: "四角或居中（左上/右上/左下/右下/居中）。" },
+          { key: "aigcVideoWatermarkFontSize", name: "字号", type: "number", factor: 1, unit: "% 画面高", hint: "占画面高度的百分比，1–20。" },
+          { key: "aigcVideoWatermarkOpacity", name: "不透明度", type: "number", factor: 1, unit: "%", hint: "5–100，越大越明显。" },
+          { key: "aigcVideoWatermarkColor", name: "颜色", type: "color", hint: "水印文字颜色（#RRGGBB）。" },
         ]},
       ];
 
@@ -266,6 +274,12 @@
               input.style.width = "260px"; input.style.textAlign = "left";
               input.addEventListener("input", onDirty);
               ctl.appendChild(input);
+            } else if (f.type === "color") {
+              // Native color picker; it reports lowercase #rrggbb, the server normalizes to #RRGGBB.
+              input = document.createElement("input"); input.type = "color";
+              input.value = (canonical == null ? "#FFFFFF" : String(canonical)).toLowerCase();
+              input.addEventListener("input", onDirty);
+              ctl.appendChild(input);
             } else {
               input = document.createElement("input"); input.type = "number"; input.step = "any"; input.min = "0";
               input.value = fmt(canonical / f.factor);
@@ -302,6 +316,11 @@
           } else if (f.type === "text") {
             // Free text: empty IS a valid value (kernel falls back to its default), so don't skip "".
             if ((getCanonical(cfg, f.key) || "") !== input.value) scalars.push({ key: f.key, value: input.value });
+          } else if (f.type === "color") {
+            // The <input type=color> reports lowercase #rrggbb; compare case-insensitively to the
+            // server's normalized (uppercase) value so an unchanged color isn't perpetually "dirty".
+            if (String(getCanonical(cfg, f.key) || "").toUpperCase() !== input.value.toUpperCase())
+              scalars.push({ key: f.key, value: input.value });
           } else if (input.value !== "") {
             var val = Math.round(Number(input.value) * Number(input.dataset.factor));
             if (f.key.indexOf("maxVideoDurationMs.") === 0) {
@@ -351,6 +370,7 @@
           if (!input) return;
           if (input.type === "checkbox") input.checked = !!c.value;
           else if (input.type === "text") input.value = c.value == null ? "" : String(c.value);
+          else if (input.type === "color") input.value = String(c.value == null ? "#ffffff" : c.value).toLowerCase();
           else if (input.tagName === "SELECT") input.value = c.value;
           else input.value = fmt(c.value / Number(input.dataset.factor));
         });
