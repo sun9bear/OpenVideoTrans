@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "probe (whoami + list resources, no changes) | migrate (apply D1 migrations) | deploy (build SPA + wrangler deploy)"
+        description: "probe (list resources) | migrate (D1 migrations) | secrets (put self-generated secrets) | deploy (build SPA + wrangler deploy)"
         type: choice
-        options: [probe, migrate, deploy]
+        options: [probe, migrate, secrets, deploy]
         default: probe
 
 jobs:
@@ -44,6 +44,21 @@ jobs:
       - name: Apply D1 migrations (remote)
         if: ${{ inputs.mode == 'migrate' }}
         run: pnpm dlx wrangler@4 d1 migrations apply ovt-db --remote
+
+      # Inject the SELF-GENERATED plain secrets (not owner-provided; those live in the Secrets Store).
+      # Values come from repo secrets set out-of-band; piped via stdin so they never appear in a command
+      # line or log. INTERNAL_TOKEN must match the VPS worker's OVT_INTERNAL_TOKEN; ANON_ID_HMAC_KEY
+      # opens the prod actor surface (signed anon ids); ADMIN_TOKEN gates /internal/admin/* + sweep.yml.
+      - name: Put self-generated secrets
+        if: ${{ inputs.mode == 'secrets' }}
+        env:
+          INTERNAL_TOKEN: ${{ secrets.INTERNAL_TOKEN }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          ANON_ID_HMAC_KEY: ${{ secrets.ANON_ID_HMAC_KEY }}
+        run: |
+          printf %s "$INTERNAL_TOKEN"   | pnpm dlx wrangler@4 secret put INTERNAL_TOKEN
+          printf %s "$ADMIN_TOKEN"      | pnpm dlx wrangler@4 secret put ADMIN_TOKEN
+          printf %s "$ANON_ID_HMAC_KEY" | pnpm dlx wrangler@4 secret put ANON_ID_HMAC_KEY
 
       - name: Build SPA (same-origin assets)
         if: ${{ inputs.mode == 'deploy' }}

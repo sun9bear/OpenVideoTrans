@@ -68,6 +68,54 @@ export interface Env {
   R2_S3_ENDPOINT?: string;
 }
 
+// A Cloudflare Secrets Store binding — the secret value is read via .get() (async). The owner's
+// R2 S3 creds + provider/Turnstile keys live in the account Secrets Store (scope: Workers) rather
+// than as plain wrangler secrets, so they arrive as these bindings and must be resolved to strings
+// before the request code (which reads env.NAME as a string) runs.
+export interface SecretsStoreSecret {
+  get(): Promise<string>;
+}
+
+// The raw binding surface Cloudflare hands the Worker: the plain Env PLUS the Secrets Store bindings
+// (SS_*) for the owner-provided secrets kept in the account Secrets Store. Self-generated secrets
+// (INTERNAL_TOKEN / ADMIN_TOKEN / ANON_ID_HMAC_KEY) stay plain wrangler secrets on Env, so they need
+// no SS_ binding.
+export interface RawEnv extends Env {
+  SS_R2_ACCESS_KEY_ID?: SecretsStoreSecret;
+  SS_R2_SECRET_ACCESS_KEY?: SecretsStoreSecret;
+  SS_DEEPL_API_KEY?: SecretsStoreSecret;
+  SS_TURNSTILE_SECRET_KEY?: SecretsStoreSecret;
+}
+
+// Resolve the Secrets Store bindings to plain strings so all downstream code reads env.NAME as a
+// string uniformly, regardless of whether a value came from a plain wrangler secret or the Secrets
+// Store. Called ONCE at each Worker entry (fetch/scheduled/queue). A binding that is absent or whose
+// get() throws leaves the field undefined → the same fail-closed path as a missing plain secret
+// (requireR2/abuse/etc.). Values are held only for the request lifetime; never logged.
+export async function resolveSecrets(raw: RawEnv): Promise<Env> {
+  async function ss(b?: SecretsStoreSecret): Promise<string | undefined> {
+    if (!b) return undefined;
+    try {
+      return await b.get();
+    } catch {
+      return undefined;
+    }
+  }
+  const [r2Key, r2Secret, deepl, turnstile] = await Promise.all([
+    ss(raw.SS_R2_ACCESS_KEY_ID),
+    ss(raw.SS_R2_SECRET_ACCESS_KEY),
+    ss(raw.SS_DEEPL_API_KEY),
+    ss(raw.SS_TURNSTILE_SECRET_KEY),
+  ]);
+  return {
+    ...raw,
+    ...(r2Key !== undefined ? { R2_ACCESS_KEY_ID: r2Key } : {}),
+    ...(r2Secret !== undefined ? { R2_SECRET_ACCESS_KEY: r2Secret } : {}),
+    ...(deepl !== undefined ? { DEEPL_API_KEY: deepl } : {}),
+    ...(turnstile !== undefined ? { TURNSTILE_SECRET_KEY: turnstile } : {}),
+  };
+}
+
 // The CF Queues message body (T2.5). Deliberately just the job id: the authoritative job state lives
 // in D1, the queue carries only a low-latency "this job is claimable" wake. No secrets ever ride here.
 export interface WakeMessage {
