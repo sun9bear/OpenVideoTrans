@@ -53,9 +53,20 @@ export interface RuntimeConfig {
   // CFG-GUARD with a full audit trail. This is the §3 "audited AIGC toggle" the design reserved for the
   // owner — NOT a paid-API gate (red line 1 / allow_paid stays hard-immutable, never mutable). `subtitle`
   // = the machine-translation disclosure cue prepended to the SRT; empty text falls back to the kernel
-  // default. (Video visual watermark position/size/color/opacity is PR-2.)
+  // default.
   aigcSubtitleEnabled: boolean;
   aigcSubtitleText: string;
+  // §14 AIGC VIDEO watermark (PR-2, owner-authorized) — a visible burned-in drawtext overlay on the
+  // video deliverable. DEFAULT-OFF: it forces a re-encode, and the container-metadata legal mark stays
+  // on regardless, so enabling it is a stronger, additive visible form (not a weakening of §3). Fully
+  // operator-configurable via CFG-GUARD (audited): on/off + text + anchor + size (%height) + opacity
+  // (%) + color (#RRGGBB). Baked per-job by defaultAigcMarking (jobs.ts) into Job.aigc_marking.
+  aigcVideoWatermarkEnabled: boolean;
+  aigcVideoWatermarkText: string;
+  aigcVideoWatermarkPosition: "top_left" | "top_right" | "bottom_left" | "bottom_right" | "center";
+  aigcVideoWatermarkFontSize: number;
+  aigcVideoWatermarkOpacity: number;
+  aigcVideoWatermarkColor: string;
 }
 
 export const DEFAULT_CONFIG: RuntimeConfig = {
@@ -101,4 +112,13 @@ export const DEFAULT_CONFIG: RuntimeConfig = {
   servicePaused: false, // M3 kill-switch default OPEN; operator flips true via CFG-GUARD to pause intake
   aigcSubtitleEnabled: true, // §3 legal mark DEFAULT-ON; owner may disable via CFG-GUARD (audited)
   aigcSubtitleText: "本字幕由机器翻译生成", // default MT-disclosure; matches autodub-core _MT_DISCLOSURE
+  // §14 PR-2 video watermark: DEFAULT-OFF (see interface note — turning it on is an additive visible
+  // form; the container-metadata legal mark stays on regardless). Defaults match autodub-core's
+  // _WATERMARK_NOTICE / drawtext defaults so an operator who just flips `enabled` gets a sane label.
+  aigcVideoWatermarkEnabled: false,
+  aigcVideoWatermarkText: "本视频由 AI 合成", // matches autodub-core _WATERMARK_NOTICE
+  aigcVideoWatermarkPosition: "bottom_right",
+  aigcVideoWatermarkFontSize: 5, // percent of frame height
+  aigcVideoWatermarkOpacity: 85, // percent
+  aigcVideoWatermarkColor: "#FFFFFF",
 };

@@ -41,10 +41,23 @@ describe("CFG-GUARD §14 red-line invariant", () => {
     expect(suspicious).toEqual([]);
   });
 
-  it("AIGC subtitle keys ARE operator-mutable (owner-authorized §3 reconfiguration), NOT red-line", () => {
+  it("AIGC keys (subtitle + PR-2 video watermark) ARE operator-mutable, NOT red-line", () => {
     const mutable = new Set(Object.keys(MUTABLE_SETTINGS));
     expect(mutable.has("aigcSubtitleEnabled")).toBe(true);
     expect(mutable.has("aigcSubtitleText")).toBe(true);
+    // PR-2: the video watermark toggle + its render params are mutable too (enabling STRENGTHENS the
+    // mark; every change is audited). None of them are red-line.
+    for (const k of [
+      "aigcVideoWatermarkEnabled",
+      "aigcVideoWatermarkText",
+      "aigcVideoWatermarkPosition",
+      "aigcVideoWatermarkFontSize",
+      "aigcVideoWatermarkOpacity",
+      "aigcVideoWatermarkColor",
+    ]) {
+      expect(mutable.has(k)).toBe(true);
+      expect(RED_LINE_KEYS as readonly string[]).not.toContain(k);
+    }
     // The paid-API gate remains the ONLY red line at this layer.
     expect([...RED_LINE_KEYS].sort()).toEqual(["allow_paid", "paid_providers"]);
     for (const legacy of ["aigc_enabled", "aigc_marking", "aigc_disclosure"]) {

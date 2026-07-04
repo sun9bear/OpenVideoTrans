@@ -22,8 +22,12 @@
 FROM python:3.11-slim AS runtime
 
 # ffmpeg/ffprobe for the kernel + admission; curl only for build-time model fetch (removed below).
+# fonts-noto-cjk: the visible AIGC watermark (PR-2) uses ffmpeg drawtext, whose default face is Latin
+# only — a Chinese watermark would render as tofu boxes without a CJK font on the box. Noto CJK covers
+# CJK + Latin, so ONE font serves the default zh notice and any Latin operator text. Kept at runtime
+# (NOT purged with curl below) since drawtext reads it live.
 RUN apt-get update -q \
-    && apt-get install -y -q --no-install-recommends ffmpeg curl ca-certificates \
+    && apt-get install -y -q --no-install-recommends ffmpeg curl ca-certificates fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /usr/local/bin/uv
@@ -77,6 +81,7 @@ ENV FVD_PIPER_MODEL=/opt/ovt/models/piper/voice.onnx \
     FVD_PIPER_LANG=${PIPER_VOICE_LANG} \
     FVD_WHISPER_MODEL=base \
     OVT_WORKDIR=/var/lib/ovt/jobs \
+    OVT_WATERMARK_FONT=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \
     PATH=/app/.venv/bin:$PATH
 
 # HF_HUB_OFFLINE: at runtime the egress allowlist blocks huggingface.co, so faster_whisper must use

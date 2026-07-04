@@ -55,6 +55,12 @@ def _mock_video_ffmpeg(monkeypatch: pytest.MonkeyPatch, captured: dict) -> None:
 
     monkeypatch.setattr(stages.ff, "mux", fake_mux)
 
+    def fake_watermark_video(video, out, wm, *, timeout_sec, crf=23, preset="veryfast"):  # noqa: ANN001,ANN202,ARG001
+        captured["watermark"] = wm
+        Path(out).write_bytes(b"wm")
+
+    monkeypatch.setattr(stages.ff, "watermark_video", fake_watermark_video)
+
 
 # --------------------------------------------------------------------------- #
 # marking module (conditional on output_mode)
@@ -404,3 +410,158 @@ def test_run_pipeline_defaults_to_marked_when_none_given(
         paths, _Resolver(), source="x", target_lang="zh", output_mode="subtitle_only"
     )
     assert "机器翻译" in paths.subtitles.read_text(encoding="utf-8")  # default-on disclosure
+
+
+# --------------------------------------------------------------------------- #
+# PR-2 visible AIGC watermark (policy + mux application)
+# --------------------------------------------------------------------------- #
+def _wm_marking(**over: object) -> AigcMarking:
+    base: dict = dict(
+        enabled=True, implicit=True, explicit=True, form="tail_notice",
+        video_watermark_enabled=True,
+    )
+    base.update(over)
+    return AigcMarking(**base)
+
+
+def test_video_watermark_text_gated_and_custom() -> None:
+    # DEFAULT-OFF: a plain marking (video_watermark_enabled defaults False) -> None.
+    assert aigc.video_watermark_text(_marking()) is None
+    assert aigc.video_watermark_text(None) is None
+    # Master enabled=False -> None even if the per-channel flag is on (disabled marking = no mark).
+    off = _wm_marking(enabled=False, implicit=False, explicit=False)
+    assert aigc.video_watermark_text(off) is None
+    # Enabled -> default notice when text is null/blank; custom text when set.
+    assert aigc.video_watermark_text(_wm_marking()) == "本视频由 AI 合成"
+    custom = aigc.video_watermark_text(_wm_marking(video_watermark_text="AI 生成·仅供参考"))
+    assert custom == "AI 生成·仅供参考"
+    assert aigc.video_watermark_text(_wm_marking(video_watermark_text="   ")) == "本视频由 AI 合成"
+
+
+def test_mux_dub_no_watermark_by_default(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # DEFAULT-OFF: a normal marked dub does NOT trigger the watermark re-encode (stream-copy stays).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    captured: dict = {}
+    _mock_video_ffmpeg(monkeypatch, captured)
+    stages.mux(paths, output_mode="dub_only", marking=_marking())
+    assert "watermark" not in captured  # ff.watermark_video NOT called
+
+
+def test_mux_dub_applies_video_watermark_when_enabled(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # Watermark on -> the delivered dub video is re-encoded with the resolved render spec + font;
+    # the marking is recorded applied (the mark also lives in the container metadata).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    captured: dict = {}
+    _mock_video_ffmpeg(monkeypatch, captured)
+    marking = _wm_marking(
+        video_watermark_text="AI 合成", video_watermark_position="top_left",
+        video_watermark_font_size=8, video_watermark_opacity=70, video_watermark_color="#00FF00",
+    )
+    stages.mux(paths, output_mode="dub_only", marking=marking, watermark_font="/f/noto.ttc")
+    wm = captured["watermark"]
+    assert wm is not None
+    assert wm.text == "AI 合成" and wm.position == "top_left" and wm.size_pct == 8
+    assert wm.opacity_pct == 70 and wm.color == "#00FF00" and wm.fontfile == "/f/noto.ttc"
+    assert marking.applied is True
+
+
+def test_mux_subtitle_only_srt_never_watermarks(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # No video deliverable (subtitle_only + srt) -> the watermark never applies even when enabled,
+    # so an SRT-only job triggers no needless re-encode.
+    paths = JobPaths(tmp_path).ensure()
+    _write_segments(paths, [("hello", "你好")])
+    captured: dict = {}
+    _mock_video_ffmpeg(monkeypatch, captured)
+    stages.mux(paths, output_mode="subtitle_only", marking=_wm_marking(form="disclosure_only"))
+    assert "watermark" not in captured
+
+
+def test_mux_watermark_change_invalidates_cache(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # The watermark params are folded into the mux cache key: editing the text forces a re-mux
+    # (+ re-watermark) rather than serving the stale, differently-watermarked video.
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    captured: dict = {}
+    _mock_video_ffmpeg(monkeypatch, captured)
+    stages.mux(paths, output_mode="dub_only", marking=_wm_marking(video_watermark_text="旧水印"))
+    captured.clear()
+    stages.mux(paths, output_mode="dub_only", marking=_wm_marking(video_watermark_text="新水印"))
+    assert captured.get("watermark") is not None and captured["watermark"].text == "新水印"
+
+
+def test_mux_watermark_default_off_cache_key_unchanged(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # A default-off run's cache key must stay byte-identical to a pre-PR-2 run (no 'wm:' token), so
+    # enabling PR-2 does not force a needless re-mux of already-cached default deliverables.
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    captured: dict = {}
+    _mock_video_ffmpeg(monkeypatch, captured)
+    stages.mux(paths, output_mode="dub_only", marking=_marking())  # writes the marker
+    marker = (paths.output / ".mux_cache").read_text(encoding="utf-8")
+    assert "wm:" not in marker
+    captured.clear()
+    stages.mux(paths, output_mode="dub_only", marking=_marking())  # same key -> cache hit
+    assert "metadata" not in captured  # ff.mux NOT called again
+
+
+def test_mux_burned_forwards_watermark_to_burn(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # subtitle_only + burned: the watermark rides the burn re-encode (one pass), so stages forwards
+    # it to ff.burn_subtitles rather than running a separate watermark_video pass.
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    _write_segments(paths, [("hello", "你好")])
+    captured: dict = {}
+    _mock_video_ffmpeg(monkeypatch, captured)
+
+    def fake_burn(video, srt, out, **kwargs):  # noqa: ANN001,ANN003,ANN202
+        captured["burn_watermark"] = kwargs.get("watermark")
+        Path(out).write_bytes(b"burned")
+
+    monkeypatch.setattr(stages.ff, "burn_subtitles", fake_burn)
+    marking = _wm_marking(form="disclosure_only", video_watermark_text="AI 水印")
+    stages.mux(paths, output_mode="subtitle_only", subtitle_delivery="burned", marking=marking,
+               watermark_font="/f/noto.ttc")
+    assert "watermark" not in captured  # no separate second pass
+    wm = captured["burn_watermark"]
+    assert wm is not None and wm.text == "AI 水印" and wm.fontfile == "/f/noto.ttc"
+
+
+def test_run_pipeline_records_visible_watermark_as_only_applied_mark(
+    tmp_path: Path, monkeypatch  # noqa: ANN001
+) -> None:
+    # §3 audit accuracy: subtitle_only + burned with the subtitle cue OFF but the watermark ON — the
+    # burned video visibly carries the drawtext overlay while embed_method() is None. The manifest
+    # must record "visible_watermark", never a self-contradictory None (applied=True + method=None).
+    paths = JobPaths(tmp_path).ensure()
+    (paths.video / "original.mp4").write_bytes(b"vid")
+    marking = AigcMarking(
+        enabled=True, implicit=True, explicit=True, form="disclosure_only",
+        subtitle_enabled=False, video_watermark_enabled=True,
+    )
+    job = Job(
+        job_id="job_wm", anon_or_user_id="anon", tier="tier1", status="done", source_type="upload",
+        upload_session_id="up", target_lang="zh-Hans", output_mode="subtitle_only",
+        subtitle_delivery="burned", subtitle_lang="target",
+        plan=JobPlan(asr="a", mt="b", tts=None), settings_version=1, aigc_marking=marking,
+        priority=0, enqueue_at=0, deadline_at=0, created_at=0, expires_at=0,
+        artifacts=JobArtifacts(), attempt=1, claim_version=1,
+        counted_job=True, counted_minutes=True, refunded=False,
+    )
+    monkeypatch.setattr(stages, "ingest", lambda *a, **k: None)  # noqa: ARG005
+    monkeypatch.setattr(stages, "prepare", lambda *a, **k: None)  # noqa: ARG005
+
+    def fake_burn(video, srt, out, **kwargs):  # noqa: ANN001,ANN003,ANN202
+        Path(out).write_bytes(b"burned")
+
+    monkeypatch.setattr(stages.ff, "burn_subtitles", fake_burn)
+    stages.run_pipeline(paths, _Resolver(), source="x", target_lang="zh-Hans", job=job)
+    assert marking.applied is True
+    manifest = Manifest.model_validate(read_json(paths.manifest))
+    # NOT None — §3 forbids under-claiming a mark the artifact visibly carries.
+    assert manifest.worker_meta.aigc_embed_method == "visible_watermark"

@@ -22,6 +22,7 @@ from ovt_schemas.contracts import AigcMarking
 # Disclosure copy (zh-first; the web UI / i18n own the final localized strings).
 _DUB_NOTICE = "本视频含 AI 生成配音"
 _MT_DISCLOSURE = "本字幕由机器翻译生成"
+_WATERMARK_NOTICE = "本视频由 AI 合成"  # default visible video-watermark text (PR-2)
 
 _DUB_MODES = ("dub_only", "both")
 
@@ -87,3 +88,18 @@ def subtitle_disclosure(marking: AigcMarking | None) -> str | None:
     if marking is None or not marking.enabled or not marking.subtitle_enabled:
         return None
     return (marking.subtitle_text or "").strip() or _MT_DISCLOSURE
+
+
+def video_watermark_text(marking: AigcMarking | None) -> str | None:
+    """The visible video-watermark text, or None when the watermark is off (PR-2).
+
+    §14 operator-configurable (owner-authorized §3 reconfiguration): gated by BOTH the master
+    ``enabled`` and the per-channel ``video_watermark_enabled`` (DEFAULT-OFF — a null/empty custom
+    text falls back to the kernel default notice). Independent of the subtitle channel. This is the
+    POLICY gate; the render params (position/size/color/opacity) and the deployment font are applied
+    by stages.mux, which paints it ONLY when a video deliverable is produced. Turning it off removes
+    NO legal mark: the container-metadata mark (metadata_args) stays regardless.
+    """
+    if marking is None or not marking.enabled or not marking.video_watermark_enabled:
+        return None
+    return (marking.video_watermark_text or "").strip() or _WATERMARK_NOTICE

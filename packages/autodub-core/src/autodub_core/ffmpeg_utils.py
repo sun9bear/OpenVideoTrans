@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import CANON_CHANNELS, CANON_SR
@@ -354,7 +355,8 @@ _BURN_SUBS_NAME = "subs.srt"
 
 
 def _burn_vf(width: int, height: int, max_width: int, max_height: int, *,
-             subs_name: str = _BURN_SUBS_NAME, force_style: str | None = None) -> str:
+             subs_name: str = _BURN_SUBS_NAME, force_style: str | None = None,
+             watermark: Watermark | None = None) -> str:
     """Build the ``-vf`` value for a subtitle burn-in (pure; no I/O).
 
     Downscales the picture to fit within ``max_width`` x ``max_height`` BEFORE the libass
@@ -362,7 +364,8 @@ def _burn_vf(width: int, height: int, max_width: int, max_height: int, *,
     alone is within the cap — can't blow up the re-encode. The aspect ratio is preserved (a
     single scale factor), dimensions are forced even (x264), and a source already within BOTH
     caps is NOT scaled (never upscale). ``force_style`` (when given) selects the libass style —
-    e.g. a CJK font name so the burn renders non-Latin scripts.
+    e.g. a CJK font name so the burn renders non-Latin scripts. ``watermark`` (PR-2, when given)
+    rides on this SAME re-encode as a trailing drawtext overlay sized from the POST-scale height.
     """
     parts: list[str] = []
     # Downscale-only: the factor is capped at 1.0, so a source within both caps is never enlarged.
@@ -378,6 +381,10 @@ def _burn_vf(width: int, height: int, max_width: int, max_height: int, *,
     if force_style:
         subs += f":force_style='{force_style}'"
     parts.append(subs)
+    # The AIGC watermark overlay is sized from target_h (the frame the overlay actually paints on,
+    # after any downscale) so the label stays a consistent share of the delivered picture.
+    if watermark is not None:
+        parts.append(_drawtext_vf(watermark, target_h))
     return ",".join(parts)
 
 
@@ -386,6 +393,7 @@ def burn_subtitles(
     max_width: int, max_height: int, timeout_sec: float,
     crf: int = 23, preset: str = "veryfast",
     force_style: str | None = None, metadata: list[str] | None = None,
+    watermark: Watermark | None = None,
 ) -> None:
     """Re-encode ``video`` with ``srt`` burned into the picture (libass), writing ``out``.
 
@@ -394,20 +402,28 @@ def burn_subtitles(
     boundary (SSRF guard, T1.3c), downscaled to ``max_height`` if taller, and the
     re-encode is bounded by ``timeout_sec`` (a wedged encode is killed and surfaced as
     FfmpegError, never an unbounded lease hold). Audio is stream-copied. ``metadata``
-    (the AIGC ``-metadata`` tags) rides on the output container. Atomic temp+replace.
+    (the AIGC ``-metadata`` tags) rides on the output container. ``watermark`` (PR-2, when
+    given) paints the visible AIGC label on this SAME re-encode — its text is staged as a
+    plain file alongside subs.srt so the drawtext filter needs no path/escape handling.
+    Atomic temp+replace.
     """
     assert_ffmpeg()
     # mux/burn may run on a pre-staged/resumed job that bypassed ingest's allowlist;
     # validate the source container HERE too so a crafted input can't reach ffmpeg.
     assert_allowed_input_format(video)
     width, height = probe_dimensions(video)
-    vf = _burn_vf(width, height, max_width, max_height, force_style=force_style)
+    vf = _burn_vf(width, height, max_width, max_height, force_style=force_style,
+                  watermark=watermark)
     extra = list(metadata or [])
     src = Path(video).resolve()  # absolute: ffmpeg runs with cwd = the srt's temp dir
     # Stage the srt under a plain name in a temp dir and run ffmpeg from there, so the
     # libass filter references "subs.srt" (no path escaping / Windows drive-colon issues).
     with tempfile.TemporaryDirectory(prefix="ovt_burn_") as td:
         shutil.copy2(srt, Path(td) / _BURN_SUBS_NAME)
+        # Stage the watermark text under a plain name in the SAME cwd so drawtext's
+        # textfile= reference resolves without escaping (mirrors the subs.srt staging).
+        if watermark is not None:
+            (Path(td) / _WM_TEXT_NAME).write_text(watermark.text, encoding="utf-8")
         with atomic_output(out) as tmp:
             cmd = [
                 "ffmpeg", "-y", *_input(src),
@@ -419,5 +435,110 @@ def burn_subtitles(
                 # track. Mirrors the dub mux's AAC normalization (not -c:a copy).
                 "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k", *extra, str(Path(tmp).resolve()),
+            ]
+            _run(cmd, timeout=timeout_sec, cwd=td)
+
+
+# --------------------------------------------------------------------------- #
+# Visible AIGC watermark (PR-2): a drawtext overlay. Like burn_subtitles it paints text into the
+# picture (x264 re-encode), so it is default-OFF and applied only when the operator enables it — the
+# stream-copy mux() path stays untouched. When a job also burns subtitles, the overlay rides on that
+# SAME re-encode (see _burn_vf/burn_subtitles); a plain dub uses watermark_video() as a second pass.
+# --------------------------------------------------------------------------- #
+_WM_TEXT_NAME = "watermark.txt"  # plain textfile staged in the ffmpeg cwd (no filtergraph escaping)
+
+# drawtext x/y expressions per anchor; {m} is the edge margin. tw/th = text box, w/h = frame dims.
+_WM_POSITIONS = {
+    "top_left": ("{m}", "{m}"),
+    "top_right": ("w-tw-{m}", "{m}"),
+    "bottom_left": ("{m}", "h-th-{m}"),
+    "bottom_right": ("w-tw-{m}", "h-th-{m}"),
+    "center": ("(w-tw)/2", "(h-th)/2"),
+}
+
+
+@dataclass(frozen=True)
+class Watermark:
+    """Resolved visible-watermark render spec (the kernel builds the drawtext filter from it).
+
+    ``text`` is the already-resolved label (default applied upstream by aigc.video_watermark_text).
+    ``fontfile`` is a deployment font PATH (POSIX) the worker supplies so CJK renders; None => the
+    ffmpeg default face (Latin). ``size_pct`` is a percent of frame height; ``opacity_pct`` = 0-100.
+    """
+
+    text: str
+    position: str  # one of _WM_POSITIONS
+    size_pct: int  # font size as a percent of frame height
+    opacity_pct: int  # 0-100
+    color: str  # "#RRGGBB"
+    fontfile: str | None = None
+
+
+def _hex_to_ffcolor(color: str, opacity_pct: int) -> str:
+    """'#RRGGBB' + percent opacity -> an ffmpeg '0xRRGGBBAA' literal (no '@' alpha ambiguity)."""
+    rgb = color.lstrip("#").upper()
+    alpha = max(0, min(255, round(opacity_pct * 255 / 100)))
+    return f"0x{rgb}{alpha:02X}"
+
+
+def _wm_fontsize_px(height: int, size_pct: int) -> int:
+    """Font size in px from a percent of frame height (floored so a tiny frame stays legible)."""
+    return max(10, round(height * size_pct / 100))
+
+
+def _drawtext_vf(wm: Watermark, frame_height: int, *, text_name: str = _WM_TEXT_NAME) -> str:
+    """Build the drawtext filter for ``wm`` at a known ``frame_height`` (pure; no I/O).
+
+    ``textfile=`` + ``expansion=none`` draw ARBITRARY operator text (CJK, quotes, colons, %)
+    literally — no filtergraph escaping, no ``%{...}`` expansion. A margin + a thin border (both
+    proportional to the font) keep the label off the edge and legible. Text is read from
+    ``text_name`` in the ffmpeg cwd, which the caller stages there.
+    """
+    fontsize = _wm_fontsize_px(frame_height, wm.size_pct)
+    margin = max(4, round(fontsize * 0.5))
+    xexpr, yexpr = _WM_POSITIONS[wm.position]
+    opts = [
+        f"textfile={text_name}",
+        "expansion=none",
+        f"fontsize={fontsize}",
+        f"fontcolor={_hex_to_ffcolor(wm.color, wm.opacity_pct)}",
+        f"borderw={max(1, round(fontsize / 16))}",
+        f"bordercolor={_hex_to_ffcolor('#000000', wm.opacity_pct)}",
+        f"x={xexpr.format(m=margin)}",
+        f"y={yexpr.format(m=margin)}",
+    ]
+    if wm.fontfile:
+        opts.insert(0, f"fontfile={wm.fontfile}")
+    return "drawtext=" + ":".join(opts)
+
+
+def watermark_video(
+    video: str | Path, out: str | Path, wm: Watermark, *,
+    timeout_sec: float, crf: int = 23, preset: str = "veryfast",
+) -> None:
+    """Re-encode ``video`` with the visible AIGC watermark burned in (drawtext), writing ``out``.
+
+    A SECOND pass over an already-muxed dub video: the VIDEO stream is re-encoded (x264) to paint
+    the overlay, AUDIO is stream-copied (already the dub's AAC track), and the container metadata
+    (the AIGC ``comment`` tag from mux) is carried via ``-map_metadata 0``. The source is validated
+    at this ffmpeg boundary (SSRF guard, T1.3c) and the re-encode is bounded by ``timeout_sec`` (a
+    wedged encode is killed, never an unbounded lease hold). Text is staged as a plain file in a
+    temp cwd so the filter needs no path/escape handling. Atomic temp+replace — safe even in place
+    (``out`` == ``video``): ffmpeg reads the original path while the writer builds a separate temp.
+    """
+    assert_ffmpeg()
+    assert_allowed_input_format(video)
+    _, height = probe_dimensions(video)
+    vf = _drawtext_vf(wm, height)
+    src = Path(video).resolve()  # absolute: ffmpeg runs with cwd = the staged text's temp dir
+    with tempfile.TemporaryDirectory(prefix="ovt_wm_") as td:
+        (Path(td) / _WM_TEXT_NAME).write_text(wm.text, encoding="utf-8")
+        with atomic_output(out) as tmp:
+            cmd = [
+                "ffmpeg", "-y", *_input(src),
+                "-vf", vf,
+                "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "0",
+                "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
+                "-c:a", "copy", str(Path(tmp).resolve()),
             ]
             _run(cmd, timeout=timeout_sec, cwd=td)

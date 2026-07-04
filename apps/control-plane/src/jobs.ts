@@ -117,10 +117,12 @@ function defaultPlan(outputMode: string): { asr: string; mt: string; tts: string
 
 // AIGC legal marking is DEFAULT-ON (red line 3). Form is conditioned on output_mode: a dub gets a
 // tail/voice notice; subtitle-only gets light disclosure. The worker sets `applied` once embedded.
-// §14 (owner-authorized §3 reconfiguration, 2026-07-04): the SUBTITLE channel's on/off + custom text
-// are baked in here from the config IN FORCE at creation (per-job snapshot ⇒ non-drift; a later config
-// change never retro-alters a queued job). The master `enabled` + the video/dub channel stay
-// default-on (video watermark config is a follow-up); disabling is recorded in the CFG-GUARD audit.
+// §14 (owner-authorized §3 reconfiguration, 2026-07-04): the SUBTITLE cue (on/off + text) and the
+// PR-2 VIDEO watermark (on/off + text + anchor + size + opacity + color) are baked in here from the
+// config IN FORCE at creation (per-job snapshot ⇒ non-drift; a later config change never retro-alters
+// a queued job). The master `enabled` stays default-on; the video watermark is DEFAULT-OFF (an
+// additive visible form — the container-metadata mark stays regardless). Every toggle is CFG-GUARD-
+// audited.
 function defaultAigcMarking(outputMode: string, config: Ctx["config"]): Job["aigc_marking"] {
   const form = outputMode === "subtitle_only" ? "disclosure_only" : "tail_notice";
   return {
@@ -131,6 +133,12 @@ function defaultAigcMarking(outputMode: string, config: Ctx["config"]): Job["aig
     applied: null,
     subtitle_enabled: config.aigcSubtitleEnabled,
     subtitle_text: config.aigcSubtitleText,
+    video_watermark_enabled: config.aigcVideoWatermarkEnabled,
+    video_watermark_text: config.aigcVideoWatermarkText,
+    video_watermark_position: config.aigcVideoWatermarkPosition,
+    video_watermark_font_size: config.aigcVideoWatermarkFontSize,
+    video_watermark_opacity: config.aigcVideoWatermarkOpacity,
+    video_watermark_color: config.aigcVideoWatermarkColor,
   };
 }
 

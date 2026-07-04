@@ -122,6 +122,13 @@ class AigcMarking(BaseModel):
     applied: bool | None = None
     subtitle_enabled: bool = True
     subtitle_text: str | None = None
+    video_watermark_enabled: bool = False
+    video_watermark_text: str | None = None
+    video_watermark_position: Literal["top_left", "top_right", "bottom_left", "bottom_right",
+                                      "center"] = "bottom_right"
+    video_watermark_font_size: int = 5
+    video_watermark_opacity: int = 85
+    video_watermark_color: str = "#FFFFFF"
 
 
 class JobPlan(BaseModel):

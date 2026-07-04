@@ -34,6 +34,24 @@ describe("validateSettingChange", () => {
     expect(() => validateSettingChange("aigcSubtitleEnabled", "yes")).toThrow(HttpError); // not a bool
   });
 
+  it("accepts + bounds the PR-2 AIGC video watermark settings", () => {
+    expect(validateSettingChange("aigcVideoWatermarkEnabled", true)).toBe(true);
+    expect(validateSettingChange("aigcVideoWatermarkText", "AI 合成")).toBe("AI 合成");
+    expect(validateSettingChange("aigcVideoWatermarkPosition", "center")).toBe("center");
+    expect(validateSettingChange("aigcVideoWatermarkFontSize", 8)).toBe(8);
+    expect(validateSettingChange("aigcVideoWatermarkOpacity", 50)).toBe(50);
+    // Hex color is validated + normalized to uppercase so a malformed color can't reach ffmpeg.
+    expect(validateSettingChange("aigcVideoWatermarkColor", "#00ff00")).toBe("#00FF00");
+    // Out-of-bounds / malformed values are rejected (400 invalid_setting).
+    expect(() => validateSettingChange("aigcVideoWatermarkFontSize", 0)).toThrow(HttpError); // < 1
+    expect(() => validateSettingChange("aigcVideoWatermarkFontSize", 21)).toThrow(HttpError); // > 20
+    expect(() => validateSettingChange("aigcVideoWatermarkOpacity", 4)).toThrow(HttpError); // < 5
+    expect(() => validateSettingChange("aigcVideoWatermarkPosition", "middle")).toThrow(HttpError);
+    expect(() => validateSettingChange("aigcVideoWatermarkColor", "red")).toThrow(HttpError);
+    expect(() => validateSettingChange("aigcVideoWatermarkColor", "#12345")).toThrow(HttpError); // 5 digits
+    expect(() => validateSettingChange("aigcVideoWatermarkText", "x".repeat(101))).toThrow(HttpError); // >100
+  });
+
   it("rejects an out-of-bounds value (400 invalid_setting)", () => {
     expect(() => validateSettingChange("maxUploadBytes", 10)).toThrow(HttpError);
     try {
@@ -272,6 +290,8 @@ describe("admin route POST /internal/admin/settings (admin-auth, separate from w
     expect(res.json.mutableKeys).toContain("maxVideoDurationMs");
     expect(res.json.mutableKeys).toContain("aigcSubtitleEnabled"); // AIGC now operator-mutable (§3 reconfig)
     expect(res.json.mutableKeys).toContain("aigcSubtitleText");
+    expect(res.json.mutableKeys).toContain("aigcVideoWatermarkEnabled"); // PR-2 video watermark
+    expect(res.json.mutableKeys).toContain("aigcVideoWatermarkColor");
     expect(res.json.redLineKeys).toContain("allow_paid"); // paid-API gate stays red-line
     expect(res.json.redLineKeys).not.toContain("aigc_enabled");
   });

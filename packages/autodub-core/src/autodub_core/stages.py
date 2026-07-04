@@ -381,6 +381,7 @@ def mux(
     subtitle_delivery: str = "srt",
     marking: AigcMarking | None = None,
     burn_font: str | None = None,
+    watermark_font: str | None = None,
 ) -> Path:
     """Compose the job's deliverables per ``output_mode`` (T1.3d).
 
@@ -428,6 +429,26 @@ def mux(
         raise NotImplementedError(
             "subtitle_delivery requires the burn re-encode, but BURN_SUBTITLES_ENABLED is off")
 
+    # PR-2 visible AIGC watermark (§14, owner-authorized): the POLICY gate + resolved text come from
+    # aigc (DEFAULT-OFF; removing it strips NO legal mark — the container metadata mark stays). The
+    # render params come from the marking; the deployment font from the caller (watermark_font, like
+    # burn_font — NOT job-derived). It applies ONLY to a video deliverable (dub or burned), so it is
+    # left None for a subtitle_only+srt job (no video ⇒ no needless re-encode); `watermark is not
+    # None` is then the single "the mark applies" predicate below.
+    wm_text = aigc.video_watermark_text(marking)
+    watermark = (
+        ff.Watermark(
+            text=wm_text,
+            position=marking.video_watermark_position,
+            size_pct=marking.video_watermark_font_size,
+            opacity_pct=marking.video_watermark_opacity,
+            color=marking.video_watermark_color,
+            fontfile=watermark_font,
+        )
+        if (wm_text is not None and (want_video or want_burn))
+        else None
+    )
+
     # When burning, the burned_video IS the delivered video and dubbed_video is only its
     # intermediate (the burn source for a dub+burn job) — so it is built but not delivered.
     deliver_video = (
@@ -460,14 +481,23 @@ def mux(
             f"burn:{config.BURN_MAX_WIDTH}:{config.BURN_MAX_HEIGHT}:{config.BURN_CRF}:"
             f"{config.BURN_PRESET}:{burn_font or ''}"
         )
+    # §14 PR-2: the visible watermark shapes the delivered pixels but is NOT in want_method — fold
+    # every watermark param (incl. text + deployment font) into the key so toggling it on/off or
+    # editing any field forces a re-mux. Appended ONLY when it applies, so a default-off job's key
+    # stays byte-identical to pre-PR-2 (no cache churn / marker invalidation), like the burn key.
+    if watermark is not None:
+        cache_key_parts.append(
+            f"wm:{watermark.position}:{watermark.size_pct}:{watermark.opacity_pct}:"
+            f"{watermark.color}:{watermark.fontfile or ''}:{watermark.text}"
+        )
     cache_key = "|".join(cache_key_parts)
     marker = paths.output / ".mux_cache"
     cached_key = marker.read_text(encoding="utf-8") if marker.exists() else ""
     if (expected and all(p.exists() for p in expected)
             and cached_key == cache_key and not force):
         _log("mux: cached")
-        if want_method and marking is not None:
-            marking.applied = True  # cached artifacts carry the recorded mark
+        if marking is not None and (want_method or watermark is not None):
+            marking.applied = True  # cached artifacts carry the mark (method and/or watermark)
         return primary
     # Rebuild: clear EVERY known deliverable, not just the requested ones. When the output
     # mode narrows on a reused job dir (both -> subtitle_only / dub_only), a stale deliverable
@@ -503,6 +533,17 @@ def mux(
         ff.mux(video, paths.dubbed_audio, paths.dubbed_video, ambient=ambient,
                metadata=aigc.metadata_args(marking, output_mode))
         _log(f"mux: wrote {paths.dubbed_video.name}")
+        if watermark is not None and not want_burn:
+            # The delivered dub video gets the visible watermark as a SECOND re-encode pass (the
+            # stream-copy mux above is untouched). When burning, the overlay instead rides the burn
+            # re-encode below — so a both+burned job's throwaway dubbed_video intermediate is not
+            # watermarked here (it is never delivered), avoiding a wasted pass.
+            ff.watermark_video(
+                paths.dubbed_video, paths.dubbed_video, watermark,
+                timeout_sec=config.BURN_ENCODE_TIMEOUT_SEC,
+                crf=config.BURN_CRF, preset=config.BURN_PRESET,
+            )
+            _log("mux: burned visible AIGC watermark into dubbed video")
     # Write the srt LAST so a failed video mux above leaves no lone deliverable
     # that the next run might otherwise treat as progress.
     # The subtitle text is delivered as srt and/or used as the burn source — build it once.
@@ -533,6 +574,9 @@ def mux(
                 # the kernel stays pure, no registry import). None -> libass default (Latin).
                 force_style=(f"FontName={burn_font}" if burn_font else None),
                 metadata=aigc.metadata_args(marking, output_mode),
+                # PR-2: the visible watermark rides THIS re-encode (no extra pass) when burning.
+                # `watermark` is already None unless it applies to a video deliverable (see above).
+                watermark=watermark,
             )
         _log(f"mux: wrote {paths.burned_video.name}")
     # Record what was actually marked alongside the deliverables, so a later resume
@@ -541,7 +585,7 @@ def mux(
     # must not claim a mark that no artifact carries.
     if expected:
         marker.write_text(cache_key, encoding="utf-8")
-    if want_method and marking is not None:
+    if marking is not None and (want_method or watermark is not None):
         marking.applied = True
     return primary
 
@@ -613,6 +657,7 @@ def run_pipeline(
     subtitle_delivery: str = "srt",
     aigc_marking: AigcMarking | None = None,
     burn_font: str | None = None,
+    watermark_font: str | None = None,
     job: Job | None = None,
 ) -> Path:
     """End-to-end local pipeline: ingest -> prepare -> transcribe -> translate ->
@@ -656,18 +701,25 @@ def run_pipeline(
     if output_mode in ("dub_only", "both"):
         tts(paths, resolver, tts_provider, force=force)
         align(paths, force=force)
-    # burn_font is a caller-supplied opaque font name (the orchestrator resolves it from the
-    # language registry — the kernel never imports provider-adapters). It is NOT derived from the
-    # Job, so it stays caller-supplied even on the job-driven path.
+    # burn_font (per-locale libass name) and watermark_font (a deployment-wide font PATH for the
+    # visible AIGC watermark) are caller-supplied, NOT Job-derived — the orchestrator resolves them
+    # (language registry / deployment env), keeping the kernel pure. The watermark font is
+    # deployment-wide (not per-locale): the operator text (default zh) is independent of the target
+    # language, so it needs one CJK-capable font, not the target's burn font.
     out = mux(paths, keep_ambient=keep_ambient, force=force, output_mode=output_mode,
               subtitle_lang=subtitle_lang, subtitle_delivery=subtitle_delivery,
-              marking=aigc_marking, burn_font=burn_font)
+              marking=aigc_marking, burn_font=burn_font, watermark_font=watermark_font)
     if job is not None:
-        # Record the embed method only when a mark was actually applied (mux sets
-        # marking.applied on the non-empty deliverable set), so the manifest never
-        # over-claims. worker_meta.ffprobe blob is deferred to T1.4 worker
-        # integration; models[] sha256 pins land in T1.3g.
-        method = (aigc.embed_method(aigc_marking, output_mode)
-                  if aigc_marking is not None and aigc_marking.applied else None)
+        # Record the embed method only when a mark was actually applied (mux sets marking.applied on
+        # the non-empty deliverable set), so the manifest never over-claims. §3 also forbids the
+        # inverse UNDER-claim: a visible watermark can be the ONLY applied mark — for a
+        # subtitle_only+burned job with the subtitle cue off, embed_method() is None yet the burned
+        # video visibly carries the drawtext overlay. applied=True with a None embed_method can ONLY
+        # arise that way (applied = want_method-non-empty OR watermark-applied, and want_method is
+        # empty exactly when embed_method is None), so record "visible_watermark" rather than a
+        # self-contradictory None. worker_meta.ffprobe blob is deferred to T1.4; models[] to T1.3g.
+        method: str | None = None
+        if aigc_marking is not None and aigc_marking.applied:
+            method = aigc.embed_method(aigc_marking, output_mode) or "visible_watermark"
         write_manifest(paths, job, WorkerMeta(aigc_embed_method=method))
     return out
