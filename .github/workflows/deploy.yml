@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "probe (list resources) | migrate (D1 migrations) | secrets (put self-generated secrets) | deploy (build SPA + wrangler deploy)"
+        description: "probe | migrate | secrets | cors (set R2 bucket CORS) | deploy (build SPA + wrangler deploy)"
         type: choice
-        options: [probe, migrate, secrets, deploy]
+        options: [probe, migrate, secrets, cors, deploy]
         default: probe
 
 jobs:
@@ -59,6 +59,15 @@ jobs:
           printf %s "$INTERNAL_TOKEN"   | pnpm dlx wrangler@4 secret put INTERNAL_TOKEN
           printf %s "$ADMIN_TOKEN"      | pnpm dlx wrangler@4 secret put ADMIN_TOKEN
           printf %s "$ANON_ID_HMAC_KEY" | pnpm dlx wrangler@4 secret put ANON_ID_HMAC_KEY
+
+      # Browser uploads go direct to R2 via a presigned PUT (cross-origin), so the bucket needs a CORS
+      # policy allowing PUT/GET from the site origin — otherwise the browser preflight 403s and the
+      # upload fails with a generic network error (server-side curl bypasses CORS, so it isn't caught
+      # by the API smoke). Idempotent: re-setting overwrites the same policy.
+      - name: Set R2 bucket CORS
+        if: ${{ inputs.mode == 'cors' }}
+        run: pnpm dlx wrangler@4 r2 bucket cors set ovt-artifacts --file deploy/cloudflare/r2-cors.json --force
+        working-directory: .
 
       - name: Build SPA (same-origin assets)
         if: ${{ inputs.mode == 'deploy' }}
