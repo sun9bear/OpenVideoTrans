@@ -312,6 +312,29 @@ describe("admin route POST /internal/admin/settings (admin-auth, separate from w
     expect(res.json.config.maxUploadBytes).toBe(300 * 1024 * 1024); // D1 truth, not the 999 KV value
   });
 
+  it("GET /api/config exposes ONLY the public display limits (no auth) + reflects live CFG-GUARD changes", async () => {
+    const { env } = makeEnv({ adminToken: ADMIN });
+    const { deps } = makeClock(T0);
+    // Operator raises the dub cap + tightens the upload cap via CFG-GUARD...
+    await call(env, deps, "POST", "/internal/admin/settings", {
+      admin: ADMIN,
+      body: { key: "maxVideoDurationMs", value: { subtitle_only: 1_800_000, dub_only: 600_000, both: 300_000 } },
+    });
+    await call(env, deps, "POST", "/internal/admin/settings", {
+      admin: ADMIN,
+      body: { key: "maxUploadBytes", value: 200 * 1024 * 1024 },
+    });
+    // ...and the PUBLIC endpoint (no auth header) reflects it, so the SPA warns from server truth.
+    const res = await call(env, deps, "GET", "/api/config", {});
+    expect(res.status).toBe(200);
+    expect(res.json.maxVideoDurationMs.dub_only).toBe(600_000);
+    expect(res.json.maxUploadBytes).toBe(200 * 1024 * 1024);
+    // CURATED: ops-sensitive knobs + version + secrets MUST NOT leak to an unauthenticated caller.
+    for (const k of ["dailyGlobalJobCap", "leaseTtlMs", "queueBackend", "settingsVersion", "allowedUploadTypes", "aigcSubtitleText", "aigcVideoWatermarkText"]) {
+      expect(res.json[k]).toBeUndefined();
+    }
+  });
+
   it("GET /internal/admin/settings rejects the worker bearer (401) and fails closed unconfigured (503)", async () => {
     const { deps } = makeClock(T0);
     const withWorker = makeEnv({ adminToken: ADMIN, internalToken: WORKER });

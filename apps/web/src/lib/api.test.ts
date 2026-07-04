@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ApiClient } from "./api";
+import { ApiClient, ApiError, type Uploader } from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -67,15 +67,22 @@ describe("ApiClient", () => {
     await expect(api.getJob("job_1")).rejects.toMatchObject({ code: "daily_cap_reached", status: 429 });
   });
 
-  it("putSource PUTs the bytes to the presigned url and throws on failure", async () => {
-    const ok = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 200 }));
-    const api = new ApiClient("", "anon_abc", ok as unknown as typeof fetch);
-    await api.putSource("https://r2/put", new Blob(["x"]), "video/mp4");
-    expect(ok.mock.calls[0]![0]).toBe("https://r2/put");
-    expect(ok.mock.calls[0]![1]!.method).toBe("PUT");
+  it("putSource delegates to the (injected) uploader, forwards progress, and throws on failure", async () => {
+    const okUp = vi.fn<Uploader>(async (_url, _body, _ct, onProgress) => {
+      onProgress?.(0.5);
+      onProgress?.(1);
+    });
+    const seen: number[] = [];
+    const api = new ApiClient("", "anon_abc", undefined, okUp);
+    await api.putSource("https://r2/put", new Blob(["x"]), "video/mp4", (f) => seen.push(f));
+    expect(okUp.mock.calls[0]![0]).toBe("https://r2/put");
+    expect(okUp.mock.calls[0]![2]).toBe("video/mp4");
+    expect(seen).toEqual([0.5, 1]); // progress fractions are forwarded to the caller
 
-    const bad = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 403 }));
-    const api2 = new ApiClient("", "anon_abc", bad as unknown as typeof fetch);
+    const badUp: Uploader = async () => {
+      throw new ApiError(403, "upload_put_failed", "直传失败（403）");
+    };
+    const api2 = new ApiClient("", "anon_abc", undefined, badUp);
     await expect(api2.putSource("https://r2/put", new Blob(["x"]), "video/mp4")).rejects.toMatchObject({
       code: "upload_put_failed",
     });

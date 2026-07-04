@@ -6,7 +6,7 @@ import { credentials } from "./credentials";
 import { logEvent, metricsEndpoint } from "./obs";
 import { providerAvailability, reportProviderExhausted } from "./providers";
 import { selectProducer } from "./queue";
-import { adminGetSettings, adminSetSetting, configEndpoint, getConfig, getSettingsAudit } from "./settings";
+import { adminGetSettings, adminSetSetting, configEndpoint, getConfig, getSettingsAudit, publicConfig } from "./settings";
 import { adminSweep, adminTakedown } from "./admin_ops";
 import { signUpload } from "./uploads";
 import { claimNext, complete, createJob, download, fail, getJob, heartbeat } from "./jobs";
@@ -44,6 +44,10 @@ const ROUTES: Route[] = [
   // GLOBAL dual-pool cap is the cost ceiling that bounds mint-then-create abuse). Returns {anon_id} +
   // a first-party cookie. Verification of the minted id happens in getActor on every other /api call.
   route("POST", "/api/anon", "none", mintAnon),
+  // PUBLIC display limits (no auth) so the SPA renders its pre-upload warnings from server truth
+  // (operator-tunable via CFG-GUARD), not a compile-time mirror. Curated projection only — see
+  // publicConfig (settings.ts); no ops-sensitive knob or secret is exposed.
+  route("GET", "/api/config", "none", publicConfig),
   // Public API surface (documented contract, plan §endpoints): /api prefix, artifact as a path segment.
   route("POST", "/api/uploads/sign", "actor", signUpload),
   route("POST", "/api/jobs", "actor", createJob),

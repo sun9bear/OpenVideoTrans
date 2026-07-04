@@ -3,15 +3,23 @@ import { flushSync, mount, unmount } from "svelte";
 import App from "./App.svelte";
 import { ANON_COOKIE } from "./lib/session";
 
-// onMount mints the anon id via POST /api/anon (async) — stub fetch so the mount is deterministic
-// under jsdom (node fetch would throw on the relative URL and force the local-id fallback instead).
+// onMount fires two async fetches — POST /api/anon (mint the id) and GET /api/config (live display
+// limits). Stub both so the mount is deterministic under jsdom (node fetch would throw on the relative
+// URLs and force the local-id fallback + DEFAULT_LIMITS instead). The stub routes by URL.
 const SIGNED = "anon_0123456789abcdef0123456789abcdef.aa11";
 function stubMintFetch() {
-  const fetchFn = vi.fn(async () => ({
-    ok: true,
-    status: 200,
-    json: async () => ({ anon_id: SIGNED }),
-  }));
+  const fetchFn = vi.fn(async (url: string) =>
+    String(url).includes("/api/config")
+      ? {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            maxUploadBytes: 500 * 1024 * 1024,
+            maxVideoDurationMs: { subtitle_only: 1_800_000, dub_only: 300_000, both: 300_000 },
+          }),
+        }
+      : { ok: true, status: 200, json: async () => ({ anon_id: SIGNED }) },
+  );
   vi.stubGlobal("fetch", fetchFn);
   return fetchFn;
 }
@@ -64,9 +72,11 @@ describe("App — smoke", () => {
     const app = mount(App, { target });
     flushSync();
 
-    // identity resolution is async — give the microtask queue a beat, then assert no mint happened
+    // identity resolution is async — give the microtask queue a beat, then assert no MINT happened.
+    // (A GET /api/config for live display limits DOES fire on mount regardless of identity — that is
+    // expected; we assert only that the id was reused, i.e. POST /api/anon was never called.)
     await new Promise((r) => setTimeout(r, 0));
-    expect(fetchFn).not.toHaveBeenCalled();
+    expect(fetchFn).not.toHaveBeenCalledWith("/api/anon", expect.anything());
     expect(document.cookie).toContain(`${ANON_COOKIE}=anon_existing.sig`);
 
     unmount(app);

@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { ApiClient, ApiError } from "./lib/api";
   import { ensureServerAnonId, recoverAnonId } from "./lib/session";
-  import { longVideoWarning, oversizeWarning } from "./lib/caps";
+  import { longVideoWarning, oversizeWarning, fetchLimits, DEFAULT_LIMITS, type Limits } from "./lib/caps";
   import { resolveUploadType, unsupportedTypeWarning } from "./lib/mime";
   import { OUTPUT_MODE_OPTIONS, SUBTITLE_DELIVERY_OPTIONS } from "./lib/modes";
   import { renderTurnstile, turnstileEnabled, type TurnstileHandle } from "./lib/turnstile";
@@ -33,8 +33,15 @@
   let subtitleLang = $state<SubtitleLang>("target");
   let subtitleDelivery = $state<SubtitleDelivery>("srt");
 
+  // Live display limits from GET /api/config (operator-tunable via CFG-GUARD); DEFAULT_LIMITS until the
+  // fetch resolves / if it fails, so the warnings work offline. The server's ffprobe gate is authoritative.
+  let limits = $state<Limits>(DEFAULT_LIMITS);
+
   let phase = $state<"idle" | "working" | "polling" | "done" | "failed">("idle");
   let statusText = $state("");
+  // Direct-to-R2 upload progress: `uploading` gates the bar to the PUT phase only; uploadPct is 0-100.
+  let uploading = $state(false);
+  let uploadPct = $state(0);
   let job = $state<JobView | null>(null);
   let errorMsg = $state("");
 
@@ -55,6 +62,8 @@
 
   onMount(() => {
     void initIdentity();
+    // Pull the live limits in parallel with the identity mint; a failure silently keeps DEFAULT_LIMITS.
+    void fetchLimits(API_BASE).then((l) => (limits = l));
     if (turnstileEnabled() && turnstileEl) {
       renderTurnstile(turnstileEl, onTurnstileToken, () => (turnstileToken = ""))
         .then((h) => {
@@ -112,10 +121,10 @@
     turnstileHandle?.reset(); // the token is single-use; force a fresh challenge for the next job
   }
 
-  const sizeWarn = $derived(file ? oversizeWarning(file.size) : null);
+  const sizeWarn = $derived(file ? oversizeWarning(file.size, limits) : null);
   const typeWarn = $derived(file ? unsupportedTypeWarning(file) : null);
   const durationWarn = $derived(
-    file && durationSec ? longVideoWarning(durationSec, outputMode, subtitleDelivery) : null,
+    file && durationSec ? longVideoWarning(durationSec, outputMode, subtitleDelivery, limits) : null,
   );
   const busy = $derived(phase === "working" || phase === "polling");
   // sizeWarn is ADVISORY only (the byte cap is runtime-configurable server-side via CFG-GUARD; a stale
@@ -183,9 +192,15 @@
     pollGen++;
     phase = "working";
     statusText = "上传中…";
+    uploadPct = 0;
     try {
       const sign = await api.signUpload(file.size, type);
-      await api.putSource(sign.put_url, file, type);
+      uploading = true;
+      await api.putSource(sign.put_url, file, type, (frac) => {
+        uploadPct = Math.round(frac * 100);
+        statusText = `上传中 ${uploadPct}%`;
+      });
+      uploading = false;
       // exactOptionalPropertyTypes: only attach advisory_duration_ms when we actually have a duration.
       const body: CreateJobBody = {
         upload_session_id: sign.upload_session_id,
@@ -210,6 +225,7 @@
       }
       await runCreate(body);
     } catch (e) {
+      uploading = false; // clear the progress bar on a failed upload/create
       resetTurnstile();
       fail(e);
     }
@@ -403,6 +419,18 @@
 
     {#if phase !== "idle"}
       <p class="status" aria-live="polite">{statusText}</p>
+    {/if}
+    {#if uploading}
+      <div
+        class="progress"
+        role="progressbar"
+        aria-label="上传进度"
+        aria-valuenow={uploadPct}
+        aria-valuemin="0"
+        aria-valuemax="100"
+      >
+        <div class="bar" style="width: {uploadPct}%"></div>
+      </div>
     {/if}
     {#if errorMsg}<p class="warn" role="alert">{errorMsg}</p>{/if}
 
@@ -605,6 +633,21 @@
     border-radius: 5px;
     padding: 8px 10px;
     margin: 0;
+  }
+
+  /* Upload progress — a thin track that fills left-to-right; shown only during the direct-to-R2 PUT. */
+  .progress {
+    height: 6px;
+    border-radius: 999px;
+    background: var(--line);
+    overflow: hidden;
+    margin: -6px 0 0;
+  }
+  .bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: inherit;
+    transition: width 0.15s ease;
   }
 
   .downloads {

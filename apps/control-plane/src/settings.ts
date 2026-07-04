@@ -451,6 +451,20 @@ export async function adminGetSettings(ctx: Ctx): Promise<Response> {
   });
 }
 
+// GET /api/config — the PUBLIC, non-sensitive runtime limits the SPA needs to render its pre-upload
+// warnings from SERVER TRUTH (not a compile-time mirror that silently drifts when an operator changes
+// them via CFG-GUARD). Deliberately a CURATED projection: ONLY the advertised display caps
+// (maxVideoDurationMs per mode + maxUploadBytes), never the ops-sensitive knobs (daily caps / TTLs /
+// queue backend / lease timing) or any secret. Reads ctx.config (the per-request KV snapshot) — a
+// public, possibly high-fanout endpoint must not hit D1 per call, and seconds of KV lag on a display
+// cap is harmless (the worker's ffprobe re-admission is the authoritative gate regardless).
+export function publicConfig(ctx: Ctx): Response {
+  return json({
+    maxVideoDurationMs: ctx.config.maxVideoDurationMs,
+    maxUploadBytes: ctx.config.maxUploadBytes,
+  });
+}
+
 // GET /internal/config[?version=N] — the worker's config read (worker-auth). Without ?version it
 // returns the live config (ctx.config, the per-request snapshot). With ?version it returns the config
 // that was in force at that settings_version, so a worker can re-admit a claimed job under the config
