@@ -382,6 +382,19 @@ export async function getSettingsAudit(ctx: Ctx): Promise<Response> {
   return json({ audit: await readSettingsAudit(ctx.env, key) });
 }
 
+// GET /internal/admin/settings — the admin console's read side (admin-auth). Returns the LIVE config
+// (ctx.config, already composed by the router) plus which keys are operator-tunable and which are
+// red-line-locked, so the UI renders each field editable or read-only from server truth (never a
+// client-side guess). The worker's own read is /internal/config (worker-auth); this is its admin twin
+// so the console never needs the worker bearer. Read-only: no write, no version bump, no audit row.
+export function adminGetSettings(ctx: Ctx): Response {
+  return json({
+    config: ctx.config,
+    mutableKeys: Object.keys(MUTABLE_SETTINGS).sort(),
+    redLineKeys: [...RED_LINE_KEYS],
+  });
+}
+
 // GET /internal/config[?version=N] — the worker's config read (worker-auth). Without ?version it
 // returns the live config (ctx.config, the per-request snapshot). With ?version it returns the config
 // that was in force at that settings_version, so a worker can re-admit a claimed job under the config

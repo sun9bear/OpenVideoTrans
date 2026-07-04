@@ -247,6 +247,39 @@ describe("admin route POST /internal/admin/settings (admin-auth, separate from w
     expect(bad.json.error.code).toBe("invalid_setting");
   });
 
+  it("GET /internal/admin/settings returns live config + mutable/red-line key lists (admin-auth)", async () => {
+    const { env } = makeEnv({ adminToken: ADMIN });
+    const { deps } = makeClock(T0);
+    // A prior change so the read reflects live D1 truth, not just defaults.
+    await call(env, deps, "POST", "/internal/admin/settings", {
+      admin: ADMIN,
+      body: { key: "maxUploadBytes", value: 200 * 1024 * 1024, reason: "tighten" },
+    });
+    const res = await call(env, deps, "GET", "/internal/admin/settings", { admin: ADMIN });
+    expect(res.status).toBe(200);
+    expect(res.json.config.maxUploadBytes).toBe(200 * 1024 * 1024);
+    expect(res.json.config.settingsVersion).toBe(DEFAULT_CONFIG.settingsVersion + 1);
+    // The UI drives editable-vs-locked off these server-truth lists.
+    expect(res.json.mutableKeys).toContain("maxUploadBytes");
+    expect(res.json.mutableKeys).toContain("maxVideoDurationMs");
+    expect(res.json.mutableKeys).not.toContain("aigc_enabled");
+    expect(res.json.redLineKeys).toContain("aigc_enabled");
+    expect(res.json.redLineKeys).toContain("allow_paid");
+  });
+
+  it("GET /internal/admin/settings rejects the worker bearer (401) and fails closed unconfigured (503)", async () => {
+    const { deps } = makeClock(T0);
+    const withWorker = makeEnv({ adminToken: ADMIN, internalToken: WORKER });
+    const rejected = await call(withWorker.env, deps, "GET", "/internal/admin/settings", {
+      worker: WORKER,
+    });
+    expect(rejected.status).toBe(401);
+    const unconfigured = makeEnv({ internalToken: WORKER }); // no ADMIN_TOKEN
+    const res = await call(unconfigured.env, deps, "GET", "/internal/admin/settings", { admin: ADMIN });
+    expect(res.status).toBe(503);
+    expect(res.json.error.code).toBe("admin_unconfigured");
+  });
+
   it("exposes the audit log over GET /internal/admin/settings/audit", async () => {
     const { env } = makeEnv({ adminToken: ADMIN });
     const { deps } = makeClock(T0);
