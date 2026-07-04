@@ -99,12 +99,12 @@ curl -sI -X OPTIONS "<presigned-put-url>" -H "Origin: https://openvideotrans.xyz
 验证 Worker：`curl -s https://openvideotrans.xyz/api/anon -X POST` 返回 `{"anon_id":"anon_….sig"}`；
 首页返回 SPA HTML；`/internal/config` 无 token 返回 401/403。
 
-### 4c. 后台管理台（`/admin.html`）
+### 4c. 后台管理台（`/admin`）
 运维配置 UI，随 SPA 一起部署（Vite 把 `apps/web/public/admin.html` 原样拷进 `dist/`，同源在
-`https://openvideotrans.xyz/admin.html`）。它驱动既有 CFG-GUARD 接口——**无独立后端**，只多一个只读
-读接口 `GET /internal/admin/settings`（admin 鉴权）。
+`https://openvideotrans.xyz/admin`——CF 静态资源会把 `/admin.html` 307 跳到无扩展名的 `/admin`，两者皆可）。
+它驱动既有 CFG-GUARD 接口——**无独立后端**，只多一个只读读接口 `GET /internal/admin/settings`（admin 鉴权）。
 
-- **登录**：浏览器打开 `/admin.html`，粘贴 `ADMIN_TOKEN`（§3 里 `wrangler secret put` 的那个值）。
+- **登录**：浏览器打开 `/admin`，粘贴 `ADMIN_TOKEN`（§3 里 `wrangler secret put` 的那个值）。
   Token 仅存本次浏览器会话的 sessionStorage：刷新页面仍在，关闭标签页或点「清除凭证」即失，不落盘。共用电脑请用完清除。`ADMIN_TOKEN` 未配置 → 页面报 503。
   可选填「操作者名」——经 `X-OVT-Actor` 记入改动审计的“谁”（多人共用一个 token 时用于区分；留空记为 `operator`）。
 - **可设置**：上传大小上限、三档时长 cap（纯字幕/配音/两者）、每日额度（全局/单用户/单 IP）、各类
