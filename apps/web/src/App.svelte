@@ -37,6 +37,10 @@
   // fetch resolves / if it fails, so the warnings work offline. The server's ffprobe gate is authoritative.
   let limits = $state<Limits>(DEFAULT_LIMITS);
 
+  // Per-mode cap in whole minutes for the option hints. Reads the LIVE limits so the hint tracks a
+  // CFG-GUARD change (reactive: called in the template, re-runs when `limits` updates).
+  const modeCapMin = (mode: OutputMode): number => Math.round(limits.durationCapSec[mode] / 60);
+
   let phase = $state<"idle" | "working" | "polling" | "done" | "failed">("idle");
   let statusText = $state("");
   // Direct-to-R2 upload progress: `uploading` gates the bar to the PUT phase only; uploadPct is 0-100.
@@ -359,7 +363,7 @@
         <label class="opt">
           <input type="radio" name="mode" value={opt.value} bind:group={outputMode} disabled={busy} />
           <span class="opt-main">{opt.label}</span>
-          <span class="opt-hint">{opt.hint}</span>
+          <span class="opt-hint">{opt.hint}，最长约 {modeCapMin(opt.value)} 分钟</span>
         </label>
       {/each}
     </fieldset>
