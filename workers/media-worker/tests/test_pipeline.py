@@ -653,7 +653,7 @@ def test_tts_reroute_clears_tts_scratch(tmp_path: Path) -> None:
 
 
 def test_429_reroutes_all_stages_sharing_the_exhausted_provider(tmp_path: Path) -> None:
-    # CodeX P2: a provider serving multiple stages (groq = asr + mt ladder head) that 429s is excluded
+    # CodeX P2: a provider serving multiple stages (groq = asr+mt head) that 429s is excluded
     # provider-WIDE — the not-yet-run stage planned on it is re-routed in the same catch, never
     # re-hit (the circuit-breaker state is per-provider, not per-kind). (groq is the shared head of
     # both AUTO_LADDER['asr'] and ['mt'] after the 2026-07-05 MT reorder that demoted cloudflare.)
