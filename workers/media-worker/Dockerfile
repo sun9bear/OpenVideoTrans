@@ -41,15 +41,19 @@ COPY packages/autodub-core ./packages/autodub-core
 COPY packages/provider-adapters ./packages/provider-adapters
 COPY workers/media-worker ./workers/media-worker
 
-# Locked install of the worker + its workspace deps; then the hosted-lane LOCAL providers
-# (faster_whisper ASR fallback + piper TTS) which provider-adapters keeps optional by design
-# (lazy `has_module()` imports — a bare library install stays light; the hosted image is the
-# deployment that actually runs them).
+# Locked install of the worker + its workspace deps; then the hosted-lane LOCAL/keyless providers
+# (faster_whisper ASR fallback + piper TTS + edge_tts) which provider-adapters keeps optional by
+# design (lazy `has_module()`/`has_binary()` imports — a bare library install stays light; the hosted
+# image is the deployment that actually runs them).
 # PINNED versions: piper-tts 1.2.0 still ships the `piper` console script the adapter shells out to
 # (tts.py) — 1.3.0 removed it and would break synthesis at runtime, not build. faster-whisper pinned
 # so the baked weights + the ctranslate2/onnxruntime stack are reproducible across rebuilds.
+# edge-tts (P2): the keyless `edge-tts` CLI the EdgeTTS adapter shells out to. It is the EXPERIMENTAL,
+# NON-COMMERCIAL lane (Microsoft read-aloud ToS; AD-6): installing it makes it AVAILABLE, but routing
+# never auto-selects it — COMMERCIAL_SAFE_TTS excludes it, so it is used ONLY when the user explicitly
+# pins an edge voice (the picker labels it 实验/非商用; the owner bears the ToS risk). No key/weights.
 RUN uv sync --frozen --no-dev --package media-worker \
-    && uv pip install "faster-whisper==1.0.3" "piper-tts==1.2.0"
+    && uv pip install "faster-whisper==1.0.3" "piper-tts==1.2.0" "edge-tts==7.2.8"
 
 # ---- Baked models -------------------------------------------------------------------------------
 # Multi-voice Piper (P1b): the picker offers M/F voices per locale, so the image bakes the full
