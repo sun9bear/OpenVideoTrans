@@ -20,12 +20,6 @@
       { "id": "de_DE-thorsten-medium", "gender": "male", "label": "Thorsten (DE)" },
       { "id": "de_DE-eva_k-x_low", "gender": "female", "label": "Eva K (DE)" }
     ],
-    "ja": [
-      { "id": "ja_JP-japanese-central-medium", "gender": "female", "label": "Japanese (central)" }
-    ],
-    "ko": [
-      { "id": "ko_KO-kss-medium", "gender": "female", "label": "KSS (KO)" }
-    ],
     "pt-BR": [
       { "id": "pt_BR-faber-medium", "gender": "male", "label": "Faber (BR)" },
       { "id": "pt_BR-edresson-low", "gender": "male", "label": "Edresson (BR)" }
