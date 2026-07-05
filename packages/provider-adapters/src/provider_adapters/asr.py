@@ -100,6 +100,48 @@ def _detected_to_iso(detected: str | None) -> str | None:
     return _WHISPER_NAME_TO_ISO.get(d)  # name -> code, or None for an unmapped language
 
 
+# Whisper (all sizes, esp. base) hallucinates high-frequency training-set boilerplate on non-speech
+# segments (applause / music / silence). For CJK-heavy training data this is often "subtitle credit"
+# text emitted even in a non-CJK recording; vad_filter does not catch it. So when the source
+# language is NOT CJK, a line that is predominantly CJK is a hallucination, not speech — drop it
+# before MT/TTS (deepl passes CJK through unchanged, so it would otherwise be both subtitled AND
+# dubbed). No-op when the source IS CJK (real) or undetermined.
+_CJK_SOURCE_LANGS = frozenset({"zh", "ja", "ko"})
+
+
+def _is_cjk_char(ch: str) -> bool:
+    return (
+        "一" <= ch <= "鿿"  # CJK unified ideographs
+        or "㐀" <= ch <= "䶿"  # CJK extension A
+        or "぀" <= ch <= "ヿ"  # hiragana + katakana
+        or "가" <= ch <= "힣"  # hangul syllables
+    )
+
+
+def _cjk_ratio(text: str) -> float:
+    """Fraction of non-whitespace characters that are CJK. 0.0 for empty/blank text."""
+    chars = [c for c in text if not c.isspace()]
+    if not chars:
+        return 0.0
+    return sum(1 for c in chars if _is_cjk_char(c)) / len(chars)
+
+
+def _drop_script_hallucinations(
+    lines: list[TranscriptLine], source_language: str | None
+) -> list[TranscriptLine]:
+    """Drop lines that are predominantly CJK when the source language is not CJK — a Whisper
+    hallucination on a non-speech segment. Returns the input unchanged (same object) when the source
+    is CJK or undetermined ('auto'/None) or when nothing is dropped; otherwise a re-indexed copy so
+    indices stay contiguous for the align/translate stages."""
+    base = (source_language or "").split("-")[0].lower()
+    if not base or base == "auto" or base in _CJK_SOURCE_LANGS:
+        return lines
+    kept = [line for line in lines if _cjk_ratio(line.source_text) < 0.5]
+    if len(kept) == len(lines):
+        return lines
+    return [line.model_copy(update={"index": i}) for i, line in enumerate(kept)]
+
+
 def _group_words_into_lines(
     words: list[Word], full_text: str, total_ms: int
 ) -> list[TranscriptLine]:
@@ -160,6 +202,9 @@ class FasterWhisperASR(ASRProvider):
         model = WhisperModel(model_size, device=device, compute_type=compute)
         segments, info = model.transcribe(
             audio_path, word_timestamps=True, language=_iso639(source_lang), vad_filter=True,
+            # Decode each segment independently: a hallucinated segment can't seed a run of further
+            # hallucinations in later segments (a known Whisper failure mode on non-speech).
+            condition_on_previous_text=False,
         )
         lines: list[TranscriptLine] = []
         for seg in segments:
@@ -175,9 +220,11 @@ class FasterWhisperASR(ASRProvider):
             )
         # Prefer the caller's hint (already a code) over the detected language, then
         # normalize the detected value; "auto" only when neither yields a usable code.
+        source_language = _iso639(source_lang) or _detected_to_iso(info.language) or "auto"
         return Transcript(
-            source_language=_iso639(source_lang) or _detected_to_iso(info.language) or "auto",
-            lines=lines, asr_provider="faster_whisper",
+            source_language=source_language,
+            lines=_drop_script_hallucinations(lines, source_language),
+            asr_provider="faster_whisper",
         )
 
 
@@ -298,9 +345,11 @@ class _OpenAICompatASR(ASRProvider):
         # Prefer the caller's hint over Whisper's detected NAME ("english"), normalizing
         # both to ISO-639-1 (CodeX): a raw name would break the default ASR->CloudflareMT
         # handoff. "auto" only when neither yields a usable code.
+        source_language = _iso639(source_lang) or _detected_to_iso(j.get("language")) or "auto"
         return Transcript(
-            source_language=_iso639(source_lang) or _detected_to_iso(j.get("language")) or "auto",
-            lines=lines, asr_provider=self.info.name,
+            source_language=source_language,
+            lines=_drop_script_hallucinations(lines, source_language),
+            asr_provider=self.info.name,
         )
 
 
@@ -369,8 +418,11 @@ class CloudflareASR(ASRProvider):
         words = chunker.chunked_words(self._run_one, audio_path, self.audio, work)
         total = words[-1].end_ms if words else 0
         lines = _group_words_into_lines(words, "", total)
+        source_language = source_lang or "auto"
         return Transcript(
-            source_language=source_lang or "auto", lines=lines, asr_provider="cloudflare"
+            source_language=source_language,
+            lines=_drop_script_hallucinations(lines, source_language),
+            asr_provider="cloudflare",
         )
 
     def _run_one(self, chunk_path: str, duration_hint_ms: int = 0) -> list[Word]:
