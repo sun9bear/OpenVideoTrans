@@ -99,6 +99,28 @@ def list_tts_voices(target_lang: str) -> list[dict]:
     return options
 
 
+def list_all_tts_voices() -> list[dict]:
+    """The FULL picker manifest across every catalog locale — what the worker publishes to the P1c
+    capability manifest at startup (POST /internal/providers/capabilities). For each BCP-47 locale
+    in voices.json, the installed ``list_tts_voices`` entries are tagged with ``target_lang``. Names
+    only (no secrets); the public GET /api/tts/voices then filters by locale + the circuit-breaker
+    snapshot. Empty when nothing is installed."""
+    catalog = _voice_catalog()
+    # Iterate ONLY provider sub-dicts (skip a top-level "_comment" string / non-dict entry — else
+    # iterating a str would splat its characters into `locales` as junk single-char target_langs).
+    locales = sorted({
+        loc
+        for per_provider in catalog.values()
+        if isinstance(per_provider, dict)
+        for loc in per_provider
+    })
+    out: list[dict] = []
+    for loc in locales:
+        for voice in list_tts_voices(loc):
+            out.append({**voice, "target_lang": loc})
+    return out
+
+
 # --------------------------------------------------------------------------- #
 class EdgeTTS(TTSProvider):
     info = ProviderInfo(

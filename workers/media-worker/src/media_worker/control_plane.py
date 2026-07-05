@@ -11,7 +11,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -182,6 +182,7 @@ class ControlPlane(Protocol):
     def report_provider_exhausted(
         self, provider: str, *, reset_at_ms: int, reason: str | None = None
     ) -> None: ...
+    def publish_capabilities(self, voices: Sequence[Mapping[str, Any]]) -> None: ...
 
 
 class HttpControlPlane:
@@ -336,3 +337,11 @@ class HttpControlPlane:
         if reason is not None:
             body["reason"] = reason
         self._call("POST", "/internal/providers/exhausted", body)
+
+    def publish_capabilities(self, voices: Sequence[Mapping[str, Any]]) -> None:
+        # P1c: publish this box's installed TTS voice manifest (list_all_tts_voices — NAMES only, no
+        # secrets) so the public picker (GET /api/tts/voices) can offer them. The control plane
+        # validates each provider is FREE (a paid name rejected — red line §1). Fire-and-forget at
+        # startup; the caller swallows failures so a publish blip never blocks the claim loop.
+        body = {"voices": [dict(v) for v in voices]}
+        self._call("POST", "/internal/providers/capabilities", body)

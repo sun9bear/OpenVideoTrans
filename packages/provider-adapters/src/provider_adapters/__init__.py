@@ -59,7 +59,13 @@ from .supply_chain import (
     verify_piper_voices_dir,
     verify_sha256,
 )
-from .tts import list_tts_voices, piper_model_covers, piper_model_language, tts_preset_voices
+from .tts import (
+    list_all_tts_voices,
+    list_tts_voices,
+    piper_model_covers,
+    piper_model_language,
+    tts_preset_voices,
+)
 
 # Registering all adapters populates the kind→name→factory registry that select()
 # walks; REGISTRY is then flattened from it (name→ProviderInfo).
@@ -99,6 +105,7 @@ __all__ = [
     "is_paid_provider",
     "route_free",
     "license_for",
+    "list_all_tts_voices",
     "list_providers",
     "list_tts_voices",
     "piper_model_covers",

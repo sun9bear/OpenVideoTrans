@@ -7,6 +7,7 @@ import migration0004 from "../../migrations/0004_provider_quota.sql?raw";
 import migration0005 from "../../migrations/0005_progress_meta.sql?raw";
 import migration0006 from "../../migrations/0006_daily_counters.sql?raw";
 import migration0007 from "../../migrations/0007_takedown.sql?raw";
+import migration0008 from "../../migrations/0008_provider_capabilities.sql?raw";
 
 // Apply EVERY migration in filename order (not just 0001), so the harness matches a real D1 that has
 // run `wrangler d1 migrations apply` over the full migrations/ dir — including additive forward
@@ -20,6 +21,7 @@ const migrationSqls = [
   migration0005,
   migration0006,
   migration0007,
+  migration0008,
 ];
 
 // A better-sqlite3-backed stand-in for D1. D1 IS SQLite with a single primary, so the real CLAIM_SQL

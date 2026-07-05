@@ -7,8 +7,9 @@ heartbeat / cleanup be exercised with no live control plane or R2.
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from media_worker.config import WorkerConfig
 from media_worker.control_plane import (
@@ -107,6 +108,8 @@ class FakeControlPlane:
         self.telemetry: list[ProgressTelemetry | None] = []
         self.completed: list[tuple[str, int, dict[str, str]]] = []
         self.failed: list[tuple[str, int, str, str | None]] = []
+        # P1c: each publish_capabilities call's voice manifest, recorded for assertions.
+        self.published_capabilities: list[list[dict[str, Any]]] = []
 
     def get_config(self) -> WorkerConfig:
         if self._config_error:
@@ -172,6 +175,11 @@ class FakeControlPlane:
             raise ControlPlaneError(f"transient error reporting {provider} exhausted")
         with self._lock:
             self.exhausted_reports.append((provider, reset_at_ms, reason))
+
+    def publish_capabilities(self, voices: Sequence[Mapping[str, Any]]) -> None:
+        # P1c: record the published TTS voice manifest for assertions (startup fire-and-forget).
+        with self._lock:
+            self.published_capabilities.append([dict(v) for v in voices])
 
     @property
     def heartbeat_count(self) -> int:

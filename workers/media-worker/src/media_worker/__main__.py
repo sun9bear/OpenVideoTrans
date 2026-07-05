@@ -23,6 +23,8 @@ import signal
 import threading
 from pathlib import Path
 
+from provider_adapters import list_all_tts_voices
+
 from .control_plane import HttpControlPlane
 from .pipeline import inject_provider_env
 from .storage import S3Storage
@@ -62,6 +64,17 @@ def main() -> int:
         "pulled worker credentials: storage configured; free providers: %s",
         ", ".join(configured) or "(none)",
     )
+    # P1c: publish this box's installed TTS voice manifest (names only) so the public picker
+    # (GET /api/tts/voices) can offer the voices actually baked/installed here. BEST-EFFORT +
+    # fire-and-forget: a publish failure must NOT block the worker from claiming jobs (the picker
+    # simply shows nothing for this box until the next successful publish). Runs AFTER
+    # inject_provider_env so edge/cloudflare availability reflects the pulled keys.
+    try:
+        voices = list_all_tts_voices()
+        cp.publish_capabilities(voices)
+        logger.info("published %d TTS voice(s) to control plane", len(voices))
+    except Exception:  # noqa: BLE001 — non-fatal; never strand the claim loop on a publish blip
+        logger.warning("failed to publish TTS capabilities (non-fatal)", exc_info=True)
     # Graceful drain on `docker stop` / compose restart: SIGTERM sets the stop_event so run_forever
     # stops CLAIMING new work and lets in-flight jobs finish (up to the platform's stop grace
     # period), instead of being killed mid-job and relying on the lease sweeper to reclaim. SIGINT
