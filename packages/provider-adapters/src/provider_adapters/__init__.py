@@ -36,6 +36,7 @@ from .circuit import (
     configured_free_providers,
     route_free,
 )
+from .diarize import SherpaOnnxDiarizer, build_diarizer
 from .ladder import AUTO_LADDER, PAID_PROVIDERS, is_paid_provider
 from .languages import (
     CAPABILITIES,
@@ -93,8 +94,10 @@ __all__ = [
     "ProviderUnavailable",
     "QuotaExhausted",
     "Resolver",
+    "SherpaOnnxDiarizer",
     "SupplyChainError",
     "assert_default_image_allowed",
+    "build_diarizer",
     "assert_language_pair",
     "configured_free_providers",
     "deepl_target_code",
