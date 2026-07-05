@@ -11,6 +11,9 @@ export interface JobView {
   output_mode: OutputMode;
   error_code: string | null;
   artifacts: { video_key?: string | null; srt_key?: string | null };
+  // The server returns the full job (minus error_detail); the UI reads plan.voice_substituted to note
+  // when a pinned dub voice was unavailable and the worker fell back to another (soft-pin, PR #85).
+  plan?: { tts?: string | null; tts_voice?: string | null; voice_substituted?: boolean };
 }
 
 export interface CreateJobBody {
@@ -21,6 +24,12 @@ export interface CreateJobBody {
   subtitle_lang: SubtitleLang;
   source_lang_hint?: string;
   advisory_duration_ms?: number;
+  // P1d dub-voice pin (soft-pin, PR #85/#86): the user's explicit engine + voice. Sent as a PAIR only
+  // (both or neither — the server 400s a half-pin) and only for a dub output_mode. Omitted = "auto"
+  // (the server picks a commercial-safe voice). An edge_tts pin is an explicit user choice (never
+  // auto-routed — red line §1); the server still rejects a paid provider 403.
+  tts_provider?: string;
+  tts_voice?: string;
   // Cloudflare Turnstile token for the T2.4 abuse gate. Required by the server (admitJob) only when
   // TURNSTILE_SECRET_KEY is configured; omitted when the gate is inert (dev / self-host without it).
   turnstile_token?: string;

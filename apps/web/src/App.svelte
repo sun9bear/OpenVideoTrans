@@ -8,6 +8,7 @@
   import { renderTurnstile, turnstileEnabled, type TurnstileHandle } from "./lib/turnstile";
   import { ABUSE_CONTACT, COPY, LEGAL } from "./lib/copy";
   import type { CreateJobBody, JobView, OutputMode, SubtitleDelivery, SubtitleLang } from "./lib/types";
+  import { fetchTtsVoices, genderTag, providerLabel, providersOf, type TtsVoice } from "./lib/voices";
 
   // SAME-ORIGIN by default (""): the Worker serves both this SPA and /api, so the X-OVT-Anon-Id +
   // JSON requests are not cross-origin and need no CORS. Setting VITE_API_BASE to a DIFFERENT origin
@@ -32,6 +33,13 @@
   let targetLang = $state("zh-Hans");
   let subtitleLang = $state<SubtitleLang>("target");
   let subtitleDelivery = $state<SubtitleDelivery>("srt");
+
+  // P1d dub-voice picker: the manifest for the current target language (P1c GET /api/tts/voices) +
+  // the user's explicit engine/voice pin ("" = auto → the server picks a commercial-safe voice).
+  let voices = $state<TtsVoice[]>([]);
+  let ttsProvider = $state("");
+  let ttsVoice = $state("");
+  let voicesGen = 0; // race guard: drop a slow fetch for a superseded target language
 
   // Live display limits from GET /api/config (operator-tunable via CFG-GUARD); DEFAULT_LIMITS until the
   // fetch resolves / if it fails, so the warnings work offline. The server's ffprobe gate is authoritative.
@@ -142,6 +150,37 @@
   // blocked rather than silently no-oping inside submit().
   const canSubmit = $derived(!!api && !!file && !typeWarn && !busy && !turnstileBroken);
 
+  // P1d dub-voice picker derivations. isDub gates the whole picker (a voice pin is only valid for a
+  // dub output_mode). engineProviders/providerVoices drive the two-level select.
+  const isDub = $derived(outputMode === "dub_only" || outputMode === "both");
+  const engineProviders = $derived(providersOf(voices));
+  const providerVoices = $derived(ttsProvider ? voices.filter((v) => v.provider === ttsProvider) : []);
+
+  // Load the dub-voice manifest whenever a dub mode is active + the target language changes. Resets
+  // the pin (a voice from another locale must not carry over) and is race-guarded (a slow fetch for a
+  // superseded language is dropped). Robust: an error yields [] → the picker offers only "auto".
+  $effect(() => {
+    if (!isDub) {
+      voices = [];
+      ttsProvider = "";
+      ttsVoice = "";
+      return;
+    }
+    const lang = targetLang;
+    const gen = ++voicesGen;
+    ttsProvider = "";
+    ttsVoice = "";
+    void fetchTtsVoices(API_BASE, lang).then((vs) => {
+      if (gen === voicesGen) voices = vs;
+    });
+  });
+
+  // Pairing invariant: a specific engine must carry a specific voice (the server 400s a half-pin), so
+  // default to the engine's first voice; "auto" (empty) clears the pin.
+  function onEngineChange() {
+    ttsVoice = ttsProvider ? (voices.find((v) => v.provider === ttsProvider)?.voice_id ?? "") : "";
+  }
+
   // If the widget breaks WHILE a submission is parked waiting for a token, fail it rather than leaving
   // the form stuck in `working` forever (R4-A). The upload is already spent; the user can reload/retry.
   $effect(() => {
@@ -214,6 +253,12 @@
         subtitle_lang: subtitleLang,
       };
       if (durationSec) body.advisory_duration_ms = Math.round(durationSec * 1000);
+      // P1d: attach the dub-voice pin ONLY as a complete pair for a dub mode (the server 400s a
+      // half-pin or a pin on subtitle_only). "auto" (empty) sends neither → the server picks.
+      if (isDub && ttsProvider && ttsVoice) {
+        body.tts_provider = ttsProvider;
+        body.tts_voice = ttsVoice;
+      }
       // The upload is done. If the gate is on but the widget is broken, no token can ever arrive — fail
       // now (don't park forever). Otherwise, if we don't hold a fresh token (never solved, or it expired
       // during a slow upload), park the job; the widget callback resumes it via runCreate.
@@ -405,6 +450,31 @@
       </label>
     </div>
 
+    {#if isDub}
+      <label class="field">
+        <span class="label">配音引擎</span>
+        <select class="control" bind:value={ttsProvider} onchange={onEngineChange} disabled={busy}>
+          <option value="">自动（推荐 · 系统选择）</option>
+          {#each engineProviders as p (p)}
+            <option value={p}>{providerLabel(p)}</option>
+          {/each}
+        </select>
+      </label>
+      {#if ttsProvider}
+        <label class="field">
+          <span class="label">音色</span>
+          <select class="control" bind:value={ttsVoice} disabled={busy}>
+            {#each providerVoices as v (v.voice_id)}
+              <option value={v.voice_id}>{v.label}{genderTag(v.gender)}</option>
+            {/each}
+          </select>
+        </label>
+        {#if ttsProvider === "edge_tts"}
+          <small class="hint">该引擎为实验性、非商用（微软 Edge 朗读服务），建议仅用于个人 / 测试用途。</small>
+        {/if}
+      {/if}
+    {/if}
+
     {#if durationWarn}<p class="warn" role="alert">{durationWarn}</p>{/if}
 
     {#if turnstileEnabled()}
@@ -449,6 +519,9 @@
     {#if phase === "done" && job}
       <div class="downloads">
         <p class="done-note">处理完成（成片与源文件 24 小时后自动删除，请尽快下载）：</p>
+        {#if job.plan?.voice_substituted}
+          <p class="warn" role="alert">所选配音音色暂不可用，已自动改用其他可用音色。</p>
+        {/if}
         {#if job.artifacts.srt_key}
           <button class="btn-ghost" onclick={() => downloadArtifact("srt")}>下载字幕（SRT）</button>
         {/if}
