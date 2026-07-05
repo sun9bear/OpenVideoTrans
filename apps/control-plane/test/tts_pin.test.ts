@@ -139,4 +139,49 @@ describe("POST /api/jobs — dub-voice pin intake (P0-wiring)", () => {
     expect(r.status).toBe(400);
     expect(r.json.error.code).toBe("invalid_field");
   });
+
+  it("rejects an empty / whitespace tts_voice with 400 (clean error, not a downstream fail-closed)", async () => {
+    const { env } = makeEnv({ r2Creds: true });
+    const { deps } = makeClock(1_000_000);
+    const s = await sign(env, deps);
+    const r = await call(env, deps, "POST", "/api/jobs", {
+      actor: "u1",
+      body: { upload_session_id: s.upload_session_id, ...DUB, tts_provider: "piper", tts_voice: "  " },
+    });
+    expect(r.status).toBe(400);
+    expect(r.json.error.code).toBe("invalid_field");
+  });
+
+  it("rejects a non-string tts_provider / tts_voice with 400 (optString type guard)", async () => {
+    const { env } = makeEnv({ r2Creds: true });
+    const { deps } = makeClock(1_000_000);
+    const s = await sign(env, deps);
+    const r = await call(env, deps, "POST", "/api/jobs", {
+      actor: "u1",
+      body: { upload_session_id: s.upload_session_id, ...DUB, tts_provider: 123, tts_voice: "v" },
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("accepts a pin on an output_mode=both job (dub path)", async () => {
+    const { env, r2 } = makeEnv({ r2Creds: true });
+    const { deps } = makeClock(1_000_000);
+    const s = await sign(env, deps);
+    r2.putSized(s.source_key, 2048);
+    const r = await call(env, deps, "POST", "/api/jobs", {
+      actor: "u1",
+      body: {
+        upload_session_id: s.upload_session_id,
+        target_lang: "zh-Hans",
+        output_mode: "both",
+        subtitle_delivery: "srt",
+        subtitle_lang: "target",
+        tts_provider: "piper",
+        tts_voice: "/models/zh.onnx",
+      },
+    });
+    expect(r.status).toBe(201);
+    expect(r.json.job.plan.tts).toBe("piper");
+    expect(r.json.job.plan.tts_voice).toBe("/models/zh.onnx");
+  });
 });

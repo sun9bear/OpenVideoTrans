@@ -175,6 +175,9 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   if ((ttsProvider === undefined) !== (ttsVoice === undefined)) {
     throw new HttpError(400, "invalid_field", "tts_provider and tts_voice must be provided together");
   }
+  if (ttsVoice !== undefined && ttsVoice.trim() === "") {
+    throw new HttpError(400, "invalid_field", "tts_voice must not be empty");
+  }
   if (ttsProvider !== undefined) {
     if (outputMode === "subtitle_only") {
       throw new HttpError(400, "invalid_field", "a dub voice pin requires a dub output mode");
