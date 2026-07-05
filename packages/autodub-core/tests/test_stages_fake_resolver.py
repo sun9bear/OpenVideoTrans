@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from autodub_core import JobPaths, stages
 from autodub_core.jsonio import read_json, write_json
-from autodub_core.providers import ProviderUnavailable
+from autodub_core.providers import ProviderInfo, ProviderUnavailable
 from ovt_schemas.contracts import Transcript, TranscriptLine, TranslationResult
 
 
@@ -544,7 +544,10 @@ def test_tts_force_clears_stale_raw_variant(tmp_path: Path) -> None:
 
 # ── P4: diarize stage (relabel speaker_ids from a diarizer's turns) ───────────────────────────────
 class _FakeDiarizer:
-    info = _Info("fake_diar")
+    # Annotated ProviderInfo (not _Info): diarize() takes it DIRECTLY as a DiarizerProvider (the
+    # asr/mt/tts fakes instead reach the kernel via FakeResolver.select), so the mutable `info`
+    # attribute must be invariantly ProviderInfo for the protocol check, not the _Info class.
+    info: ProviderInfo = _Info("fake_diar")
 
     def __init__(self, turns: list[tuple[int, int, str]]) -> None:
         self._turns = turns
