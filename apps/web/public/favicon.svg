@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-48 -48 96 96" width="32" height="32" role="img" aria-label="OpenVideoTrans">
+  <!-- Concept ①: a speech-bubble tile (rounded, with one sharp bottom-left "tail" corner) carrying a
+       play triangle. Favicon variant is self-contained — opaque teal tile + white knockout triangle —
+       so it stays crisp at 16px on any browser-tab background (the in-page mark uses a page-bg knockout). -->
+  <path fill="#14b8a6" d="M-22 -40 H22 A18 18 0 0 1 40 -22 V22 A18 18 0 0 1 22 40 H-40 V-22 A18 18 0 0 1 -22 -40 Z"/>
+  <path fill="#ffffff" d="M-10 -20 V20 L18 0 Z"/>
+</svg>
