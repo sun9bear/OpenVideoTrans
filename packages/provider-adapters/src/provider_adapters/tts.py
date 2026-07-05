@@ -202,10 +202,52 @@ def piper_model_language() -> str | None:
     return lang if lang.isalpha() and 2 <= len(lang) <= 3 else None
 
 
+def _piper_voices_dir() -> str | None:
+    """The multi-voice Piper models directory (``FVD_PIPER_VOICES_DIR``), or None for the legacy
+    single-model deployment. When set to a real dir, PiperTTS serves EVERY installed catalog voice
+    (P1: multiple M/F models per locale) instead of the one ``FVD_PIPER_MODEL``.
+
+    P1b-bake BLOCKER (supply-chain, T1.3g): admission.py / doctor.py enforce the sha256 pin
+    (verify_piper_model) by reading ONLY ``FVD_PIPER_MODEL`` — unset in multi-voice mode, so the
+    integrity gate NO-OPS for the dir's models. Nothing sets this env yet (inert), but P1b-bake MUST
+    together (a) add sha256 pins for the baked M/F models and (b) make admission/doctor verify EACH
+    installed ``<VOICES_DIR>/*.onnx`` (fail-closed) before setting ``FVD_PIPER_VOICES_DIR``."""
+    voices_dir = env("FVD_PIPER_VOICES_DIR")
+    return voices_dir if voices_dir and Path(voices_dir).is_dir() else None
+
+
+def _piper_installed(lang: str) -> list[str]:
+    """Catalog Piper voice basenames covering ``lang`` whose ``<VOICES_DIR>/<basename>.onnx`` is
+    actually installed on this box. Empty when there is no voices dir or none is installed — a
+    availability is a FILE fact, so routing / the picker only ever offer an installed one."""
+    voices_dir = _piper_voices_dir()
+    if voices_dir is None:
+        return []
+    return [vid for vid in _preset_ids("piper", lang)
+            if Path(voices_dir, f"{vid}.onnx").is_file()]
+
+
+def _resolve_piper_model(voice_id: str) -> str:
+    """Map a pinned voice id to a model path: in multi-voice mode a bare basename resolves to
+    ``<VOICES_DIR>/<basename>.onnx``; otherwise the id is already a full model path (legacy
+    ``FVD_PIPER_MODEL``). A basename with a path separator is never joined (defense-in-depth)."""
+    voices_dir = _piper_voices_dir()
+    if voices_dir is not None and "/" not in voice_id and "\\" not in voice_id:
+        candidate = Path(voices_dir, f"{voice_id}.onnx")
+        if candidate.is_file():
+            return str(candidate)
+    return voice_id
+
+
 def piper_model_covers(lang: str) -> bool:
-    """Whether the installed Piper model can serve ``lang`` (base-subtag match). True when the
-    model's language is undeterminable (operator-trusted, non-standard name) — we never *block* a
-    model we can't classify, only one we can prove is the wrong language."""
+    """Whether Piper can serve ``lang`` on this box.
+
+    Multi-voice (``FVD_PIPER_VOICES_DIR`` set): covered iff ≥1 installed catalog voice covers the
+    locale. Legacy single-model: base-subtag match against the one model's language; True when the
+    language is undeterminable (operator-trusted, non-standard name) — we never *block* a model we
+    can't classify, only one we can prove is the wrong language."""
+    if _piper_voices_dir() is not None:
+        return bool(_piper_installed(lang))
     model_lang = piper_model_language()
     if model_lang is None:
         return True
@@ -215,25 +257,39 @@ def piper_model_covers(lang: str) -> bool:
 class PiperTTS(TTSProvider):
     info = ProviderInfo(
         "piper", "tts", paid=False,
-        requires="piper binary + a .onnx voice model (FVD_PIPER_MODEL)",
+        requires="piper binary + a .onnx voice (FVD_PIPER_MODEL or FVD_PIPER_VOICES_DIR)",
         languages="35+ (per downloaded model)", notes="fully local/offline",
     )
     ext = "wav"
 
     def available(self) -> bool:
-        # Require BOTH the binary AND an existing model file: a stale/missing FVD_PIPER_MODEL
-        # path must report unavailable so the ladder falls through to cloudflare/edge_tts
-        # instead of selecting Piper and failing later in synthesize() (CodeX).
+        # Require the binary AND ≥1 installed model — a stale/missing config must report unavailable
+        # so the ladder falls through instead of selecting Piper and failing later in synthesize()
+        # (CodeX). Multi: any *.onnx in FVD_PIPER_VOICES_DIR; legacy: the FVD_PIPER_MODEL file.
+        if not has_binary("piper"):
+            return False
+        voices_dir = _piper_voices_dir()
+        if voices_dir is not None:
+            return any(Path(voices_dir).glob("*.onnx"))
         model = env("FVD_PIPER_MODEL")
-        return has_binary("piper") and model is not None and Path(model).is_file()
+        return model is not None and Path(model).is_file()
 
     def voices_for(self, lang: str) -> list[str]:
         self._ensure_available()
-        # Piper has ONE configured model and voices_for used to ignore `lang` — so a `de` job on an
-        # `en_US` model would synthesize German text with the English voice (a silent broken
-        # artifact). Fail closed on a language the model can't serve, mirroring CloudflareTTS's
-        # per-language gate. Routing also drops piper for an uncovered locale; this is the adapter
-        # boundary's defense-in-depth (@CodeX bot M2-CLOSE).
+        # Multi-voice: return EVERY installed catalog voice covering the locale (the P1 picker's
+        # M/F choices). Availability is a file fact, so an uninstalled entry is never offered.
+        voices_dir = _piper_voices_dir()
+        if voices_dir is not None:
+            installed = _piper_installed(lang)
+            if not installed:
+                raise ProviderUnavailable(
+                    f"no installed Piper voice covers {lang!r} in FVD_PIPER_VOICES_DIR "
+                    f"({voices_dir!r}); use another provider or bake a {lang!r} voice."
+                )
+            return installed
+        # Legacy single-model: piper has ONE configured model; fail closed on a language it can't
+        # serve — a `de` job on an `en_US` model would silently synthesize German with an English
+        # voice. Mirrors CloudflareTTS's per-language gate + routing defense-in-depth (@CodeX bot).
         if not piper_model_covers(lang):
             raise ProviderUnavailable(
                 f"the installed Piper model (language {piper_model_language()!r}) does not cover "
@@ -244,8 +300,9 @@ class PiperTTS(TTSProvider):
 
     def synthesize(self, text: str, voice_id: str, lang: str, out_path: str) -> str:
         out = str(Path(out_path).with_suffix(".wav"))
+        model = _resolve_piper_model(voice_id)  # basename -> <VOICES_DIR>/<name>.onnx, or a path
         proc = subprocess.run(
-            ["piper", "--model", voice_id, "--output_file", out],
+            ["piper", "--model", model, "--output_file", out],
             input=text, capture_output=True, text=True,
         )
         if proc.returncode != 0 or not Path(out).exists():
