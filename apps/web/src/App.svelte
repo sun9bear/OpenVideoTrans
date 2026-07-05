@@ -345,7 +345,15 @@
 
 <main class="wrap">
   <header class="masthead">
-    <h1>OpenVideoTrans</h1>
+    <div class="brand">
+      <svg class="mark" viewBox="-48 -48 96 96" aria-hidden="true" focusable="false">
+        <!-- Concept ① mark: a rounded speech-bubble tile with one sharp bottom-left "tail" corner and a
+             play triangle. evenodd carves the triangle out as a knockout, so the page background shows
+             through it — the same mark as favicon.svg, minus that file's opaque white triangle fill. -->
+        <path fill-rule="evenodd" d="M-22 -40 H22 A18 18 0 0 1 40 -22 V22 A18 18 0 0 1 22 40 H-40 V-22 A18 18 0 0 1 -22 -40 Z M-10 -20 V20 L18 0 Z" />
+      </svg>
+      <h1>OpenVideoTrans</h1>
+    </div>
     <p class="tagline">{COPY.tagline}</p>
   </header>
 
@@ -482,9 +490,22 @@
     padding: 56px 20px 72px;
   }
 
-  /* Masthead — monospace wordmark for a CLI/tool character; no logo, no ornament. */
+  /* Masthead — teal logo mark + monospace wordmark in a horizontal lockup (CLI/tool character). */
   .masthead {
     margin-bottom: 26px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+  }
+  /* Logo mark: fills with the brand teal (--accent); the play triangle is a page-bg knockout (evenodd
+     in the path), so it reads cleanly on both the light paper and the dark surface. */
+  .mark {
+    width: 30px;
+    height: 30px;
+    flex: none;
+    fill: var(--accent);
   }
   h1 {
     font-family: var(--mono);
