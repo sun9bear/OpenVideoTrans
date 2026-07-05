@@ -25,9 +25,11 @@ from .base import (
     _build,
     has_binary,
     has_module,
+    probe,
     raise_quota_if_429,
     register,
 )
+from .languages import COMMERCIAL_SAFE_TTS
 
 _VOICES_PATH = Path(__file__).resolve().parent / "assets" / "voices.json"
 
@@ -59,6 +61,42 @@ def tts_preset_voices(provider: str, lang: str) -> list[str]:
         return list(engine.voices_for(lang)) if isinstance(engine, TTSProvider) else []
     except Exception:  # noqa: BLE001 - unknown/unavailable/uncovered -> empty (pin fails closed)
         return []
+
+
+def _voice_meta(catalog: dict, provider: str, lang: str, voice_id: str) -> dict | None:
+    per_provider = catalog.get(provider, {})
+    entries = per_provider.get(lang) or per_provider.get(lang.split("-")[0])
+    for entry in entries or []:
+        if entry.get("id") == voice_id:
+            return entry
+    return None
+
+
+def list_tts_voices(target_lang: str) -> list[dict]:
+    """Rich, picker-facing dub-voice options AVAILABLE for ``target_lang`` on THIS box. For each
+    installed, non-paid TTS provider, its closed preset voices (``tts_preset_voices``) are annotated
+    with catalog metadata (gender + human label from voices.json) plus flags:
+      * ``commercial_safe`` — a default-dub-safe engine (piper / cloudflare);
+      * ``experimental``    — edge_tts (non-commercial lane; user-explicit pick only, never auto).
+    The capability manifest publishes this and the picker renders it — never a static list
+    (each deployment's voices differ). A voice with no catalog entry still appears with
+    gender 'unknown' + its id as the label, so an installed voice is never silently dropped."""
+    catalog = _voice_catalog()
+    options: list[dict] = []
+    for name, avail, info in probe("tts"):
+        if not avail or info.paid:
+            continue
+        for voice_id in tts_preset_voices(name, target_lang):
+            meta = _voice_meta(catalog, name, target_lang, voice_id) or {}
+            options.append({
+                "provider": name,
+                "voice_id": voice_id,
+                "gender": meta.get("gender", "unknown"),
+                "label": meta.get("label", voice_id),
+                "commercial_safe": name in COMMERCIAL_SAFE_TTS,
+                "experimental": name == "edge_tts",
+            })
+    return options
 
 
 # --------------------------------------------------------------------------- #

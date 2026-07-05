@@ -1,0 +1,92 @@
+{
+  "_comment": "Preset dub-voice catalog (P1). Per provider -> per BCP-47 locale -> [{id, gender, label}]. `id` is the EXACT voice id the adapter's synthesize() consumes: piper = rhasspy model basename (baked in P1b); cloudflare = the MeloTTS lang code (en/es/fr/zh/jp/kr); edge_tts = the Azure neural voice name. gender in {male, female, unknown}. This is metadata only — availability is decided at runtime by each adapter's voices_for() (a voice here that is not installed is simply not offered). Kept in lock-step with languages.CAPABILITIES tts_models + the Dockerfile baked set.",
+  "piper": {
+    "en": [
+      { "id": "en_US-ryan-medium", "gender": "male", "label": "Ryan (US)" },
+      { "id": "en_US-amy-medium", "gender": "female", "label": "Amy (US)" }
+    ],
+    "zh-Hans": [
+      { "id": "zh_CN-huayan-medium", "gender": "female", "label": "Huayan 华严" }
+    ],
+    "es": [
+      { "id": "es_ES-davefx-medium", "gender": "male", "label": "Davefx (ES)" },
+      { "id": "es_ES-sharvard-medium", "gender": "female", "label": "Sharvard (ES)" }
+    ],
+    "fr": [
+      { "id": "fr_FR-gilles-low", "gender": "male", "label": "Gilles (FR)" },
+      { "id": "fr_FR-siwis-medium", "gender": "female", "label": "Siwis (FR)" }
+    ],
+    "de": [
+      { "id": "de_DE-thorsten-medium", "gender": "male", "label": "Thorsten (DE)" },
+      { "id": "de_DE-eva_k-x_low", "gender": "female", "label": "Eva K (DE)" }
+    ],
+    "ja": [
+      { "id": "ja_JP-japanese-central-medium", "gender": "female", "label": "Japanese (central)" }
+    ],
+    "ko": [
+      { "id": "ko_KO-kss-medium", "gender": "female", "label": "KSS (KO)" }
+    ],
+    "pt-BR": [
+      { "id": "pt_BR-faber-medium", "gender": "male", "label": "Faber (BR)" },
+      { "id": "pt_BR-edresson-low", "gender": "male", "label": "Edresson (BR)" }
+    ],
+    "ru": [
+      { "id": "ru_RU-dmitri-medium", "gender": "male", "label": "Dmitri (RU)" },
+      { "id": "ru_RU-irina-medium", "gender": "female", "label": "Irina (RU)" }
+    ],
+    "it": [
+      { "id": "it_IT-paola-medium", "gender": "female", "label": "Paola (IT)" }
+    ]
+  },
+  "cloudflare": {
+    "en": [{ "id": "en", "gender": "unknown", "label": "MeloTTS (EN)" }],
+    "es": [{ "id": "es", "gender": "unknown", "label": "MeloTTS (ES)" }],
+    "fr": [{ "id": "fr", "gender": "unknown", "label": "MeloTTS (FR)" }],
+    "zh-Hans": [{ "id": "zh", "gender": "unknown", "label": "MeloTTS (ZH)" }],
+    "ja": [{ "id": "jp", "gender": "unknown", "label": "MeloTTS (JA)" }],
+    "ko": [{ "id": "kr", "gender": "unknown", "label": "MeloTTS (KO)" }]
+  },
+  "edge_tts": {
+    "en": [
+      { "id": "en-US-GuyNeural", "gender": "male", "label": "Guy (US)" },
+      { "id": "en-US-AriaNeural", "gender": "female", "label": "Aria (US)" }
+    ],
+    "zh-Hans": [
+      { "id": "zh-CN-YunxiNeural", "gender": "male", "label": "云希 Yunxi (男)" },
+      { "id": "zh-CN-YunyangNeural", "gender": "male", "label": "云扬 Yunyang (男)" },
+      { "id": "zh-CN-XiaoxiaoNeural", "gender": "female", "label": "晓晓 Xiaoxiao (女)" }
+    ],
+    "es": [
+      { "id": "es-ES-AlvaroNeural", "gender": "male", "label": "Álvaro (ES)" },
+      { "id": "es-ES-ElviraNeural", "gender": "female", "label": "Elvira (ES)" }
+    ],
+    "fr": [
+      { "id": "fr-FR-HenriNeural", "gender": "male", "label": "Henri (FR)" },
+      { "id": "fr-FR-DeniseNeural", "gender": "female", "label": "Denise (FR)" }
+    ],
+    "de": [
+      { "id": "de-DE-ConradNeural", "gender": "male", "label": "Conrad (DE)" },
+      { "id": "de-DE-KatjaNeural", "gender": "female", "label": "Katja (DE)" }
+    ],
+    "ja": [
+      { "id": "ja-JP-KeitaNeural", "gender": "male", "label": "Keita (JA)" },
+      { "id": "ja-JP-NanamiNeural", "gender": "female", "label": "Nanami (JA)" }
+    ],
+    "ko": [
+      { "id": "ko-KR-InJoonNeural", "gender": "male", "label": "InJoon (KO)" },
+      { "id": "ko-KR-SunHiNeural", "gender": "female", "label": "SunHi (KO)" }
+    ],
+    "pt-BR": [
+      { "id": "pt-BR-AntonioNeural", "gender": "male", "label": "Antônio (BR)" },
+      { "id": "pt-BR-FranciscaNeural", "gender": "female", "label": "Francisca (BR)" }
+    ],
+    "ru": [
+      { "id": "ru-RU-DmitryNeural", "gender": "male", "label": "Dmitry (RU)" },
+      { "id": "ru-RU-SvetlanaNeural", "gender": "female", "label": "Svetlana (RU)" }
+    ],
+    "it": [
+      { "id": "it-IT-DiegoNeural", "gender": "male", "label": "Diego (IT)" },
+      { "id": "it-IT-ElsaNeural", "gender": "female", "label": "Elsa (IT)" }
+    ]
+  }
+}
