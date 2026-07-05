@@ -6,6 +6,7 @@ import { compensateReserve, reserveDualPool, reservedMinutesForMode } from "./ca
 import { claimOne } from "./claim";
 import { WORKER_REPORTABLE_ERROR_CODES } from "./errors";
 import { isKnownStage, logEvent, parseProgressMeta } from "./obs";
+import { validateProvider } from "./providers";
 import { presignR2Url } from "./sigv4";
 import { requireR2, verifyUpload } from "./uploads";
 
@@ -161,6 +162,28 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   if (advisoryDurationMs !== undefined && advisoryDurationMs < 0) {
     throw new HttpError(400, "invalid_field", "advisory_duration_ms must be >= 0");
   }
+  // Multi-engine dub-voice pin (P0): an explicit tts_provider + tts_voice from the picker. Validated
+  // UP FRONT (before the reserve / upload verify) so a bad pin costs nothing. The two travel as a PAIR
+  // (a provider with no voice would be silently auto-routed by the worker; a voice with no provider is
+  // meaningless), and a pin only makes sense for a dub output. The provider must be a known FREE
+  // provider — validateProvider rejects paid (403) and unknown (400), so an explicit pick can never
+  // authorise a paid API (red line §1). The WORKER does the authoritative structural + closed-preset
+  // membership check and fails closed (tts_provider_unavailable) / substitutes on a transient miss;
+  // this is the request-boundary gate that keeps a bad pin from ever reserving/uploading.
+  const ttsProvider = optString(body, "tts_provider");
+  const ttsVoice = optString(body, "tts_voice");
+  if ((ttsProvider === undefined) !== (ttsVoice === undefined)) {
+    throw new HttpError(400, "invalid_field", "tts_provider and tts_voice must be provided together");
+  }
+  if (ttsVoice !== undefined && ttsVoice.trim() === "") {
+    throw new HttpError(400, "invalid_field", "tts_voice must not be empty");
+  }
+  if (ttsProvider !== undefined) {
+    if (outputMode === "subtitle_only") {
+      throw new HttpError(400, "invalid_field", "a dub voice pin requires a dub output mode");
+    }
+    validateProvider(ttsProvider); // paid -> 403 forbidden_provider; unknown -> 400 unknown_provider
+  }
   // M2.1: burned / both subtitle delivery is implemented end-to-end (kernel libass re-encode ->
   // the worker uploads the burned video as video_key). reqEnum already constrains
   // subtitle_delivery to srt|burned|both, so all three are accepted here.
@@ -207,7 +230,15 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   // job's count back is a worker_lost refund — so a later wake/read failure must NOT decrement it. The
   // INSERT is the lone OUR-fault step that can orphan the reserve, so ONLY it is wrapped; wake + the
   // response read live OUTSIDE (fail-closed: a post-commit blip fails the response, but the count stands).
-  const plan = defaultPlan(outputMode);
+  // Fold the validated dub-voice pin into the plan (dub modes only; validated above). The worker
+  // honors an explicit (tts, tts_voice) pin instead of auto-routing (soft-pin, PR #85). voice_substituted
+  // defaults false via the schema and is set by the worker only if it must fall back at run time.
+  const plan: { asr: string; mt: string; tts: string | null; tts_voice?: string } =
+    defaultPlan(outputMode);
+  if (ttsProvider !== undefined && ttsVoice !== undefined) {
+    plan.tts = ttsProvider;
+    plan.tts_voice = ttsVoice;
+  }
   const aigc = defaultAigcMarking(outputMode, ctx.config);
   const deadlineAt = now + ctx.config.deadlineMaxWaitMs;
   const expiresAt = now + ctx.config.jobTtlMs;

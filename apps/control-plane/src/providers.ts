@@ -58,7 +58,7 @@ interface QuotaRow {
 
 // Paid BEFORE unknown so a red-line probe is a distinct 403, not a generic 400 (mirrors CFG-GUARD's
 // red-line-before-unknown ordering for settings).
-function validateProvider(name: string): void {
+export function validateProvider(name: string): void {
   if (PAID_SET.has(name)) {
     throw new HttpError(
       403,
