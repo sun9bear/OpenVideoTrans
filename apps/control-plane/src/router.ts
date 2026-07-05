@@ -4,6 +4,7 @@ import { realTurnstileVerifier } from "./abuse";
 import { mintAnon, verifyAnonId } from "./anon";
 import { credentials } from "./credentials";
 import { logEvent, metricsEndpoint } from "./obs";
+import { getTtsVoices, reportProviderCapabilities } from "./capabilities";
 import { providerAvailability, reportProviderExhausted } from "./providers";
 import { selectProducer } from "./queue";
 import { adminGetSettings, adminSetSetting, configEndpoint, getConfig, getSettingsAudit, publicConfig } from "./settings";
@@ -48,6 +49,10 @@ const ROUTES: Route[] = [
   // (operator-tunable via CFG-GUARD), not a compile-time mirror. Curated projection only — see
   // publicConfig (settings.ts); no ops-sensitive knob or secret is exposed.
   route("GET", "/api/config", "none", publicConfig),
+  // P1c: PUBLIC dub-voice picker source (no auth) — the TTS voices installed on the fleet for a locale,
+  // as published by workers (POST /internal/providers/capabilities) and intersected with the free-pool
+  // circuit-breaker so an exhausted engine's voices drop out. ?target_lang= (BCP-47) required.
+  route("GET", "/api/tts/voices", "none", getTtsVoices),
   // Public API surface (documented contract, plan §endpoints): /api prefix, artifact as a path segment.
   route("POST", "/api/uploads/sign", "actor", signUpload),
   route("POST", "/api/jobs", "actor", createJob),
@@ -66,6 +71,10 @@ const ROUTES: Route[] = [
   // provider name is rejected 403 at the handler (a paid API has no free-pool state — red line §1).
   route("POST", "/internal/providers/exhausted", "worker", reportProviderExhausted),
   route("GET", "/internal/providers/availability", "worker", providerAvailability),
+  // P1c: a worker box publishes its installed TTS voice manifest at startup (worker-auth). Names only;
+  // a paid provider name is rejected 403 at the handler (red line §1). The public GET /api/tts/voices
+  // reads what's published here.
+  route("POST", "/internal/providers/capabilities", "worker", reportProviderCapabilities),
   // CFG-GUARD (#22): operator config changes go THROUGH the guard (validation + audit + version bump)
   // — never a raw D1 edit. ADMIN auth (a SEPARATE ADMIN_TOKEN, not the shared worker bearer) so a
   // media-worker compromise can't mutate config; the named operator rides in X-OVT-Actor for audit.

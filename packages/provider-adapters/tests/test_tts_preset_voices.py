@@ -99,3 +99,51 @@ def test_shipped_catalog_cloudflare_ids_match_melotts_codes() -> None:
         assert cf[loc][0]["id"] == loc
     # every CF locale lists exactly one voice (MeloTTS is single-voice-per-language)
     assert all(len(v) == 1 for v in cf.values())
+
+
+def test_list_all_tts_voices_spans_catalog_locales(monkeypatch: pytest.MonkeyPatch) -> None:
+    # P1c: the full manifest the worker publishes — every catalog locale's installed voices, each
+    # tagged with target_lang, so the public /api/tts/voices can filter by locale.
+    from provider_adapters import list_all_tts_voices
+
+    monkeypatch.setattr(tts_mod, "_voice_catalog", lambda: {
+        "piper": {
+            "en": [{"id": "en_US-ryan-medium", "gender": "male", "label": "Ryan"}],
+            "zh-Hans": [{"id": "zh_CN-huayan-medium", "gender": "female", "label": "HY"}],
+        },
+        "edge_tts": {"zh-Hans": [{"id": "zh-CN-YunxiNeural", "gender": "male", "label": "Yunxi"}]},
+    })
+    monkeypatch.setattr(tts_mod, "probe", lambda _k: [
+        ("piper", True, _Info("piper")),
+        ("edge_tts", True, _Info("edge_tts")),
+    ])
+    monkeypatch.setattr(tts_mod, "tts_preset_voices", lambda p, lang: {
+        ("piper", "en"): ["en_US-ryan-medium"],
+        ("piper", "zh-Hans"): ["zh_CN-huayan-medium"],
+        ("edge_tts", "zh-Hans"): ["zh-CN-YunxiNeural"],
+    }.get((p, lang), []))
+
+    out = list_all_tts_voices()
+    assert {o["target_lang"] for o in out} == {"en", "zh-Hans"}  # spans both catalog locales
+    ryan = next(o for o in out if o["voice_id"] == "en_US-ryan-medium")
+    assert ryan["target_lang"] == "en" and ryan["provider"] == "piper"
+    assert ryan["commercial_safe"] is True
+    yunxi = next(o for o in out if o["voice_id"] == "zh-CN-YunxiNeural")
+    assert yunxi["target_lang"] == "zh-Hans" and yunxi["experimental"] is True
+
+
+def test_list_all_tts_voices_skips_comment_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: the REAL packaged voices.json has a top-level "_comment" STRING key. Iterating
+    # catalog.values() would splat that string into single-char junk target_langs. Use the real
+    # catalog (NOT monkeypatched) + a probe/preset stub vouching a voice for every queried locale,
+    # so any junk locale would surface as an entry — then assert every target_lang is BCP-47-shaped.
+    import re
+
+    from provider_adapters import list_all_tts_voices
+
+    monkeypatch.setattr(tts_mod, "probe", lambda _k: [("piper", True, _Info("piper"))])
+    monkeypatch.setattr(tts_mod, "tts_preset_voices", lambda _p, lang: [f"v-{lang}"])
+    langs = {o["target_lang"] for o in list_all_tts_voices()}
+    assert langs, "expected real catalog locales"
+    assert all(re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z0-9]+)*", loc) for loc in langs), sorted(langs)
+    assert "_comment" not in langs
