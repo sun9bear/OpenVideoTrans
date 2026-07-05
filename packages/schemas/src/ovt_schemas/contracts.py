@@ -94,8 +94,8 @@ class Cue(BaseModel):
 
 ErrorCode = Literal["over_duration", "unsupported_format", "upload_too_large",
                     "source_verify_failed", "source_fetch_failed", "unsupported_language_pair",
-                    "no_tts_model_for_language", "free_pool_exhausted", "worker_lost",
-                    "processing_timeout", "daily_cap_reached", "internal_error",
+                    "no_tts_model_for_language", "tts_provider_unavailable", "free_pool_exhausted",
+                    "worker_lost", "processing_timeout", "daily_cap_reached", "internal_error",
                     "deadline_exceeded", "taken_down"]
 
 
@@ -137,6 +137,8 @@ class JobPlan(BaseModel):
     asr: str
     mt: str
     tts: str | None = None
+    tts_voice: str | None = None
+    voice_substituted: bool = False
 
 
 class JobArtifacts(BaseModel):

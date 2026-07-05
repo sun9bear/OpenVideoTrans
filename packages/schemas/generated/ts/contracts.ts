@@ -61,7 +61,7 @@ export interface Cue {
 }
 
 /** Terminal failure reason exposed on a failed Job (user-facing copy in plan §9D). */
-export type ErrorCode = "over_duration" | "unsupported_format" | "upload_too_large" | "source_verify_failed" | "source_fetch_failed" | "unsupported_language_pair" | "no_tts_model_for_language" | "free_pool_exhausted" | "worker_lost" | "processing_timeout" | "daily_cap_reached" | "internal_error" | "deadline_exceeded" | "taken_down";
+export type ErrorCode = "over_duration" | "unsupported_format" | "upload_too_large" | "source_verify_failed" | "source_fetch_failed" | "unsupported_language_pair" | "no_tts_model_for_language" | "tts_provider_unavailable" | "free_pool_exhausted" | "worker_lost" | "processing_timeout" | "daily_cap_reached" | "internal_error" | "deadline_exceeded" | "taken_down";
 
 /** A direct-to-R2 upload session (D1 upload_sessions). 1h TTL. */
 export interface UploadSession {
@@ -97,6 +97,8 @@ export interface JobPlan {
   asr: string;
   mt: string;
   tts?: string | null;
+  tts_voice?: string | null;
+  voice_substituted?: boolean;
 }
 
 /** R2 object keys for produced artifacts (set as the Job completes). */

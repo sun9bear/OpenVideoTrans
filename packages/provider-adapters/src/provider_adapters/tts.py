@@ -22,6 +22,7 @@ from .base import (
     ProviderInfo,
     ProviderUnavailable,
     TTSProvider,
+    _build,
     has_binary,
     has_module,
     raise_quota_if_429,
@@ -42,6 +43,22 @@ def _preset_ids(provider: str, lang: str) -> list[str]:
     cat = _voice_catalog().get(provider, {})
     entries = cat.get(lang) or cat.get(lang.split("-")[0]) or cat.get("_default") or []
     return [e["id"] for e in entries]
+
+
+def tts_preset_voices(provider: str, lang: str) -> list[str]:
+    """The CLOSED free-preset voice ids a TTS ``provider`` offers for ``lang`` — the SAME
+    set the picker shows AND the set an explicit pin (``JobPlan.tts_voice``) is validated against.
+
+    Open-core guardrail (plan §4): Tier 1 offers only preset voices; an ARBITRARY voice string or
+    model path is a Tier 2/3 capability and must be rejected. This delegates to the provider's own
+    ``voices_for`` (catalog + built-in presets), so it matches what synthesis accepts.
+    Returns ``[]`` when the provider is unknown / unavailable / does not cover the locale, so a pin
+    validated against it fails closed. Never raises (a membership source, not a synth path)."""
+    try:
+        engine = _build("tts", provider)
+        return list(engine.voices_for(lang)) if isinstance(engine, TTSProvider) else []
+    except Exception:  # noqa: BLE001 - unknown/unavailable/uncovered -> empty (pin fails closed)
+        return []
 
 
 # --------------------------------------------------------------------------- #

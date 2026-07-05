@@ -16,6 +16,10 @@ export const ERROR_CODES = [
   "source_fetch_failed",
   "unsupported_language_pair",
   "no_tts_model_for_language",
+  // P0 soft-pin: a user-pinned dub voice whose provider is not installed / doesn't cover the locale
+  // (structural miss). Worker-reported (like no_tts_model_for_language) + NOT refundable: a
+  // capability failure driven by the user's explicit pick, not our infra.
+  "tts_provider_unavailable",
   "free_pool_exhausted",
   "worker_lost",
   "processing_timeout",

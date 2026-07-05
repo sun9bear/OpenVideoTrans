@@ -49,6 +49,7 @@ from provider_adapters import (
     piper_model_covers,
     probe,
     route_free,
+    tts_preset_voices,
 )
 
 from .control_plane import ControlPlane
@@ -175,6 +176,31 @@ def _available_free_providers(kind: str, target_lang: str) -> frozenset[str]:
         if "deepl" in free and not _deepl_supports(target_lang):
             free -= {"deepl"}
     return free
+
+
+def _tts_pin_serviceable(provider: str, voice_id: str | None, target_lang: str) -> bool:
+    """Whether an EXPLICITLY user-pinned (``provider``, ``voice_id``) can structurally serve
+    ``target_lang`` on THIS box — deliberately BYPASSING the commercial-safe gate (plan §8 dec.4: a
+    user may pin the experimental, non-commercial edge voice; the owner bears the ToS risk, and edge
+    is still never auto-routed). Enforced:
+      (a) the adapter is available (installed / keyed, via probe) AND NOT paid — the paid red line
+          holds even for a pin;
+      (b) the capability registry lists the provider as covering the locale;
+      (c) for piper, the installed model actually covers the locale;
+      (d) open-core guardrail (§4) — ``voice_id`` is a member of the provider's CLOSED preset set
+          for the locale (the same set the picker offers); an ARBITRARY voice string / model path
+          (Tier 2/3) is rejected, so a pin can never smuggle an off-catalog voice.
+    A miss is a STRUCTURAL gap the picker should never have offered, so the worker fails the job
+    closed (``tts_provider_unavailable``) rather than substituting — distinct from a transient
+    run-time exhaustion, which reroutes + flags voice_substituted."""
+    if provider not in {name for name, avail, info in probe("tts") if avail and not info.paid}:
+        return False
+    cap = get_capability(target_lang)
+    if cap is None or provider not in cap.tts_models:
+        return False
+    if provider == "piper" and not piper_model_covers(target_lang):
+        return False
+    return voice_id in tts_preset_voices(provider, target_lang)
 
 
 def _stage_kinds(output_mode: str) -> tuple[str, ...]:
@@ -434,6 +460,30 @@ def run_real_pipeline(
     kinds = _stage_kinds(job.output_mode)
     excluded: dict[str, set[str]] = {k: set() for k in _STAGE_KINDS}
     plan: dict[str, str | None] = {"asr": job.plan.asr, "mt": job.plan.mt, "tts": job.plan.tts}
+    # Soft-pin (P0): an explicit user-picked dub voice (JobPlan.tts_voice) HONORS the pinned tts
+    # provider instead of auto-routing. The pin bypasses the commercial-safe gate — a user may
+    # explicitly select the experimental edge voice (owner bears the ToS risk; edge is still NEVER
+    # auto-routed) — plan §8 decision 4. A STRUCTURAL miss (provider not installed / doesn't cover
+    # the locale) fails closed NOW (tts_provider_unavailable, the picker shouldn't have offered it);
+    # a TRANSIENT exhaustion/rejection reroutes to an auto commercial-safe voice and records
+    # voice_substituted (reconciled at the top of the run loop below). A pin needs BOTH a provider
+    # (job.plan.tts) and a voice id (job.plan.tts_voice); a bare provider is not a pin.
+    # A pin needs a CONCRETE provider (not the "auto" auto-route sentinel from defaultPlan) AND a
+    # voice id; an "auto" + voice combo is contradictory, so treat it as no pin and auto-route (the
+    # orphan voice is ignored) rather than fail closed on a misleading "provider 'auto'" error.
+    tts_pin = (
+        job.plan.tts
+        if ("tts" in kinds and job.plan.tts_voice and job.plan.tts and job.plan.tts != "auto")
+        else None
+    )
+    tts_voice = job.plan.tts_voice if tts_pin else None
+    voice_substituted = False
+    if tts_pin is not None and not _tts_pin_serviceable(tts_pin, tts_voice, job.target_lang):
+        raise LanguageError(
+            "tts_provider_unavailable",
+            f"the pinned dub voice provider {tts_pin!r} is unavailable for {job.target_lang!r} on "
+            f"this deployment (not installed, or it does not cover the locale)",
+        )
     # Reroute backstop: at most one rotation per free provider of each active stage. A kind whose
     # providers are ALL excluded fails closed via _pick -> None first; this budget is sized to the
     # active ladders so a worst-case burst (every non-tail provider of every stage 429s) can't trip
@@ -443,10 +493,23 @@ def run_real_pipeline(
     # Initial route: ONE shared availability snapshot for all stages (re-routes refetch fresh).
     snapshot = _snapshot(cp, clock)
     for kind in kinds:
+        if kind == "tts" and tts_pin is not None:
+            plan["tts"] = tts_pin  # honor the pin; skip auto-route (commercial-gate bypass)
+            continue
         plan[kind] = _route_plan(kind, snapshot, excluded[kind], avail_fn, on_telemetry)
     _emit(on_telemetry, provider=plan[kinds[0]])
     for _ in range(max_reroutes + 1):
-        routed = job.model_copy(update={"plan": job.plan.model_copy(update=plan)})
+        # A pinned tts provider that got rerouted (its provider was excluded on a 429 / input
+        # rejection) means the user's chosen voice can't be used: fall back to the auto-routed
+        # commercial-safe voice and flag voice_substituted so the UI can note it. Drop the pin so we
+        # don't re-substitute or resurrect the dead voice id (wrong for the new engine). By design a
+        # SHARED-provider 429 also drops the pin — e.g. cloudflare serving both asr+tts is circuit-
+        # broken provider-wide (account-wide quota), so an asr 429 correctly retires its tts too.
+        if tts_pin is not None and plan.get("tts") != tts_pin:
+            voice_substituted, tts_voice, tts_pin = True, None, None
+        routed_plan: dict[str, str | bool | None] = {
+            **plan, "tts_voice": tts_voice, "voice_substituted": voice_substituted}
+        routed = job.model_copy(update={"plan": job.plan.model_copy(update=routed_plan)})
         try:
             # target_lang is a REQUIRED kwarg of autodub_core.run_pipeline (it derives the rest from
             # `job`, but the signature still requires it) — omitting it raises TypeError (CodeX P1).

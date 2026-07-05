@@ -147,6 +147,30 @@ def test_tts_assigns_voices_round_robin_and_synthesizes(tmp_path: Path) -> None:
     assert paths.find_tts_raw(0) is not None
 
 
+def test_tts_honors_pinned_voice_and_bypasses_catalog(tmp_path: Path) -> None:
+    # P0 soft-pin: an explicit tts_voice (JobPlan.tts_voice) is used for EVERY speaker, and the pin
+    # BYPASSES the provider's voices_for catalog — so an explicitly-picked edge voice is not
+    # re-filtered by the auto/commercial catalog (the owner-authorized pin). voices_for must
+    # NOT be consulted when a voice is pinned (the worker already validated the pin structurally).
+    class _NoCatalogTts(_FakeTts):
+        def voices_for(self, lang: str) -> list[str]:
+            raise AssertionError("voices_for must not be called when a voice is pinned")
+
+    res = FakeResolver()
+    res.tts = _NoCatalogTts()
+    paths = JobPaths(tmp_path).ensure()
+    stages.transcribe(paths, res, None, "en")
+    stages.translate(paths, res, None, "zh", "en")
+    tr = stages.tts(paths, res, None, voice_id="edge-Guy")
+    # Both speakers use the pinned voice; per-speaker voice_map is P4.
+    assert {s.speaker_id: s.voice_id for s in tr.segments} == {
+        "SPEAKER_00": "edge-Guy", "SPEAKER_01": "edge-Guy"}
+    assert [c[1] for c in res.tts.calls] == ["edge-Guy", "edge-Guy"]  # synthesize got the pin
+    # Audit coherence: the segment's tts_provider is the resolved engine, recorded alongside the
+    # pinned voice — so a honored edge pin manifests as (edge_tts, <edge voice>), never a mismatch.
+    assert all(s.tts_provider == "fake_tts" for s in tr.segments)
+
+
 def test_tts_skips_synthesis_for_keep_original(tmp_path: Path) -> None:
     class EmptyMt(_FakeMt):
         def translate(self, texts, source_lang, target_lang, budgets_ms=None):  # noqa: ANN001,ARG002

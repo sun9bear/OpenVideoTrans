@@ -87,6 +87,22 @@ def test_job_error_code_rejects_invalid() -> None:
         Job.model_validate(data)
 
 
+def test_job_error_code_accepts_tts_provider_unavailable() -> None:
+    """P0: the tts_provider_unavailable ErrorCode (pinned-voice structural miss) validates."""
+    job = _minimal_job().model_copy(
+        update={"error_code": "tts_provider_unavailable", "status": "failed"})
+    assert job.error_code == "tts_provider_unavailable"
+
+
+def test_job_plan_voice_pin_fields() -> None:
+    """P0: JobPlan gains tts_voice (explicit dub-voice pin) + voice_substituted (fallback flag)."""
+    pinned = JobPlan(asr="groq", mt="deepl", tts="edge_tts", tts_voice="en-US-GuyNeural")
+    assert pinned.tts_voice == "en-US-GuyNeural"
+    assert pinned.voice_substituted is False  # defaults false
+    bare = JobPlan(asr="groq", mt="deepl")  # both optional -> a bare plan has no pin
+    assert bare.tts_voice is None and bare.voice_substituted is False
+
+
 def test_word_start_ms_is_int() -> None:
     """Word.start_ms is typed as int (integer milliseconds)."""
     word = Word(text="hello", start_ms=1234, end_ms=5678)
