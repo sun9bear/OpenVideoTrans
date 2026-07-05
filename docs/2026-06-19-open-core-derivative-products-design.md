@@ -189,8 +189,9 @@ ASR / MT / TTS 三个 stage 各有 `$0` 选项（见 §2.2）。这意味着 C1 
 
 - 音频分离是 ffmpeg L/R 声道 pan 差值（**非** demucs ML），真实混音背景音移除能力有限 → **Tier 1 可接受**（商品级），Tier 2/3 走核心管线。
 - skill 的 align 是纯 DSP 时间拉伸 `MAX_SPEEDUP=2.0`，无 LLM rewrite / re-TTS；长目标语（德/俄）配短源视频体验明显差于父项目 → **Tier 1 可接受**；Tier 2/3 启用核心 `SegmentAligner` + LLM rewrite（§4.7）。
-- skill **无 diarization**（单说话人 `SPEAKER_00` fallback，多说话人 round-robin 派预设音色）→ **Tier 1 可接受**；Tier 2/3 走 S1+S2 Pass1 说话人审校。
+- skill **无 diarization**（单说话人 `SPEAKER_00` fallback，多说话人 round-robin 派预设音色）→ **Tier 1 可接受**；Tier 2/3 走 S1+S2 Pass1 说话人审校。**【2026-07-05 修订：此天花板已上移——免费 diarization + 多说话人多音色下放 Tier 1，见下方 2026-07-05 调整。】**
 - **关键定位调整（2026-06-20）**：原 §3.4 与最高指导原则（2026-06-12「免费触点必须展示真实管线效果」）的张力，由三层产品**结构性解除**——Tier 1 明确标注「基础免费、效果≈市面开源」，**不冒充**生产质量；真实管线效果由 Tier 2/3 全流程承载。开源项目本身是独立产品（非 SaaS 免费触点），其内部分层即「免费够用 → BYOK 更好 → 付费托管最省心」的转化阶梯。见 §4.1 / §4.7。
+- **关键定位调整（2026-07-05，项目主拍板 · 护城河重定基）**：line 192「单说话人天花板」、line 249「diarization 不单做 / 不引入 pyannote+GPU」、以及 line 236/464/738「diarization = 付费 Tier2/3 卖点」的**技术前提**——「本地 diarization 需 pyannote+GPU、破坏轻量部署」——已被 **sherpa-onnx（纯 ONNX、~32 MB、CPU、无 GPU）**证伪，实测在 2 核/3.7 GB 免费箱可行（详见 `docs/2026-07-05-tts-multivoice-diarization-plan.md`）。故项目主决定：**自动说话人分离 + 多说话人多音色配音下放 Tier 1**（免费层，pyvideotrans 对标；内核 `_assign_voices` 本已支持多说话人）。**配音线护城河随之重定基**为：① **语音克隆 / 说话人身份保真**（GPU / 付费 opt-in，未动）；② **BYOK / 付费的分离精度**（多模态 Pass1 纠正聚类错误、重叠语音、短时 / 多说话人退化）。即护城河由「能否多说话人」上移为「能否**准确**多说话人 + 克隆音色」——变窄但仍成立。免费层仍只用**免费预设音色（非克隆）**，预设选择器为闭集、**禁参考样本上传 / 克隆 / 任意 voice 字符串**（那仍是 Tier 2/3）。红线 §1（付费 API 不自动调用）不受影响。
 
 ### 3.5 阿里云 DashScope/CosyVoice ToS 摘要（C4 法律底座，条款号见 §7.6）
 
@@ -246,7 +247,7 @@ ASR / MT / TTS 三个 stage 各有 `$0` 选项（见 §2.2）。这意味着 C1 
 **推荐做法**：
 - **线 A（主推先做）**：把 smart mode 已有的全 `gemini_pro` 高质量配置包装成可购买的"增强档" service_mode/tier，用平台 key，job create 用 **live** `reserve_credits_or_raise` 预扣（新增 `DEBIT_RATES[(enhanced,tier)]`），走 `mirror_job_terminal_state` 单一结算入口。UI 卖点用"质量"语言（更准的 speaker 区分 / 更自然术语 / 更贴合音色），**不**暴露 Pass/probe。投递复用 premium backend 回调形态。
 - **线 B（后做/可选）**：只对 Pass2 + translate + rewrite 开放 user-level provider key 覆盖（这些走 `provider_api_keys`+env，加 user 层最轻）；**显式不支持** Pass1/Pass3 BYO Gemini（`client_factory` 走三级凭据不经 `provider_api_keys`，改造面大，留 backlog）；**不支持** probe/diarization BYO（类别不符）。BYO 失败 **fail-to-error 不静默回平台 key**。
-- diarization 升级**不单做**：想升级走线 A 用更强多模态模型，不引入 pyannote/GPU（破坏轻量部署）。
+- diarization 升级**不单做**：想升级走线 A 用更强多模态模型，不引入 pyannote/GPU（破坏轻量部署）。**【2026-07-05 修订：sherpa-onnx（纯 ONNX / CPU / 无 GPU）证伪了"需 pyannote+GPU"前提；免费 diarization 已下放 Tier 1，见 §3.4 2026-07-05 调整。Tier 2/3 的 diarization 差异化改为"精度"（多模态 Pass1）而非"有无"。】**
 
 **关键风险**：BYO key 静默回退红线（失败时若复用现有 cheaper-fallback 链会落到平台默认付费模型，静默扣平台账户——必须为 BYO stage 切断 fallback 改 fail-to-error）；Gemini 凭据架构错配（Pass1/3 须深改 `client_factory`，首版排除）；类别混淆导致 UI/计费错位；结算旁路 ghost reservation（增值档 job 必须全经 `mirror_job_terminal_state`，`is_anonymous_preview` 误设会 zero-settle）；shadow vs live 误用（可选付费 stage 必须用 live `reserve_credits_or_raise`，用 shadow 会余额不足仍跑完事后无法扣款）。
 

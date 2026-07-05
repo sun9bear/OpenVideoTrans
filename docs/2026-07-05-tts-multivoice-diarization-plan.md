@@ -103,7 +103,7 @@
 - **(a) 放 Tier 1**：干净、UX 大赢、pyvideotrans 对标——并**重定 moat 基线**为"克隆 + BYOK 精度"，修订母文档 line 192/249/738。
 - **(b) 维持冻结**：`SPEAKER_00` 仍是 Tier 1 天花板；sherpa-onnx 作为 **Tier 2/3 自托管** diarizer（仍比假设的 pyannote+GPU 轻）。
 
-**未获 (a)/(b) 前不动 P4 实施**——这是 workflow §8 里程碑门。
+~~**未获 (a)/(b) 前不动 P4 实施**——这是 workflow §8 里程碑门。~~ **【2026-07-05：项目主已选 (a)——P4 授权实施，母文档 §3.4 已加对应"2026-07-05 调整"、line 192/249 已注修订。此门已解除。】**
 
 ## 6. 分片计划
 
@@ -114,9 +114,9 @@
 | **P0** | 能力清单（引擎×locale×性别）+ 软-pin 路由 | 无（已同意） | 把 §3 矩阵编码为数据；picker 唯一真源 |
 | **P1** | 烤 Piper 男/女（可覆盖 locale）+ 手动多引擎音色选择器 UI | 无（已同意） | 交付业主要的"手动多引擎选音色"；离线优先默认 |
 | **P2** | edge_tts adapter（远程 keyless，全 10 M/F 广度） | 无 | 在线时补 ko/ja 离线男声缺口；文档标 ToS-灰 |
-| **P3** | Kokoro-ONNX（可选、RAM 门控、与 whisper 互斥） | 无 | zh/en(+es/ja/pt/it) 质量升级；prod RAM 紧则可跳 |
-| **P3b** | CF MeloTTS（可选、业主 CF token） | 无 | 仅当业主要官方端点备选 |
-| **P4** | `diarize` 阶段 + `diarizer` provider + schema + per-speaker `voice_map` | **⛔ 项目主签字（§5）** | 技术就绪；卡在 moat 决策、非可行性 |
+| **P3** | Kokoro-ONNX（可选、RAM 门控、与 whisper 互斥） | ⏸ **延后**（2026-07-05 定：暂不做） | zh/en(+es/ja/pt/it) 质量升级；以后按需 |
+| **P3b** | CF MeloTTS（业主供 CF token） | ✅ **纳入**（2026-07-05） | 已编码，注入 token 即启；官方端点远程备选 |
+| **P4** | `diarize` 阶段 + `diarizer` provider + schema + per-speaker `voice_map` | ✅ **已授权**（2026-07-05 定 (a)，母文档已修订） | 技术就绪；moat 已重定基为"克隆+BYOK 精度" |
 
 ## 7. 2 核 / 3.7 GB 箱的特有风险
 
@@ -129,13 +129,13 @@
 
 **否决清单（勿投入）**：VITS-cnen（2/10 locale、运行时最重、Kokoro 压制）、gTTS（单一女声、非官方、edge 严格更优）。
 
-## 8. 待项目主拍板
+## 8. 决策记录（项目主 2026-07-05 拍板）
 
-1. **diarization：(a) 上 Tier 1 并重定 moat（修订母文档 line 192/249/738）／ (b) 维持冻结、作 Tier 2/3 自托管 diarizer。** —— **P4 的强门；未定不建。**
-2. **Kokoro-ONNX 是否纳入**（离线 zh/en 升级，RAM 门控；prod 2 核/3 GB 偏紧，可先不做）。
-3. **CF MeloTTS 是否纳入**（业主愿供 token；但单音色 6 语、非性别选择——价值有限，edge_tts 已覆盖更好）。
+1. **diarization = (a) 上 Tier 1 + 重定 moat** ✅ 已拍板。母文档 `docs/2026-06-19-...` §3.4 已加「2026-07-05 调整」+ line 192/249 已注修订；护城河重定为「语音克隆 + BYOK/付费精度」。**P4 强门解除、授权实施。**
+2. **Kokoro-ONNX = 暂不纳入** ✅ 先 Piper + edge_tts（2 核/3 GB 偏紧）；Kokoro 留作 P3、以后按需（RAM 门控）。
+3. **CF MeloTTS = 纳入** ✅ 业主提供 `CF_ACCOUNT_ID` + `CF_API_TOKEN`（注入 CF secrets、不经 agent）；provider 已编码，注入即启（P3b）。
 
-P0/P1（+ P2 edge、Piper 烤声）已在授权范围，可先建；P3/P3b/P4 待上述决策。均走 `ship-unit`；CodeX 两审级约 2026-07-09 前 OpenAI 用量封顶 → 用对抗多透镜 workflow + CI 兜。
+**最终实施范围：P0（能力清单+软-pin）+ P1（Piper 男女声+选择器）+ P2（edge_tts）+ P3b（CF MeloTTS）+ P4（diarization + per-speaker voice_map）；P3（Kokoro）延后。** 均走 `ship-unit`（worker 先行、片B/P4 完整重建镜像）；CodeX 两审级约 2026-07-09 前 OpenAI 用量封顶 → 用对抗多透镜 workflow + CI 兜。**前置（业主）：CF token 注入。**
 
 ## 相关文件（绝对路径）
 - `packages/autodub-core/src/autodub_core/stages.py` — `_assign_voices`(216-220 已多音色)、`translate` 透传 speaker(203)、`transcribe`/`run_pipeline`(=`diarize` 插入点)。
