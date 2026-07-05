@@ -46,7 +46,12 @@
   "secrets_store_secrets": [
     { "binding": "SS_R2_ACCESS_KEY_ID", "store_id": "78d1fc96c03044c2bf20f9dce7a47340", "secret_name": "R2_ACCESS_KEY_ID" },
     { "binding": "SS_R2_SECRET_ACCESS_KEY", "store_id": "78d1fc96c03044c2bf20f9dce7a47340", "secret_name": "R2_SECRET_ACCESS_KEY" },
-    { "binding": "SS_DEEPL_API_KEY", "store_id": "78d1fc96c03044c2bf20f9dce7a47340", "secret_name": "DEEPL_API_KEY" }
+    { "binding": "SS_DEEPL_API_KEY", "store_id": "78d1fc96c03044c2bf20f9dce7a47340", "secret_name": "DEEPL_API_KEY" },
+    // Cloudflare Workers AI (MeloTTS) token — resolveSecrets() maps this to env.CF_AI_API_TOKEN; the
+    // account id is the non-secret CF_AI_ACCOUNT_ID var below. collectCredentials serves cloudflare to
+    // the worker only when BOTH are set. On the Workers FREE plan an over-quota call is a 429 (circuit-
+    // break, FREE-POOL) — never silent billing (red line §1). Owner stored the value as CF_AI_API_TOKEN.
+    { "binding": "SS_CF_AI_API_TOKEN", "store_id": "78d1fc96c03044c2bf20f9dce7a47340", "secret_name": "CF_AI_API_TOKEN" }
     // SS_TURNSTILE_SECRET_KEY deliberately NOT bound yet: the Turnstile widget's hostname is still the
     // `localhost` placeholder (prep manifest), so it cannot mint valid tokens on openvideotrans.xyz —
     // binding the secret would fail-CLOSE job creation (challenge_required). The gate stays fail-open
@@ -66,6 +71,10 @@
     // (CFG-GUARD owns validation). R2 account id + bucket are non-secret deploy vars.
     "R2_ACCOUNT_ID": "7dcd59cfc49c3458c870f5621dbf7263",
     "R2_BUCKET": "ovt-artifacts",
+    // Cloudflare Workers AI account id — non-secret (same trust class as R2_ACCOUNT_ID) and the SAME
+    // CF account, so reuse the id. Pairs with the SS_CF_AI_API_TOKEN secret above; collectCredentials
+    // serves the cloudflare provider to the worker only when BOTH this and the token are present.
+    "CF_AI_ACCOUNT_ID": "7dcd59cfc49c3458c870f5621dbf7263",
     // M2-CLOSE PR-B (#26): mark this deploy as production so the anon-identity surface fails CLOSED
     // (503) until ANON_ID_HMAC_KEY is injected — getActor accepts a raw id only under OVT_ENV='dev'.
     // ✅ SPA wiring landed (was the owner-confirmed 2026-06-29 GO-LIVE BLOCKER): apps/web now mints its

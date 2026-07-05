@@ -85,6 +85,10 @@ export interface RawEnv extends Env {
   SS_R2_SECRET_ACCESS_KEY?: SecretsStoreSecret;
   SS_DEEPL_API_KEY?: SecretsStoreSecret;
   SS_TURNSTILE_SECRET_KEY?: SecretsStoreSecret;
+  // Cloudflare Workers AI (MeloTTS) token. The account id (CF_AI_ACCOUNT_ID) is a NON-secret deploy
+  // var (same trust class as R2_ACCOUNT_ID); only the token is a secret, so only the token gets an
+  // SS_ binding. collectCredentials includes cloudflare only when BOTH are present.
+  SS_CF_AI_API_TOKEN?: SecretsStoreSecret;
 }
 
 // Resolve the Secrets Store bindings to plain strings so all downstream code reads env.NAME as a
@@ -101,11 +105,12 @@ export async function resolveSecrets(raw: RawEnv): Promise<Env> {
       return undefined;
     }
   }
-  const [r2Key, r2Secret, deepl, turnstile] = await Promise.all([
+  const [r2Key, r2Secret, deepl, turnstile, cfAiToken] = await Promise.all([
     ss(raw.SS_R2_ACCESS_KEY_ID),
     ss(raw.SS_R2_SECRET_ACCESS_KEY),
     ss(raw.SS_DEEPL_API_KEY),
     ss(raw.SS_TURNSTILE_SECRET_KEY),
+    ss(raw.SS_CF_AI_API_TOKEN),
   ]);
   return {
     ...raw,
@@ -113,6 +118,7 @@ export async function resolveSecrets(raw: RawEnv): Promise<Env> {
     ...(r2Secret !== undefined ? { R2_SECRET_ACCESS_KEY: r2Secret } : {}),
     ...(deepl !== undefined ? { DEEPL_API_KEY: deepl } : {}),
     ...(turnstile !== undefined ? { TURNSTILE_SECRET_KEY: turnstile } : {}),
+    ...(cfAiToken !== undefined ? { CF_AI_API_TOKEN: cfAiToken } : {}),
   };
 }
 
