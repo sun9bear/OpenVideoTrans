@@ -83,6 +83,68 @@ describe("App — smoke", () => {
     target.remove();
   });
 
+  it("shows the dub-voice picker only for a dub mode, populated from /api/tts/voices", async () => {
+    expireAnonCookie();
+    // Route the mint + config + the P1c voices manifest (zh-Hans: a piper voice + an edge voice).
+    const fetchFn = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/tts/voices")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            voices: [
+              { provider: "edge_tts", voice_id: "zh-CN-YunxiNeural", target_lang: "zh-Hans", gender: "male", label: "云希", commercial_safe: false, experimental: true },
+              { provider: "piper", voice_id: "zh_CN-huayan-medium", target_lang: "zh-Hans", gender: "female", label: "Huayan", commercial_safe: true, experimental: false },
+            ],
+            now_ms: 1,
+          }),
+        };
+      }
+      if (u.includes("/api/config")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            maxUploadBytes: 500 * 1024 * 1024,
+            maxVideoDurationMs: { subtitle_only: 1_800_000, dub_only: 300_000, both: 300_000 },
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ anon_id: SIGNED }) };
+    });
+    vi.stubGlobal("fetch", fetchFn);
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const app = mount(App, { target });
+    flushSync();
+
+    // Subtitle-only (default): no dub-voice picker.
+    expect(target.innerHTML).not.toContain("配音引擎");
+
+    // Switch to the dub mode → the picker appears and loads the manifest for the target language.
+    const dubRadio = target.querySelector('input[name="mode"][value="dub_only"]') as HTMLInputElement;
+    dubRadio.checked = true;
+    dubRadio.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    expect(target.innerHTML).toContain("配音引擎");
+
+    await vi.waitFor(() => {
+      expect(target.innerHTML).toContain("Piper（离线合成）");
+    });
+    // edge is offered but flagged experimental / non-commercial (never auto-routed — red line).
+    expect(target.innerHTML).toContain("实验");
+    expect(target.innerHTML).toContain("非商用");
+    // the voices manifest was fetched for the selected target language.
+    expect(fetchFn).toHaveBeenCalledWith(
+      "/api/tts/voices?target_lang=zh-Hans",
+      expect.anything(),
+    );
+
+    unmount(app);
+    target.remove();
+  });
+
   it("mode hints reflect the LIVE per-mode cap from /api/config (not a hardcoded value)", async () => {
     expireAnonCookie();
     // Operator raised every mode's cap to 30 min via CFG-GUARD.
