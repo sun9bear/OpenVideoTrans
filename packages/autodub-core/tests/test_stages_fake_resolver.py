@@ -166,6 +166,9 @@ def test_tts_honors_pinned_voice_and_bypasses_catalog(tmp_path: Path) -> None:
     assert {s.speaker_id: s.voice_id for s in tr.segments} == {
         "SPEAKER_00": "edge-Guy", "SPEAKER_01": "edge-Guy"}
     assert [c[1] for c in res.tts.calls] == ["edge-Guy", "edge-Guy"]  # synthesize got the pin
+    # Audit coherence: the segment's tts_provider is the resolved engine, recorded alongside the
+    # pinned voice — so a honored edge pin manifests as (edge_tts, <edge voice>), never a mismatch.
+    assert all(s.tts_provider == "fake_tts" for s in tr.segments)
 
 
 def test_tts_skips_synthesis_for_keep_original(tmp_path: Path) -> None:

@@ -219,10 +219,11 @@ def _assign_voices(
 ) -> dict[str, str]:
     speakers = sorted(set(speaker_ids))
     # An explicit user pin (JobPlan.tts_voice) wins: every speaker uses the pinned voice. The pin is
-    # trusted here — the worker soft-pin router already verified the pinned provider is installed
-    # and covers the locale (clearing the pin on a fallback), so we do NOT call voices_for, which
-    # would re-apply the auto catalog / commercial-safe gate and could reject an explicitly-chosen
-    # experimental edge voice (the owner-authorized pin bypass). Per-speaker voice_map is P4.
+    # trusted here — the worker soft-pin router already validated it: the provider is installed, not
+    # paid, covers the locale, and the voice is a member of the provider's CLOSED preset set (the
+    # open-core guardrail, plan §4), and it clears the pin on a fallback. So we skip voices_for and
+    # use the pin directly. (The no-worker CLI path is operator-trusted, like FVD_PIPER_MODEL.)
+    # Per-speaker voice_map is P4.
     if pinned_voice:
         return {sid: pinned_voice for sid in speakers}
     voices = provider.voices_for(lang)

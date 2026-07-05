@@ -57,7 +57,7 @@ from .supply_chain import (
     verify_piper_model,
     verify_sha256,
 )
-from .tts import piper_model_covers, piper_model_language
+from .tts import piper_model_covers, piper_model_language, tts_preset_voices
 
 # Registering all adapters populates the kind→name→factory registry that select()
 # walks; REGISTRY is then flattened from it (name→ProviderInfo).
@@ -104,6 +104,7 @@ __all__ = [
     "resolve_source_language",
     "select",
     "sha256_file",
+    "tts_preset_voices",
     "verify_ffmpeg",
     "verify_pinned",
     "verify_piper_model",
