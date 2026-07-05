@@ -653,27 +653,28 @@ def test_tts_reroute_clears_tts_scratch(tmp_path: Path) -> None:
 
 
 def test_429_reroutes_all_stages_sharing_the_exhausted_provider(tmp_path: Path) -> None:
-    # CodeX P2: a provider serving multiple stages (cloudflare = asr + mt) that 429s is excluded
+    # CodeX P2: a provider serving multiple stages (groq = asr + mt ladder head) that 429s is excluded
     # provider-WIDE — the not-yet-run stage planned on it is re-routed in the same catch, never
-    # re-hit (the circuit-breaker state is per-provider, not per-kind).
+    # re-hit (the circuit-breaker state is per-provider, not per-kind). (groq is the shared head of
+    # both AUTO_LADDER['asr'] and ['mt'] after the 2026-07-05 MT reorder that demoted cloudflare.)
     cp, storage = FakeControlPlane(), FakeStorage()
     job = make_job(output_mode="subtitle_only", target_lang="zh-Hans")
     in_path = tmp_path / "input"
     in_path.write_bytes(b"src")
-    run = FakeRunPipeline(quota_fail=(("asr", "cloudflare"),))
+    run = FakeRunPipeline(quota_fail=(("asr", "groq"),))
     artifacts = run_real_pipeline(
         cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
         resolver=object(), run_pipeline_fn=run,
         available_providers=_avail({
-            "asr": {"cloudflare", "faster_whisper"}, "mt": {"cloudflare", "deepl"},
+            "asr": {"groq", "faster_whisper"}, "mt": {"groq", "deepl"},
         }),
         now_ms=lambda: 1000,
     )
-    # both stages route cloudflare first; the asr 429 excludes cloudflare provider-wide so mt (also
-    # planned on cloudflare) is pre-emptively re-routed to deepl in the same catch.
-    assert run.calls[0]["asr"] == "cloudflare"
-    assert run.calls[0]["mt"] == "cloudflare"
+    # both stages route groq first; the asr 429 excludes groq provider-wide so mt (also
+    # planned on groq) is pre-emptively re-routed to deepl in the same catch.
+    assert run.calls[0]["asr"] == "groq"
+    assert run.calls[0]["mt"] == "groq"
     assert run.calls[1]["asr"] == "faster_whisper"
     assert run.calls[1]["mt"] == "deepl"
-    assert cp.exhausted_reports == [("cloudflare", 1000 + 30_000, "429")]
+    assert cp.exhausted_reports == [("groq", 1000 + 30_000, "429")]
     assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}
