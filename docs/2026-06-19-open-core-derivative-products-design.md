@@ -86,7 +86,7 @@
 ### 2.1 可移植免费内核（C1 主资产）
 
 - **free-video-dub** 是完整可运行 CLI，7 阶段（ingest/prepare/transcribe/translate/tts/align/mux），文件驱动可断点续跑；入口 / 阶段 / 数据契约三层均为纯 stdlib、无第三方依赖，可安全跨环境 import。
-- 三层免费 provider 阶梯（`AUTO_LADDER`）：ASR=`faster_whisper→groq→cloudflare`；MT=`cloudflare→groq→deepl→ollama`；TTS=`edge_tts→cloudflare→piper`，全 `$0`。
+- 三层免费 provider 阶梯（`AUTO_LADDER`）：ASR=`faster_whisper→groq→cloudflare`；MT=`cloudflare→groq→deepl→ollama`；TTS=`edge_tts→cloudflare→piper`，全 `$0`。**【2026-07-05 调整（项目主拍板）：MT 阶梯改为 `groq→deepl→ollama→cloudflare`——CF 降为末位回退。原因：CF 单凭据对（`CLOUDFLARE_ACCOUNT_ID/TOKEN`）同时启用 CloudflareTTS/MT/ASR，而 MT 路由无 commercial-safe 门，CF 居首会使「为 TTS 接入 CF token」静默把 CF m2m100 变成全队默认翻译引擎（未经审阅的行为变更，且 CF-MT 对 'auto' 源硬失败）。ASR/TTS 的实际顺序以 `packages/provider-adapters/src/provider_adapters/ladder.py` 为准（本行系原始草图，已按 T1.2 云优先 / T1.3 piper 默认细化）。】**
 - 付费安全门三层（已核实可直接引用，不重设）：① `PAID_PROVIDERS` 字符串集 + `is_paid_provider()`；② provider `select()` 双重 block（显式请求查 PAID 集 + `ProviderInfo.paid` 标志位，auto 路径遇 paid 即 `continue` 跳过）；③ premium 后端入口 `if not args.allow_paid: return 2`（无 `--allow-paid` 不放行付费）。
 - 验证状态：4 条不变量（paid 标志与名称集一致 / auto ladder 全免费 / auto select 永不返 paid / 显式 paid 无 `--allow-paid` 必抛 `PaidProviderBlocked`）；上游记录 2026-06-16「编译 + 4 不变量 + 真实 edge-tts 渲染绿」。
 - premium 回调 `submit_and_wait()` 已对齐上游 job 提交/查询/下载 API（异步 job→poll→download），默认 `voice_strategy=preset_mapping`（无克隆）。

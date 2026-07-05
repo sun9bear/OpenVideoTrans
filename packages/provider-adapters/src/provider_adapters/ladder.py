@@ -22,7 +22,13 @@ from __future__ import annotations
 #     gating (and the edge_tts license lane) is T1.3f / T1.3b·g.
 AUTO_LADDER: dict[str, list[str]] = {
     "asr": ["groq", "cloudflare", "faster_whisper"],
-    "mt": ["cloudflare", "groq", "deepl", "ollama"],
+    # MT keeps cloudflare LAST-RESORT (not head). The CF cred pair is wired for CF-TTS, but it
+    # ALSO makes CloudflareMT available (both read CLOUDFLARE_ACCOUNT_ID/TOKEN) and MT has no
+    # commercial-safe/locale gate — a CF-led MT ladder would SILENTLY make CF the fleet-wide
+    # default MT engine the instant the token is wired for TTS (CF-MT also hard-fails on an
+    # 'auto' source -> wasted select+reroute). groq/deepl stay the MT defaults; CF is fallback
+    # only (owner decision 2026-07-05; mother-doc §89 amended). ASR keeps its T1.2 cloud-first.
+    "mt": ["groq", "deepl", "ollama", "cloudflare"],
     "tts": ["piper", "edge_tts", "cloudflare"],
 }
 

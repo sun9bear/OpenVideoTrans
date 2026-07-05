@@ -116,6 +116,20 @@ def test_asr_ladder_is_cloud_first() -> None:
     assert AUTO_LADDER["asr"] == ["groq", "cloudflare", "faster_whisper"]
 
 
+def test_mt_ladder_keeps_cloudflare_as_last_resort() -> None:
+    # A single CF cred pair (CLOUDFLARE_ACCOUNT_ID/TOKEN) makes CloudflareTTS, CloudflareMT AND
+    # CloudflareASR available at once. Unlike TTS, the MT route has NO commercial-safe/locale gate,
+    # so a CF-led MT ladder would SILENTLY become the fleet-wide default MT engine the moment the
+    # CF token is wired for TTS — an unreviewed translation change (and CloudflareMT hard-fails on
+    # an 'auto' source, wasting a select+reroute per no-source-hint job). Keep CF a LAST-RESORT MT
+    # fallback so wiring it for TTS never changes the default translation engine
+    # (owner decision 2026-07-05; mother-doc §89 amended).
+    mt = AUTO_LADDER["mt"]
+    assert mt[0] != "cloudflare"
+    assert mt.index("groq") < mt.index("cloudflare")
+    assert mt.index("deepl") < mt.index("cloudflare")
+
+
 def test_probe_and_list_providers() -> None:
     assert set(list_providers("tts")) == {"edge_tts", "cloudflare", "piper", "elevenlabs"}
     rows = probe("asr")
