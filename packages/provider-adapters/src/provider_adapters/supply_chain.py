@@ -46,16 +46,41 @@ class PinnedArtifact:
     license_id: str
 
 
-# Curated pins for artifacts vendored into the default image. Real hashes are filled when an
-# artifact is vetted in; until then operators pin their own download via FVD_<NAME>_SHA256.
-# (Left empty here: no binary is committed to this repo to hash against.)
-#
-# P1b-bake will ADD an entry per baked multi-voice Piper voice, keyed by its rhasspy BASENAME
-# (e.g. "en_US-ryan-medium" -> PinnedArtifact(<real v1.0.0 sha256>, "MIT")). verify_piper_voice
-# reads THIS table only (NOT the FVD_<NAME>_SHA256 env override): the basename comes from a file in
-# FVD_PIPER_VOICES_DIR, so honoring a same-named env var would let an actor who controls both the
-# file and the env forge a pin. The curated table is the sole pin source for the baked set.
-_PINNED: dict[str, PinnedArtifact] = {}
+# Baked multi-voice Piper pins (P1b-bake): the rhasspy/piper-voices@v1.0.0 content sha256 for each
+# voice baked into the default worker image, keyed by rhasspy BASENAME. These are the HF tree API
+# `lfs.oid` (HuggingFace's authoritative stored content hash for the immutable v1.0.0 tag) — NOT
+# computed from a local download, so committing them pins the image against later tag-drift / a
+# tampered mirror / a corrupted fetch (build fails closed on mismatch). All piper voices are MIT.
+# verify_piper_voice reads THIS table ONLY (never the FVD_<NAME>_SHA256 env override): the
+# basename comes from a file in the voices dir, so a same-named env var would let an actor who
+# controls both the file and the env forge a pin. The Dockerfile downloads exactly these
+# into the voices dir and verifies each against this table at BUILD time; verify_piper_voices_dir
+# re-checks at CLI admission / doctor. To add/repin a voice: update the HF `lfs.oid` here + the
+# Dockerfile PIPER_VOICE_PATHS list together (a drift between them fails the build).
+_PIPER_VOICE_SHA256: dict[str, str] = {
+    "en_US-ryan-medium": "abf4c274862564ed647ba0d2c47f8ee7c9b717d27bdad9219100eb310db4047a",
+    "en_US-amy-medium": "b3a6e47b57b8c7fbe6a0ce2518161a50f59a9cdd8a50835c02cb02bdd6206c18",
+    "zh_CN-huayan-medium": "9929917bf8cabb26fd528ea44d3a6699c11e87317a14765312420be230be0f3d",
+    "es_ES-davefx-medium": "6658b03b1a6c316ee4c265a9896abc1393353c2d9e1bca7d66c2c442e222a917",
+    "es_ES-sharvard-medium": "40febfb1679c69a4505ff311dc136e121e3419a13a290ef264fdf43ddedd0fb1",
+    "fr_FR-gilles-low": "5cd711846720e261c2a176f6924c198a7424d0a75dd4b0a5357a5fb9cb739285",
+    "fr_FR-siwis-medium": "641d1ab097da2b81128c076810edb052b385decc8be3381814802a64a73baf99",
+    "de_DE-thorsten-medium": "7e64762d8e5118bb578f2eea6207e1a35a8e0c30595010b666f983fc87bb7819",
+    "de_DE-eva_k-x_low": "e88cf290fbfb768bf111330d2e8a46e376b0d85e3423a28bfebbc863a260dad8",
+    "pt_BR-faber-medium": "858555e3a064209c57088fe6bd70c4c3dc54d03eaa00c45d5ecaf43a33f95aa7",
+    "pt_BR-edresson-low": "de4cecee38b30bb1a6378a337af605d59f0c377df702c6a6752870db8991cd84",
+    "ru_RU-dmitri-medium": "f073356ebc4bd0f80c5af58df2953a5988bd5bdab1eb38635ce960b071fbefcb",
+    "ru_RU-irina-medium": "8ff38212d23da300bbe3705c645e6e5b9475f0bfde01558eb17813e22acaaaaa",
+    "it_IT-paola-medium": "6fc918b5a0ea6137382833dddfa567bffbe6a5060c02043c87192ee59c04210c",
+}
+
+# Curated integrity pins for artifacts vendored into the default image (the baked Piper voice set +
+# any future fixed-name artifact). A fixed-name single artifact may ALSO be operator-pinned via
+# FVD_<NAME>_SHA256 (see expected_sha256); baked-voice basenames are the curated set only.
+_PINNED: dict[str, PinnedArtifact] = {
+    name: PinnedArtifact(sha256=digest, license_id="MIT")
+    for name, digest in _PIPER_VOICE_SHA256.items()
+}
 
 # Bundled-model license classification. Permissive => default-image-OK; the CC-BY-NC family
 # => blocked from the default image (opt-in needs an audited acknowledgment).

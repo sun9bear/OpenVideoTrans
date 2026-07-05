@@ -99,12 +99,10 @@ def test_is_non_commercial_classification() -> None:
 
 # ── multi-voice piper pins (P1b F1) ──────────────────────────────────────────
 def _pin(monkeypatch: pytest.MonkeyPatch, **basename_to_path: str) -> None:
-    """Add curated committed pins for baked-voice basenames (the real _PINNED source; a hyphenated
-    basename can't ride the FVD_<NAME>_SHA256 env path). Replaces the module dict so expected_sha256
-    sees the injected pins."""
-    pins = dict(sc._PINNED)
-    for basename, path in basename_to_path.items():
-        pins[basename] = PinnedArtifact(sha256=sha256_file(path), license_id="MIT")
+    """Replace _PINNED with EXACTLY these curated basename pins — hermetic, so tests don't inherit
+    the shipped baked-voice table (a basename absent here is genuinely unpinned)."""
+    pins = {b: PinnedArtifact(sha256=sha256_file(p), license_id="MIT")
+            for b, p in basename_to_path.items()}
     monkeypatch.setattr(sc, "_PINNED", pins)
 
 
