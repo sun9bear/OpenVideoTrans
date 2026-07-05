@@ -58,6 +58,18 @@ class TtsProvider(Protocol):
     def synthesize(self, text: str, voice_id: str, lang: str, out_path: str) -> str: ...
 
 
+class DiarizerProvider(Protocol):
+    """Speaker diarization (P4): split the speech into single-speaker turns. Returns
+    ``(start_ms, end_ms, speaker_id)`` tuples — a STRUCTURAL return (no shared class), so an adapter
+    package satisfies this by shape with no import edge to the kernel, like the other provider
+    protocols. The kernel's ``diarize`` stage relabels transcript lines from these turns; a heavy
+    CPU/ONNX model (sherpa-onnx) is the concrete impl (P4b), run under the worker's RAM mutex."""
+
+    info: ProviderInfo
+
+    def diarize(self, audio_path: str) -> list[tuple[int, int, str]]: ...
+
+
 class Resolver(Protocol):
     """Resolves a provider for a capability. Implemented by ``provider-adapters``.
 

@@ -31,7 +31,7 @@ from .config import JobPaths
 from .isolation import pin_resolver
 from .jsonio import atomic_output, read_json, write_json
 from .manifest import write_manifest
-from .providers import ProviderUnavailable, Resolver, TtsProvider
+from .providers import DiarizerProvider, ProviderUnavailable, Resolver, TtsProvider
 
 
 def _log(msg: str) -> None:
@@ -163,6 +163,53 @@ def transcribe(paths: JobPaths, resolver: Resolver, provider: str | None,
     write_json(paths.transcript, result.model_dump())
     _log(f"transcribe: {len(result.lines)} lines, lang={result.source_language}")
     return result
+
+
+# --------------------------------------------------------------------------- #
+def _dominant_speaker(
+    start_ms: int, end_ms: int, turns: list[tuple[int, int, str]]
+) -> str | None:
+    """The speaker_id whose turns overlap the line span ``[start_ms, end_ms)`` the most (by summed
+    overlap ms). ``None`` when no turn overlaps (the caller keeps the line's existing label)."""
+    by_speaker: dict[str, int] = {}
+    for t_start, t_end, sid in turns:
+        overlap = min(end_ms, t_end) - max(start_ms, t_start)
+        if overlap > 0:
+            by_speaker[sid] = by_speaker.get(sid, 0) + overlap
+    if not by_speaker:
+        return None
+    # Tie-break deterministically by speaker_id so the same audio always labels identically.
+    return max(sorted(by_speaker), key=lambda s: by_speaker[s])
+
+
+def diarize(paths: JobPaths, diarizer: DiarizerProvider, force: bool = False) -> Transcript:
+    """Relabel transcript ``speaker_id``s from a diarizer's speaker turns (P4, 分角色配音).
+
+    Runs AFTER transcribe (needs the transcript + the extracted speech), BEFORE translate (which
+    passes speaker_id through to segments, where ``_assign_voices`` gives each distinct speaker a
+    distinct voice). Each line takes the speaker of the turn it overlaps most; a no-overlap line
+    keeps its existing label (``SPEAKER_00``). A diarizer that finds one/zero speakers leaves the
+    single-speaker baseline intact — enabling diarization can only ADD speakers, never break a job.
+
+    ``force`` re-runs even a cached (relabeled) transcript; otherwise a resume where transcribe was
+    cached still re-runs the diarizer (idempotent). A resume cache-gate is deferred to P4b (real
+    model cost worth skipping)."""
+    transcript = Transcript.model_validate(read_json(paths.transcript))
+    if not transcript.lines:
+        _log("diarize: no transcript lines; nothing to relabel")
+        return transcript
+    turns = list(diarizer.diarize(str(paths.speech)))
+    if not turns:
+        _log("diarize: diarizer found no speaker turns; keeping single-speaker labels")
+        return transcript
+    for ln in transcript.lines:
+        sid = _dominant_speaker(ln.start_ms, ln.end_ms, turns)
+        if sid is not None:
+            ln.speaker_id = sid
+    write_json(paths.transcript, transcript.model_dump())
+    n_speakers = len({ln.speaker_id for ln in transcript.lines})
+    _log(f"diarize: relabeled {len(transcript.lines)} line(s) -> {n_speakers} speaker(s)")
+    return transcript
 
 
 # --------------------------------------------------------------------------- #
@@ -663,6 +710,7 @@ def run_pipeline(
     mt: str | None = None,
     tts_provider: str | None = None,
     tts_voice: str | None = None,
+    diarizer: DiarizerProvider | None = None,
     separate: bool = False,
     keep_ambient: bool = True,
     force: bool = False,
@@ -713,6 +761,12 @@ def run_pipeline(
     ingest(paths, source, force=force)
     prepare(paths, separate=separate, force=force)
     transcribe(paths, resolver, asr, source_lang, force=force)
+    # P4 (opt-in, 分角色配音): relabel speakers BEFORE translate, so _assign_voices later gives each
+    # speaker a distinct voice. Gated on BOTH the Job's diarization flag AND an injected diarizer
+    # (the worker supplies a sherpa-onnx diarizer under its RAM mutex). The no-job CLI path, a
+    # flag-off job, or P4a-without-a-diarizer all skip it → single-speaker, byte-identical to today.
+    if diarizer is not None and job is not None and job.plan.diarization:
+        diarize(paths, diarizer, force=force)
     translate(paths, resolver, mt, target_lang, source_lang, force=force)
     # subtitle_only needs no synthesized/aligned audio — skip tts + align entirely.
     if output_mode in ("dub_only", "both"):
