@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from autodub_core import JobPaths, stages
 from autodub_core.jsonio import read_json, write_json
-from autodub_core.providers import ProviderUnavailable
+from autodub_core.providers import ProviderInfo, ProviderUnavailable
 from ovt_schemas.contracts import Transcript, TranscriptLine, TranslationResult
 
 
@@ -540,3 +540,80 @@ def test_tts_force_clears_stale_raw_variant(tmp_path: Path) -> None:
     assert paths.tts_raw(0, "wav").exists()    # fresh .wav written
     raws = [p for p in paths.tts.glob("segment_0000.*") if not p.name.endswith("_aligned.wav")]
     assert len(raws) == 1                       # exactly one raw variant remains
+
+
+# ── P4: diarize stage (relabel speaker_ids from a diarizer's turns) ───────────────────────────────
+class _FakeDiarizer:
+    # Annotated ProviderInfo (not _Info): diarize() takes it DIRECTLY as a DiarizerProvider (the
+    # asr/mt/tts fakes instead reach the kernel via FakeResolver.select), so the mutable `info`
+    # attribute must be invariantly ProviderInfo for the protocol check, not the _Info class.
+    info: ProviderInfo = _Info("fake_diar")
+
+    def __init__(self, turns: list[tuple[int, int, str]]) -> None:
+        self._turns = turns
+        self.calls: list[str] = []
+
+    def diarize(self, audio_path: str) -> list[tuple[int, int, str]]:
+        self.calls.append(audio_path)
+        return self._turns
+
+
+def _write_transcript(paths: JobPaths, lines: list[tuple[int, int, str, str]]) -> None:
+    write_json(paths.transcript, Transcript(
+        source_language="en", asr_provider="fake_asr",
+        lines=[TranscriptLine(index=i, start_ms=s, end_ms=e, source_text=t, words=[], speaker_id=sp)
+               for i, (s, e, t, sp) in enumerate(lines)],
+    ).model_dump())
+
+
+def test_dominant_speaker_picks_max_overlap() -> None:
+    turns = [(0, 1000, "SPK_A"), (900, 2000, "SPK_B")]
+    assert stages._dominant_speaker(0, 800, turns) == "SPK_A"      # fully within A
+    assert stages._dominant_speaker(1100, 2000, turns) == "SPK_B"  # fully within B
+    assert stages._dominant_speaker(0, 1000, turns) == "SPK_A"     # 1000ms A vs 100ms B -> A
+    assert stages._dominant_speaker(5000, 6000, turns) is None     # no overlap -> keep existing
+
+
+def test_diarize_relabels_lines_by_overlap(tmp_path: Path) -> None:
+    # ASR baseline is single-speaker (all SPEAKER_00); the diarizer's turns relabel the two lines.
+    paths = JobPaths(tmp_path).ensure()
+    _write_transcript(paths, [(0, 1000, "hello", "SPEAKER_00"),
+                              (1000, 2000, "world", "SPEAKER_00")])
+    diar = _FakeDiarizer([(0, 1000, "SPEAKER_00"), (1000, 2000, "SPEAKER_01")])
+    tr = stages.diarize(paths, diar)
+    assert [ln.speaker_id for ln in tr.lines] == ["SPEAKER_00", "SPEAKER_01"]
+    assert diar.calls == [str(paths.speech)]  # the diarizer was run on the extracted speech
+    reloaded = Transcript.model_validate(read_json(paths.transcript))  # persisted
+    assert reloaded.lines[1].speaker_id == "SPEAKER_01"
+
+
+def test_diarize_no_turns_keeps_single_speaker(tmp_path: Path) -> None:
+    # A diarizer that finds no turns (silence / one speaker) leaves the baseline intact — enabling
+    # diarization can only ADD speakers, never break a job.
+    paths = JobPaths(tmp_path).ensure()
+    _write_transcript(paths, [(0, 1000, "a", "SPEAKER_00"), (1000, 2000, "b", "SPEAKER_00")])
+    tr = stages.diarize(paths, _FakeDiarizer([]))
+    assert {ln.speaker_id for ln in tr.lines} == {"SPEAKER_00"}
+
+
+def test_diarize_then_tts_assigns_distinct_voice_per_speaker(tmp_path: Path) -> None:
+    # End-to-end seam: diarize relabels -> translate passes speaker_id through -> _assign_voices
+    # gives each distinct speaker a distinct voice (分角色配音) — the P4 kernel deliverable.
+    res = FakeResolver()
+    paths = JobPaths(tmp_path).ensure()
+    _write_transcript(paths, [(0, 1000, "hello", "SPEAKER_00"),
+                              (1000, 2000, "world", "SPEAKER_00")])
+    stages.diarize(paths, _FakeDiarizer([(0, 1000, "SPEAKER_00"), (1000, 2000, "SPEAKER_01")]))
+    stages.translate(paths, res, None, "zh", "en")
+    tr = stages.tts(paths, res, None)
+    assert {s.speaker_id: s.voice_id for s in tr.segments} == {
+        "SPEAKER_00": "voiceA", "SPEAKER_01": "voiceB"}
+
+
+def test_diarize_empty_transcript_is_noop(tmp_path: Path) -> None:
+    paths = JobPaths(tmp_path).ensure()
+    _write_transcript(paths, [])
+    diar = _FakeDiarizer([(0, 1000, "SPEAKER_01")])
+    tr = stages.diarize(paths, diar)
+    assert tr.lines == []
+    assert diar.calls == []  # no lines -> the diarizer is never even run

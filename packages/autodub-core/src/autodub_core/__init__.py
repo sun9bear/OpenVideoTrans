@@ -27,6 +27,7 @@ from .isolation import (
 from .manifest import write_manifest
 from .providers import (
     AsrProvider,
+    DiarizerProvider,
     MtProvider,
     ProviderInfo,
     ProviderUnavailable,
@@ -37,6 +38,7 @@ from .stages import (
     TimingPlan,
     align,
     assign_timing,
+    diarize,
     ingest,
     mux,
     prepare,
@@ -63,6 +65,7 @@ __all__ = [
     "safe_component",
     "write_manifest",
     "AsrProvider",
+    "DiarizerProvider",
     "MtProvider",
     "ProviderInfo",
     "ProviderUnavailable",
@@ -71,6 +74,7 @@ __all__ = [
     "TimingPlan",
     "align",
     "assign_timing",
+    "diarize",
     "ingest",
     "mux",
     "prepare",
