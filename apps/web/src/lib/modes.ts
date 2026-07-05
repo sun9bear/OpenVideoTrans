@@ -6,11 +6,13 @@ export interface ModeOption {
   hint: string;
 }
 
-// 输出模式选择器（验收）：字幕 / 配音 / 双语。
+// 输出模式选择器（验收）：字幕 / 配音 / 双语。The per-mode duration cap is NOT baked into `hint`
+// (it is operator-tunable via CFG-GUARD) — App.svelte appends "，最长约 N 分钟" from the LIVE limits
+// (GET /api/config) so this text never drifts from the authoritative server cap. See caps.ts.
 export const OUTPUT_MODE_OPTIONS: ModeOption[] = [
-  { value: "subtitle_only", label: "仅字幕", hint: "生成翻译字幕（SRT），最长约 30 分钟" },
-  { value: "dub_only", label: "配音", hint: "生成配音音轨，最长约 5 分钟" },
-  { value: "both", label: "字幕 + 配音", hint: "字幕与配音都生成，最长约 5 分钟" },
+  { value: "subtitle_only", label: "仅字幕", hint: "生成翻译字幕（SRT）" },
+  { value: "dub_only", label: "配音", hint: "生成配音音轨" },
+  { value: "both", label: "字幕 + 配音", hint: "字幕与配音都生成" },
 ];
 
 export interface DeliveryOption {

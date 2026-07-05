@@ -82,4 +82,36 @@ describe("App — smoke", () => {
     unmount(app);
     target.remove();
   });
+
+  it("mode hints reflect the LIVE per-mode cap from /api/config (not a hardcoded value)", async () => {
+    expireAnonCookie();
+    // Operator raised every mode's cap to 30 min via CFG-GUARD.
+    const fetchFn = vi.fn(async (url: string) =>
+      String(url).includes("/api/config")
+        ? {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              maxUploadBytes: 500 * 1024 * 1024,
+              maxVideoDurationMs: { subtitle_only: 1_800_000, dub_only: 1_800_000, both: 1_800_000 },
+            }),
+          }
+        : { ok: true, status: 200, json: async () => ({ anon_id: SIGNED }) },
+    );
+    vi.stubGlobal("fetch", fetchFn);
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const app = mount(App, { target });
+    flushSync();
+
+    // The dub hint tracks the LIVE 30-min cap once fetchLimits resolves — NOT the hardcoded 5-min default.
+    await vi.waitFor(() => {
+      expect(target.innerHTML).toContain("生成配音音轨，最长约 30 分钟");
+    });
+    expect(target.innerHTML).toContain("字幕与配音都生成，最长约 30 分钟");
+    expect(target.innerHTML).not.toContain("最长约 5 分钟"); // stale default is gone
+
+    unmount(app);
+    target.remove();
+  });
 });
