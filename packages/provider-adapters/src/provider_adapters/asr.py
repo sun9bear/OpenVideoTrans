@@ -129,16 +129,21 @@ def _cjk_ratio(text: str) -> float:
 def _drop_script_hallucinations(
     lines: list[TranscriptLine], source_language: str | None
 ) -> list[TranscriptLine]:
-    """Drop lines that are predominantly CJK when the source language is not CJK — a Whisper
-    hallucination on a non-speech segment. Returns the input unchanged (same object) when the source
-    is CJK or undetermined ('auto'/None) or when nothing is dropped; otherwise a re-indexed copy so
-    indices stay contiguous for the align/translate stages."""
-    base = (source_language or "").split("-")[0].lower()
-    if not base or base == "auto" or base in _CJK_SOURCE_LANGS:
+    """Drop predominantly-CJK lines that are a MINORITY of an otherwise non-CJK transcript — a
+    Whisper hallucination on a non-speech segment. Decides on the transcript's OWN script mix (not
+    just the declared source), so it also fires on the no-hint 'auto' path (e.g. Cloudflare ASR,
+    which reports no detected language). No-op — returns the input unchanged — when:
+      * the source is EXPLICITLY CJK (zh/ja/ko): CJK text is real speech; or
+      * no line is predominantly CJK; or
+      * CJK lines are AT LEAST HALF the transcript — then the audio is genuinely CJK (a wrong /
+        absent / mis-detected source), so keep everything rather than empty a real transcript.
+    Otherwise returns a re-indexed copy (indices stay contiguous for align/translate)."""
+    if (source_language or "").split("-")[0].lower() in _CJK_SOURCE_LANGS:
+        return lines
+    cjk = [line for line in lines if _cjk_ratio(line.source_text) >= 0.5]
+    if not cjk or len(cjk) * 2 >= len(lines):
         return lines
     kept = [line for line in lines if _cjk_ratio(line.source_text) < 0.5]
-    if len(kept) == len(lines):
-        return lines
     return [line.model_copy(update={"index": i}) for i, line in enumerate(kept)]
 
 
@@ -261,8 +266,11 @@ class _OpenAICompatASR(ASRProvider):
         if len(plan) == 1:
             # Pass the file duration so a text-only response (no segments/words/duration) spans
             # the audio instead of a zero-length cue — same guard as the chunked path (CodeX).
-            return self._parse(
+            t = self._parse(
                 self._request_json(plan[0].path, source_lang), source_lang, plan[0].duration_ms
+            )
+            return t.model_copy(
+                update={"lines": _drop_script_hallucinations(t.lines, t.source_language)}
             )
         # RED LINE (§1, CodeX): a PAID provider must not silently fan ONE authorised ASR
         # operation into N billed requests. Chunking over-limit audio multiplies paid calls,
@@ -286,9 +294,11 @@ class _OpenAICompatASR(ASRProvider):
                 detected = t.source_language  # keep the first chunk-detected language (CodeX)
         # Caller hint wins; else the first chunk-detected language; else "auto". The default CF
         # MT rejects "auto", so dropping the detection would fail a no-hint long-video job.
+        source_language = _iso639(source_lang) or detected or "auto"
         return Transcript(
-            source_language=_iso639(source_lang) or detected or "auto",
-            lines=chunker.merge_lines(parts), asr_provider=self.info.name,
+            source_language=source_language,
+            lines=_drop_script_hallucinations(chunker.merge_lines(parts), source_language),
+            asr_provider=self.info.name,
         )
 
     def _request_json(self, audio_path: str, source_lang: str | None) -> dict:
@@ -345,11 +355,12 @@ class _OpenAICompatASR(ASRProvider):
         # Prefer the caller's hint over Whisper's detected NAME ("english"), normalizing
         # both to ISO-639-1 (CodeX): a raw name would break the default ASR->CloudflareMT
         # handoff. "auto" only when neither yields a usable code.
-        source_language = _iso639(source_lang) or _detected_to_iso(j.get("language")) or "auto"
+        # NOTE: no hallucination guard here — _parse runs PER CHUNK on the long-audio path, where a
+        # per-chunk script majority is unreliable. The guard is applied ONCE on the whole transcript
+        # by transcribe() (both the single-request and offset-merged paths).
         return Transcript(
-            source_language=source_language,
-            lines=_drop_script_hallucinations(lines, source_language),
-            asr_provider=self.info.name,
+            source_language=_iso639(source_lang) or _detected_to_iso(j.get("language")) or "auto",
+            lines=lines, asr_provider=self.info.name,
         )
 
 

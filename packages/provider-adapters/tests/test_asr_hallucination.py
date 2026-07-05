@@ -44,7 +44,7 @@ class TestCjkRatio:
 
 
 class TestDropScriptHallucinations:
-    def test_drops_cjk_line_in_english_transcript_and_reindexes(self) -> None:
+    def test_drops_minority_cjk_in_english_transcript_and_reindexes(self) -> None:
         lines = [
             _line(0, "Stay hungry, stay foolish."),
             _line(1, "简体中文（大陆）"),
@@ -62,19 +62,41 @@ class TestDropScriptHallucinations:
         out = _drop_script_hallucinations(lines, "zh-Hans")
         assert [line.source_text for line in out] == ["你好世界", "简体中文（大陆）"]
 
-    def test_noop_when_source_unknown(self) -> None:
-        lines = [_line(0, "简体中文（大陆）")]
-        assert _drop_script_hallucinations(lines, "auto") == lines
-        assert _drop_script_hallucinations(lines, None) == lines
+    def test_drops_minority_cjk_on_auto_source(self) -> None:
+        # Cloudflare ASR reports no detected language (source='auto'); the guard must STILL fire
+        # on a majority-non-CJK transcript — else the reported symptom survives the no-hint CF path.
+        lines = [
+            _line(0, "Good morning."), _line(1, "It is great to be here."),
+            _line(2, "简体中文（大陆）"), _line(3, "Let us begin."),
+        ]
+        out = _drop_script_hallucinations(lines, "auto")
+        assert [line.source_text for line in out] == [
+            "Good morning.", "It is great to be here.", "Let us begin.",
+        ]
 
-    def test_unchanged_when_no_hallucination(self) -> None:
+    def test_floor_keeps_all_when_cjk_is_majority(self) -> None:
+        # Genuinely-CJK audio mislabeled / mis-detected as a non-CJK source: CJK is the MAJORITY, so
+        # the guard must NOT empty the transcript (High-severity review finding). Keep everything.
+        lines = [
+            _line(0, "你好世界"), _line(1, "这是一个测试"),
+            _line(2, "谢谢大家"), _line(3, "background noise"),
+        ]
+        assert _drop_script_hallucinations(lines, "en") == lines  # wrong source; kept intact
+
+    def test_noop_when_no_cjk(self) -> None:
         lines = [_line(0, "Hello there."), _line(1, "General Kenobi.")]
         assert _drop_script_hallucinations(lines, "en") == lines
+        assert _drop_script_hallucinations(lines, None) == lines
 
     def test_japanese_hallucination_dropped_in_spanish_source(self) -> None:
-        lines = [_line(0, "Hola a todos"), _line(1, "ご視聴ありがとうございました")]
+        lines = [
+            _line(0, "Hola a todos"), _line(1, "Gracias por venir"),
+            _line(2, "Empecemos ya"), _line(3, "ご視聴ありがとうございました"),
+        ]
         out = _drop_script_hallucinations(lines, "es")
-        assert [line.source_text for line in out] == ["Hola a todos"]
+        assert [line.source_text for line in out] == [
+            "Hola a todos", "Gracias por venir", "Empecemos ya",
+        ]
 
 
 class TestFasterWhisperAppliesGuard:
@@ -118,3 +140,34 @@ class TestFasterWhisperAppliesGuard:
         assert transcript.source_language == "en"
         assert [line.source_text for line in transcript.lines] == ["Stay hungry.", "Thank you."]
         assert [line.index for line in transcript.lines] == [0, 1]
+
+
+class TestOpenAICompatAppliesGuard:
+    def test_groq_single_request_drops_cjk_hallucination(self, monkeypatch) -> None:
+        from provider_adapters import asr as asr_mod
+        from provider_adapters.asr import GroqASR
+
+        payload = {
+            "language": "english",
+            "words": [],
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "Good morning everyone."},
+                {"start": 1.2, "end": 2.0, "text": "简体中文（大陆）"},
+                {"start": 2.5, "end": 3.5, "text": "Let us begin."},
+            ],
+        }
+        asr = GroqASR()
+        monkeypatch.setattr(asr, "_ensure_available", lambda: None)
+        monkeypatch.setattr(asr, "_request_json", lambda _path, _lang: payload)
+        monkeypatch.setattr(
+            asr_mod.chunker, "plan_requests",
+            lambda _audio_path, _audio, _work: [
+                types.SimpleNamespace(path="chunk.mp3", duration_ms=3500, offset_ms=0)
+            ],
+        )
+        transcript = asr.transcribe("/tmp/audio.mp3", source_lang=None)
+        assert transcript.source_language == "en"
+        assert [line.source_text for line in transcript.lines] == [
+            "Good morning everyone.",
+            "Let us begin.",
+        ]
