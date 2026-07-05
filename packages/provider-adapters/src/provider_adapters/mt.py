@@ -1,5 +1,6 @@
-"""Translation providers. Auto-ladder: cloudflare(m2m100) -> groq(llama) -> deepl
--> ollama (all $0). Paid LLM MT (openai/deepseek) is opt-in only.
+"""Translation providers. Auto-ladder: groq(llama) -> deepl -> ollama ->
+cloudflare(m2m100) (all $0; CF is last-resort so wiring it for CF-TTS never makes
+it the default MT engine — see ladder.py). Paid LLM MT (openai/deepseek) is opt-in only.
 
 LLM-backed providers translate in length-aware batches (each line gets a spoken
 time budget so the dub fits its slot). Dedicated MT engines (m2m100, DeepL)

@@ -52,8 +52,12 @@ npx wrangler secret put ADMIN_TOKEN
 #    但在 **Workers Paid 计划**下超出每日 10k neuron 免费额度会**自动计费**——那等于 allow_paid=false
 #    的同时静默产生付费调用，违红线。**因此：仅当该 CF 账号是 Workers Free 计划时才注入 CF_AI_*。**
 #    Paid 计划要用 CF AI 属 Tier-2 付费决策，不在本免费托管层注入。
-npx wrangler secret put CF_AI_ACCOUNT_ID     # 仅 Workers FREE 计划账号；Workers AI Read/Run 最小权限
-npx wrangler secret put CF_AI_API_TOKEN
+# CF Workers AI（MeloTTS）—— 仅 Workers FREE 计划账号才配（见上红线）。已改为 Secrets Store + var，
+#   不再走 wrangler secret put：
+#   • CF_AI_ACCOUNT_ID 现为 wrangler.jsonc 的**非密钥 var**（复用 R2_ACCOUNT_ID 值）——无需 secret put。
+#   • CF_AI_API_TOKEN 存 **Cloudflare Secrets Store**（scope Workers、secret_name=CF_AI_API_TOKEN、
+#     store_id 见 wrangler.jsonc），由 SS_CF_AI_API_TOKEN binding 引入、resolveSecrets() 映射到
+#     env.CF_AI_API_TOKEN（token 最小权限 Workers AI Read/Run）。在 CF 控制台 Secrets Store 建/改该 secret 即可。
 npx wrangler secret put GROQ_API_KEY         # 可选（德国 VPS 不受 CN geo-block 影响）
 npx wrangler secret put DEEPL_API_KEY        # 可选，必须 :fx free key（Pro key 被 adapter 判 unavailable）
 npx wrangler secret put TURNSTILE_SECRET_KEY # ⚠ Turnstile 是唯一 fail-OPEN 配置：不注则 bot 门静默失效
