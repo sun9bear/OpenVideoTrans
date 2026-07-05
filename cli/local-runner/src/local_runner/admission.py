@@ -24,7 +24,12 @@ from provider_adapters import (
     assert_language_pair,
     resolve_source_language,
     verify_piper_model,
+    verify_piper_voices_dir,
 )
+
+# The SAME multi-voice-vs-legacy decision PiperTTS.synthesize makes, so admission verifies exactly
+# what will be synthesized (no parallel os.path.isdir check that could drift out of lockstep).
+from provider_adapters.tts import _piper_voices_dir
 
 # Commercial-safe TTS for a DEFAULT dub (mirrors provider_adapters.languages._COMMERCIAL_SAFE_TTS):
 # piper (per-model license-checked, T1.3g) + Cloudflare MeloTTS. edge_tts stays experimental.
@@ -76,14 +81,20 @@ def admit(
         except ProviderUnavailable:
             continue  # vetted for this locale but not configured on this host — try the next
         if name == "piper":
-            # T1.3g supply-chain: a default dub must use a PINNED piper .onnx. Enforce the hash in
-            # the RUN path here (not only in `doctor`), so an unpinned / tampered model fails closed
-            # before synthesis (@CodeX CLI). The real Resolver marks piper available only when
-            # FVD_PIPER_MODEL is set, so this fires on every real run; a fake/test resolver that
-            # vouches availability with no model env is trusted (nothing on disk to verify).
-            model = os.getenv("FVD_PIPER_MODEL")
-            if model:
-                verify_piper_model(model)  # raises SupplyChainError on unpinned / hash mismatch
+            # T1.3g supply-chain: a default dub must use PINNED piper .onnx model(s). Enforce the
+            # hash in the RUN path here (not only in `doctor`) so an unpinned / tampered model fails
+            # closed before synthesis (@CodeX CLI). Branch on tts._piper_voices_dir() — the exact
+            # decision synthesis makes — so we verify what actually runs: multi-voice (P1b, F1)
+            # verifies every baked <VOICES_DIR>/*.onnx; legacy verifies the single FVD_PIPER_MODEL.
+            # One-shot CLI path, so hashing the baked set once is fine. A fake/test resolver that
+            # vouches availability with nothing on disk is trusted (nothing to verify).
+            voices_dir = _piper_voices_dir()
+            if voices_dir is not None:
+                verify_piper_voices_dir(voices_dir)  # raises on any unpinned / mismatched voice
+            else:
+                model = os.getenv("FVD_PIPER_MODEL")
+                if model:
+                    verify_piper_model(model)  # raises SupplyChainError on unpinned / mismatch
         return Admission(source_lang=source_lang, tts_provider=name)
     raise LanguageError(
         "no_tts_model_for_language",

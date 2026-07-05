@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 from ovt_schemas.contracts import ModelRef
 
@@ -48,6 +49,12 @@ class PinnedArtifact:
 # Curated pins for artifacts vendored into the default image. Real hashes are filled when an
 # artifact is vetted in; until then operators pin their own download via FVD_<NAME>_SHA256.
 # (Left empty here: no binary is committed to this repo to hash against.)
+#
+# P1b-bake will ADD an entry per baked multi-voice Piper voice, keyed by its rhasspy BASENAME
+# (e.g. "en_US-ryan-medium" -> PinnedArtifact(<real v1.0.0 sha256>, "MIT")). verify_piper_voice
+# reads THIS table only (NOT the FVD_<NAME>_SHA256 env override): the basename comes from a file in
+# FVD_PIPER_VOICES_DIR, so honoring a same-named env var would let an actor who controls both the
+# file and the env forge a pin. The curated table is the sole pin source for the baked set.
 _PINNED: dict[str, PinnedArtifact] = {}
 
 # Bundled-model license classification. Permissive => default-image-OK; the CC-BY-NC family
@@ -116,6 +123,45 @@ def verify_pinned(name: str, path: str) -> ModelRef:
 def verify_piper_model(model_path: str) -> ModelRef:
     """Integrity-pin a piper ``.onnx`` voice model before it is used."""
     return verify_pinned("piper_model", model_path)
+
+
+def verify_piper_voice(basename: str, path: str) -> ModelRef:
+    """Integrity-pin ONE multi-voice Piper ``.onnx`` (P1b) against the CURATED ``_PINNED`` table
+    ONLY. The pin key is the rhasspy model BASENAME (e.g. ``en_US-ryan-medium``) — derived from a
+    filename in ``FVD_PIPER_VOICES_DIR``, which an actor able to drop/rename files there controls.
+    So, unlike the fixed-name single-model pin (``verify_piper_model``/``verify_pinned``), this path
+    deliberately does NOT honor the ``FVD_<NAME>_SHA256`` env override: the basename AND the env are
+    both attacker-influenceable, and pairing them would let a swapped voice carry a forged pin.
+    Fails closed when the basename is unpinned in ``_PINNED``."""
+    pin = _PINNED.get(basename)
+    if pin is None:
+        raise SupplyChainError(
+            f"piper voice {basename!r} is not pinned in the curated _PINNED table: refusing an "
+            f"unpinned multi-voice model (the FVD_*_SHA256 env override is intentionally not "
+            f"honored for a filename-derived pin name)"
+        )
+    digest = verify_sha256(path, pin.sha256)
+    return ModelRef(name=basename, version=None, sha256=digest)
+
+
+def verify_piper_voices_dir(voices_dir: str) -> list[ModelRef]:
+    """Integrity-pin EVERY installed ``<voices_dir>/*.onnx`` (P1b multi-voice mode). Each model must
+    carry a curated pin keyed by its basename; ANY unpinned or hash-mismatched voice fails closed
+    (``SupplyChainError``) before synthesis. Returns a ``ModelRef`` per voice for the manifest.
+
+    This is the F1 fix: admission/doctor previously enforced the T1.3g pin by reading only
+    ``FVD_PIPER_MODEL`` (unset in multi-voice mode), so the dir's models ran unverified. An empty
+    dir raises — enabling multi-voice Piper with no installed model is a misconfiguration, not a
+    silent no-op. Only the ``.onnx`` weights are pinned (mirrors the single-model path, which pins
+    weights, not the small ``.onnx.json`` config). Callers are one-shot (CLI admission / doctor
+    preflight), so hashing the whole baked set once per invocation is fine — not a per-job path."""
+    onnx = sorted(Path(voices_dir).glob("*.onnx"))
+    if not onnx:
+        raise SupplyChainError(
+            f"no *.onnx in FVD_PIPER_VOICES_DIR {voices_dir!r}: refusing to enable multi-voice "
+            f"Piper with no installed model"
+        )
+    return [verify_piper_voice(p.stem, str(p)) for p in onnx]
 
 
 def verify_ffmpeg() -> ModelRef:

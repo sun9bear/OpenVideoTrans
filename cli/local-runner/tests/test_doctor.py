@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from local_runner.doctor import run_doctor
 from provider_adapters import sha256_file
+from provider_adapters import supply_chain as sc
+from provider_adapters.supply_chain import PinnedArtifact
 
 
 def test_doctor_reports_providers_and_supply_chain(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,3 +64,36 @@ def test_doctor_enforces_ffmpeg_pin_when_set(monkeypatch: pytest.MonkeyPatch) ->
     lines: list[str] = []
     assert run_doctor(out=lines.append) == 1
     assert any("ffmpeg pin: FAIL" in ln for ln in lines)
+
+
+def test_doctor_verifies_multivoice_dir_pins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P1b F1: with FVD_PIPER_VOICES_DIR set, doctor verifies EVERY baked *.onnx pin (the
+    # single-model FVD_PIPER_MODEL check no-ops in multi-voice mode).
+    monkeypatch.delenv("FVD_PIPER_MODEL", raising=False)
+    monkeypatch.delenv("FVD_FFMPEG_SHA256", raising=False)
+    d = tmp_path / "voices"
+    d.mkdir()
+    ryan = d / "en_US-ryan-medium.onnx"
+    ryan.write_bytes(b"\x00ryan-weights")
+    monkeypatch.setenv("FVD_PIPER_VOICES_DIR", str(d))
+    monkeypatch.setattr(sc, "_PINNED",
+                        {"en_US-ryan-medium": PinnedArtifact(sha256_file(str(ryan)), "MIT")})
+    lines: list[str] = []
+    assert run_doctor(out=lines.append) == 0
+    assert any("piper voices pin: OK" in ln for ln in lines)
+
+
+def test_doctor_fails_on_unpinned_multivoice_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FVD_PIPER_MODEL", raising=False)
+    d = tmp_path / "voices"
+    d.mkdir()
+    (d / "en_US-ryan-medium.onnx").write_bytes(b"\x00ryan-weights")
+    monkeypatch.setenv("FVD_PIPER_VOICES_DIR", str(d))
+    monkeypatch.setattr(sc, "_PINNED", {})  # no committed pin -> fail closed
+    lines: list[str] = []
+    assert run_doctor(out=lines.append) == 1
+    assert any("piper voices pin: FAIL" in ln for ln in lines)

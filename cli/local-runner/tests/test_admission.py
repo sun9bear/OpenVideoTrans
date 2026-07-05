@@ -13,6 +13,8 @@ from provider_adapters import (
     SupplyChainError,
     sha256_file,
 )
+from provider_adapters import supply_chain as sc
+from provider_adapters.supply_chain import PinnedArtifact
 
 
 class _FakeResolver:
@@ -83,6 +85,27 @@ def test_dub_piper_enforces_supply_chain_pin_in_run_path(
     with pytest.raises(SupplyChainError, match="sha256 mismatch"):
         admit(target_lang="es", output_mode="dub_only", resolver=_FakeResolver({"piper"}))
     monkeypatch.setenv("FVD_PIPER_MODEL_SHA256", sha256_file(str(model)))  # correct pin
+    adm = admit(target_lang="es", output_mode="dub_only", resolver=_FakeResolver({"piper"}))
+    assert adm.tts_provider == "piper"
+
+
+def test_dub_piper_enforces_voices_dir_pins_in_run_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch  # noqa: ANN001
+) -> None:
+    # P1b F1: multi-voice mode (FVD_PIPER_VOICES_DIR) must verify EVERY baked <VOICES_DIR>/*.onnx
+    # pin in the run path — the single-model FVD_PIPER_MODEL check no-ops when the dir is set, so an
+    # unpinned voice would otherwise run unverified.
+    d = tmp_path / "voices"
+    d.mkdir()
+    ryan = d / "en_US-ryan-medium.onnx"
+    ryan.write_bytes(b"\x00ryan-weights")
+    monkeypatch.delenv("FVD_PIPER_MODEL", raising=False)
+    monkeypatch.setenv("FVD_PIPER_VOICES_DIR", str(d))
+    monkeypatch.setattr(sc, "_PINNED", {})  # nothing pinned -> fail closed
+    with pytest.raises(SupplyChainError, match="not pinned"):
+        admit(target_lang="es", output_mode="dub_only", resolver=_FakeResolver({"piper"}))
+    monkeypatch.setattr(sc, "_PINNED",
+                        {"en_US-ryan-medium": PinnedArtifact(sha256_file(str(ryan)), "MIT")})
     adm = admit(target_lang="es", output_mode="dub_only", resolver=_FakeResolver({"piper"}))
     assert adm.tts_provider == "piper"
 

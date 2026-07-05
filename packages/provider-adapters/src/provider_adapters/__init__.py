@@ -55,6 +55,8 @@ from .supply_chain import (
     verify_ffmpeg,
     verify_pinned,
     verify_piper_model,
+    verify_piper_voice,
+    verify_piper_voices_dir,
     verify_sha256,
 )
 from .tts import list_tts_voices, piper_model_covers, piper_model_language, tts_preset_voices
@@ -109,5 +111,7 @@ __all__ = [
     "verify_ffmpeg",
     "verify_pinned",
     "verify_piper_model",
+    "verify_piper_voice",
+    "verify_piper_voices_dir",
     "verify_sha256",
 ]

@@ -20,7 +20,11 @@ from provider_adapters import (
     probe,
     verify_ffmpeg,
     verify_piper_model,
+    verify_piper_voices_dir,
 )
+
+# Same validated multi-voice decision PiperTTS uses, so doctor reports the mode that will run.
+from provider_adapters.tts import _piper_voices_dir
 
 _BUNDLED_MODELS = ("piper", "whisper", "faster_whisper", "edge_tts")
 
@@ -38,8 +42,18 @@ def run_doctor(out: Callable[[str], None] = print) -> int:
             out(f"    {flag}{name}{paid}")
 
     out("supply-chain")
+    voices_dir = _piper_voices_dir()  # tts's validated multi-voice decision (None => single-model)
     model = os.getenv("FVD_PIPER_MODEL")
-    if model:
+    if voices_dir is not None:
+        # Multi-voice (P1b, F1): verify EVERY baked <VOICES_DIR>/*.onnx — the single-model
+        # FVD_PIPER_MODEL check no-ops when the dir is active, so it must be enforced here too.
+        try:
+            refs = verify_piper_voices_dir(voices_dir)
+            out(f"  piper voices pin: OK ({len(refs)} voice(s) verified)")
+        except (SupplyChainError, OSError) as exc:
+            ok = False
+            out(f"  piper voices pin: FAIL - {exc}")
+    elif model:
         try:
             ref = verify_piper_model(model)
             out(f"  piper model pin: OK ({(ref.sha256 or '')[:12]})")
@@ -49,7 +63,7 @@ def run_doctor(out: Callable[[str], None] = print) -> int:
             ok = False
             out(f"  piper model pin: FAIL - {exc}")
     else:
-        out("  piper model pin: skipped (FVD_PIPER_MODEL unset)")
+        out("  piper model pin: skipped (FVD_PIPER_MODEL / FVD_PIPER_VOICES_DIR unset)")
 
     # The ffmpeg binary is the other T1.3g-pinned artifact run_pipeline invokes; enforce its pin
     # here too (verify_ffmpeg had no caller before — @CodeX CLI), when the operator has set one.

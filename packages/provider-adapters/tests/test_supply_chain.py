@@ -14,7 +14,12 @@ from provider_adapters import (
     sha256_file,
     verify_sha256,
 )
-from provider_adapters.supply_chain import verify_piper_model
+from provider_adapters import supply_chain as sc
+from provider_adapters.supply_chain import (
+    PinnedArtifact,
+    verify_piper_model,
+    verify_piper_voices_dir,
+)
 
 
 # ── sha256 integrity pin ─────────────────────────────────────────────────────
@@ -90,3 +95,80 @@ def test_is_non_commercial_classification() -> None:
     assert is_non_commercial("cc-by-nc-sa")
     assert not is_non_commercial("MIT")
     assert not is_non_commercial("apache-2.0")
+
+
+# ── multi-voice piper pins (P1b F1) ──────────────────────────────────────────
+def _pin(monkeypatch: pytest.MonkeyPatch, **basename_to_path: str) -> None:
+    """Add curated committed pins for baked-voice basenames (the real _PINNED source; a hyphenated
+    basename can't ride the FVD_<NAME>_SHA256 env path). Replaces the module dict so expected_sha256
+    sees the injected pins."""
+    pins = dict(sc._PINNED)
+    for basename, path in basename_to_path.items():
+        pins[basename] = PinnedArtifact(sha256=sha256_file(path), license_id="MIT")
+    monkeypatch.setattr(sc, "_PINNED", pins)
+
+
+def test_verify_voices_dir_passes_when_all_pinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = tmp_path / "voices"
+    d.mkdir()
+    (d / "en_US-ryan-medium.onnx").write_bytes(b"ryan-weights")
+    (d / "en_US-amy-medium.onnx").write_bytes(b"amy-weights")
+    (d / "en_US-ryan-medium.onnx.json").write_text("{}")  # sidecar config is NOT hashed/pinned
+    _pin(monkeypatch,
+         **{"en_US-ryan-medium": str(d / "en_US-ryan-medium.onnx"),
+            "en_US-amy-medium": str(d / "en_US-amy-medium.onnx")})
+    refs = verify_piper_voices_dir(str(d))
+    assert {r.name for r in refs} == {"en_US-ryan-medium", "en_US-amy-medium"}
+    assert all(r.sha256 for r in refs)
+
+
+def test_verify_voices_dir_fails_closed_on_unpinned_voice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = tmp_path / "voices"
+    d.mkdir()
+    (d / "en_US-ryan-medium.onnx").write_bytes(b"ryan-weights")
+    (d / "de_DE-thorsten-medium.onnx").write_bytes(b"thorsten-weights")  # NOT pinned
+    _pin(monkeypatch, **{"en_US-ryan-medium": str(d / "en_US-ryan-medium.onnx")})
+    with pytest.raises(SupplyChainError, match="not pinned"):
+        verify_piper_voices_dir(str(d))  # one unpinned voice fails the whole set closed
+
+
+def test_verify_voices_dir_fails_closed_on_tampered_voice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = tmp_path / "voices"
+    d.mkdir()
+    f = d / "en_US-ryan-medium.onnx"
+    f.write_bytes(b"ryan-weights")
+    _pin(monkeypatch, **{"en_US-ryan-medium": str(f)})
+    f.write_bytes(b"swapped-after-pinning")  # bytes changed since the pin -> hash mismatch
+    with pytest.raises(SupplyChainError, match="sha256 mismatch"):
+        verify_piper_voices_dir(str(d))
+
+
+def test_verify_voices_dir_empty_fails_closed(tmp_path: Path) -> None:
+    d = tmp_path / "voices"
+    d.mkdir()  # exists but no *.onnx
+    with pytest.raises(SupplyChainError, match=r"no \*.onnx"):
+        verify_piper_voices_dir(str(d))
+
+
+def test_verify_voice_ignores_env_override_for_basename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SECURITY regression: the FVD_<NAME>_SHA256 env override must NOT forge a pin for a
+    # filename-derived basename. An attacker who drops a same-named .onnx AND sets the matching
+    # env var (both influenceable) must still fail closed — basename pins read _PINNED ONLY.
+    d = tmp_path / "voices"
+    d.mkdir()
+    evil = d / "en_US-ryan-medium.onnx"
+    evil.write_bytes(b"attacker-swapped-weights")
+    monkeypatch.setattr(sc, "_PINNED", {})  # curated table empty (the shipped/inert state)
+    # os.environ accepts a hyphenated key (only bash `export` restricts identifiers), so this is a
+    # realistic override the old code (via expected_sha256) would have honored.
+    monkeypatch.setenv("FVD_EN_US-RYAN-MEDIUM_SHA256", sha256_file(str(evil)))
+    with pytest.raises(SupplyChainError, match="not pinned"):
+        verify_piper_voices_dir(str(d))
