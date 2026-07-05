@@ -213,15 +213,26 @@ def translate(paths: JobPaths, resolver: Resolver, provider: str | None, target_
 
 
 # --------------------------------------------------------------------------- #
-def _assign_voices(provider: TtsProvider, lang: str, speaker_ids: list[str]) -> dict[str, str]:
+def _assign_voices(
+    provider: TtsProvider, lang: str, speaker_ids: list[str],
+    *, pinned_voice: str | None = None,
+) -> dict[str, str]:
+    speakers = sorted(set(speaker_ids))
+    # An explicit user pin (JobPlan.tts_voice) wins: every speaker uses the pinned voice. The pin is
+    # trusted here — the worker soft-pin router already verified the pinned provider is installed
+    # and covers the locale (clearing the pin on a fallback), so we do NOT call voices_for, which
+    # would re-apply the auto catalog / commercial-safe gate and could reject an explicitly-chosen
+    # experimental edge voice (the owner-authorized pin bypass). Per-speaker voice_map is P4.
+    if pinned_voice:
+        return {sid: pinned_voice for sid in speakers}
     voices = provider.voices_for(lang)
     if not voices:
         raise ProviderUnavailable(f"{provider.info.name} has no voice for language {lang!r}")
-    return {sid: voices[i % len(voices)] for i, sid in enumerate(sorted(set(speaker_ids)))}
+    return {sid: voices[i % len(voices)] for i, sid in enumerate(speakers)}
 
 
 def tts(paths: JobPaths, resolver: Resolver, provider: str | None,
-        force: bool = False) -> TranslationResult:
+        force: bool = False, *, voice_id: str | None = None) -> TranslationResult:
     paths.ensure()  # standalone/resume runs must still have tts/ before writing
     result = TranslationResult.model_validate(read_json(paths.segments))
 
@@ -246,7 +257,8 @@ def tts(paths: JobPaths, resolver: Resolver, provider: str | None,
     engine = resolver.select("tts", provider, allow_paid=False)  # red line: never paid (§1/§14)
     _log(f"tts: provider={engine.info.name}")
     voice_map = _assign_voices(engine, result.target_language,
-                               [s.speaker_id for s in result.segments])
+                               [s.speaker_id for s in result.segments],
+                               pinned_voice=voice_id)
 
     for seg in to_synth:
         # Drop any stale raw variant for this index (e.g. a different extension
@@ -649,6 +661,7 @@ def run_pipeline(
     asr: str | None = None,
     mt: str | None = None,
     tts_provider: str | None = None,
+    tts_voice: str | None = None,
     separate: bool = False,
     keep_ambient: bool = True,
     force: bool = False,
@@ -688,6 +701,9 @@ def run_pipeline(
         subtitle_delivery = job.subtitle_delivery
         aigc_marking = job.aigc_marking
         asr, mt, tts_provider = job.plan.asr, job.plan.mt, job.plan.tts
+        # Explicit user-pinned dub voice (P0); null unless the picker sent one. The worker soft-pin
+        # router has already validated/rerouted it before this Job reaches the kernel.
+        tts_voice = job.plan.tts_voice
     elif aigc_marking is None:
         # Red line §3: AIGC marking is default-ON. The ad-hoc / no-job path never
         # ships an unmarked deliverable by omission — disabling needs an explicit
@@ -699,7 +715,7 @@ def run_pipeline(
     translate(paths, resolver, mt, target_lang, source_lang, force=force)
     # subtitle_only needs no synthesized/aligned audio — skip tts + align entirely.
     if output_mode in ("dub_only", "both"):
-        tts(paths, resolver, tts_provider, force=force)
+        tts(paths, resolver, tts_provider, force=force, voice_id=tts_voice)
         align(paths, force=force)
     # burn_font (per-locale libass name) and watermark_font (a deployment-wide font PATH for the
     # visible AIGC watermark) are caller-supplied, NOT Job-derived — the orchestrator resolves them

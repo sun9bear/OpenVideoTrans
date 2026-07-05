@@ -18,12 +18,12 @@ describe("error-code registry (single source of truth, PR-C consolidation)", () 
     expect(new Set(ERROR_CODES).size).toBe(ERROR_CODES.length);
   });
 
-  it("ERROR_CODES is exactly the frozen-contract set + deadline_exceeded + taken_down (14 codes)", () => {
+  it("ERROR_CODES is exactly the frozen-contract set + deadline_exceeded + taken_down (15 codes)", () => {
     const expected = [
       "over_duration", "unsupported_format", "upload_too_large", "source_verify_failed",
       "source_fetch_failed", "unsupported_language_pair", "no_tts_model_for_language",
-      "free_pool_exhausted", "worker_lost", "processing_timeout", "daily_cap_reached",
-      "internal_error", "deadline_exceeded", "taken_down",
+      "tts_provider_unavailable", "free_pool_exhausted", "worker_lost", "processing_timeout",
+      "daily_cap_reached", "internal_error", "deadline_exceeded", "taken_down",
     ];
     expect([...ERROR_CODES].sort()).toEqual([...expected].sort());
   });
