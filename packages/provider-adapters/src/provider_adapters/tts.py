@@ -205,7 +205,13 @@ def piper_model_language() -> str | None:
 def _piper_voices_dir() -> str | None:
     """The multi-voice Piper models directory (``FVD_PIPER_VOICES_DIR``), or None for the legacy
     single-model deployment. When set to a real dir, PiperTTS serves EVERY installed catalog voice
-    (P1: multiple M/F models per locale) instead of the one ``FVD_PIPER_MODEL``."""
+    (P1: multiple M/F models per locale) instead of the one ``FVD_PIPER_MODEL``.
+
+    ⚠️ P1b-bake BLOCKER (supply-chain, T1.3g): admission.py / doctor.py enforce the sha256 pin
+    (verify_piper_model) by reading ONLY ``FVD_PIPER_MODEL`` — which is unset in multi-voice mode, so
+    the integrity gate NO-OPS for the dir's models. Nothing sets this env yet (inert), but P1b-bake
+    MUST, together, (a) add sha256 pins for the baked M/F models and (b) make admission/doctor verify
+    EACH installed ``<VOICES_DIR>/*.onnx`` (fail-closed) before setting ``FVD_PIPER_VOICES_DIR``."""
     voices_dir = env("FVD_PIPER_VOICES_DIR")
     return voices_dir if voices_dir and Path(voices_dir).is_dir() else None
 
