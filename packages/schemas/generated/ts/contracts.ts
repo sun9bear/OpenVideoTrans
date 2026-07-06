@@ -100,6 +100,7 @@ export interface JobPlan {
   tts_voice?: string | null;
   voice_substituted?: boolean;
   diarization?: boolean;
+  voice_pool?: string[] | null;
 }
 
 /** R2 object keys for produced artifacts (set as the Job completes). */

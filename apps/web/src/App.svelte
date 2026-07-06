@@ -41,6 +41,7 @@
   let ttsVoice = $state("");
   let voicesGen = 0; // race guard: drop a slow fetch for a superseded target language
   let diarization = $state(false); // P4c: opt-in per-speaker dubbing (分角色配音)
+  let poolVoices = $state<string[]>([]); // P4c voice pool: chosen voices to cycle across speakers
 
   // Live display limits from GET /api/config (operator-tunable via CFG-GUARD); DEFAULT_LIMITS until the
   // fetch resolves / if it fails, so the warnings work offline. The server's ffprobe gate is authoritative.
@@ -165,21 +166,41 @@
       voices = [];
       ttsProvider = "";
       ttsVoice = "";
+      poolVoices = [];
       return;
     }
     const lang = targetLang;
     const gen = ++voicesGen;
     ttsProvider = "";
     ttsVoice = "";
+    poolVoices = [];
     void fetchTtsVoices(API_BASE, lang).then((vs) => {
       if (gen === voicesGen) voices = vs;
     });
   });
 
+  // The chosen engine's voice ids (order = catalog order). Used to seed the P4c pool.
+  const providerVoiceIds = () =>
+    voices.filter((v) => v.provider === ttsProvider).map((v) => v.voice_id);
+
   // Pairing invariant: a specific engine must carry a specific voice (the server 400s a half-pin), so
-  // default to the engine's first voice; "auto" (empty) clears the pin.
+  // default to the engine's first voice; "auto" (empty) clears the pin. In diarization (pool) mode the
+  // pool seeds to ALL the engine's voices (per-speaker over the full set); the user can narrow it.
   function onEngineChange() {
     ttsVoice = ttsProvider ? (voices.find((v) => v.provider === ttsProvider)?.voice_id ?? "") : "";
+    poolVoices = ttsProvider && diarization ? providerVoiceIds() : [];
+  }
+
+  // Entering/leaving pool mode: seed the pool to all of the engine's voices (default per-speaker over
+  // the whole set), or clear it. Empty pool = auto (the body sends no pool).
+  function onDiarizationChange() {
+    poolVoices = diarization && ttsProvider ? providerVoiceIds() : [];
+  }
+
+  function togglePoolVoice(id: string) {
+    poolVoices = poolVoices.includes(id)
+      ? poolVoices.filter((v) => v !== id)
+      : [...poolVoices, id];
   }
 
   // If the widget breaks WHILE a submission is parked waiting for a token, fail it rather than leaving
@@ -256,13 +277,20 @@
       if (durationSec) body.advisory_duration_ms = Math.round(durationSec * 1000);
       // P1d: attach the dub-voice pin ONLY as a complete pair for a dub mode (the server 400s a
       // half-pin or a pin on subtitle_only). "auto" (empty) sends neither → the server picks.
-      if (isDub && ttsProvider && ttsVoice) {
-        body.tts_provider = ttsProvider;
-        body.tts_voice = ttsVoice;
-      }
       // P4c: opt-in diarization, dub modes only (the server 400s it on subtitle_only). Send only when
       // enabled → a normal job's body stays byte-identical to pre-P4c.
       if (isDub && diarization) body.diarization = true;
+      // Voice pin, dub modes only. Two mutually-exclusive forms (the server 400s if both are sent):
+      //  - diarization ON + a specific engine + ≥1 pool voice → an ORDERED voice_pool (per-speaker);
+      //    an empty pool falls through to auto (no pin).
+      //  - otherwise a single tts_voice pin (the pairing invariant guarantees a voice for an engine).
+      if (isDub && ttsProvider && diarization && poolVoices.length > 0) {
+        body.tts_provider = ttsProvider;
+        body.voice_pool = [...poolVoices];
+      } else if (isDub && ttsProvider && !diarization && ttsVoice) {
+        body.tts_provider = ttsProvider;
+        body.tts_voice = ttsVoice;
+      }
       // The upload is done. If the gate is on but the widget is broken, no token can ever arrive — fail
       // now (don't park forever). Otherwise, if we don't hold a fresh token (never solved, or it expired
       // during a slow upload), park the job; the widget callback resumes it via runCreate.
@@ -464,7 +492,7 @@
           {/each}
         </select>
       </label>
-      {#if ttsProvider}
+      {#if ttsProvider && !diarization}
         <label class="field">
           <span class="label">音色</span>
           <select class="control" bind:value={ttsVoice} disabled={busy}>
@@ -473,16 +501,37 @@
             {/each}
           </select>
         </label>
-        {#if ttsProvider === "edge_tts"}
-          <small class="hint">该引擎为实验性、非商用（微软 Edge 朗读服务），建议仅用于个人 / 测试用途。</small>
-        {/if}
+      {/if}
+      {#if ttsProvider === "edge_tts"}
+        <small class="hint">该引擎为实验性、非商用（微软 Edge 朗读服务），建议仅用于个人 / 测试用途。</small>
       {/if}
       <label class="field checkbox">
-        <input type="checkbox" bind:checked={diarization} disabled={busy} />
+        <input
+          type="checkbox"
+          bind:checked={diarization}
+          onchange={onDiarizationChange}
+          disabled={busy}
+        />
         <span class="label">分角色配音（实验 · 多说话人自动分配不同音色）</span>
       </label>
       {#if diarization}
         <small class="hint">自动检测说话人并为每人分配不同音色；会增加处理时间。若部署未装分离模型，将自动回退为单一音色（不影响出片）。</small>
+      {/if}
+      {#if diarization && ttsProvider && providerVoices.length}
+        <fieldset class="field pool">
+          <legend class="label">音色池（勾选的音色循环分给各说话人；不勾 = 该引擎自动分配）</legend>
+          {#each providerVoices as v (v.voice_id)}
+            <label class="pool-opt">
+              <input
+                type="checkbox"
+                checked={poolVoices.includes(v.voice_id)}
+                onchange={() => togglePoolVoice(v.voice_id)}
+                disabled={busy}
+              />
+              <span>{v.label}{genderTag(v.gender)}</span>
+            </label>
+          {/each}
+        </fieldset>
       {/if}
     {/if}
 
@@ -631,6 +680,16 @@
   }
   .field.checkbox .label {
     cursor: pointer;
+  }
+  .field.pool {
+    gap: 6px;
+  }
+  .pool-opt {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 13px;
   }
   .label {
     font-family: var(--mono);

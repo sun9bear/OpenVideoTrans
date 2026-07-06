@@ -140,6 +140,7 @@ class JobPlan(BaseModel):
     tts_voice: str | None = None
     voice_substituted: bool = False
     diarization: bool = False
+    voice_pool: list[str] | None = None
 
 
 class JobArtifacts(BaseModel):

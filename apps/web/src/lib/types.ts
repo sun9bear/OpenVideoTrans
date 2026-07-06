@@ -34,6 +34,10 @@ export interface CreateJobBody {
   // server 400s it on subtitle_only). The deployment may not support it (worker available()-gate) —
   // then it degrades to single-speaker, never fails. Experimental + adds latency (a diarization pass).
   diarization?: boolean;
+  // P4c voice pool: an ORDERED list of the pinned provider's voices distributed across diarized
+  // speakers (cycling). Sent INSTEAD of tts_voice, only with a pinned tts_provider + diarization.
+  // Empty/omitted = auto (round-robin the provider's full set, or auto-route when no provider pinned).
+  voice_pool?: string[];
   // Cloudflare Turnstile token for the T2.4 abuse gate. Required by the server (admitJob) only when
   // TURNSTILE_SECRET_KEY is configured; omitted when the gate is inert (dev / self-host without it).
   turnstile_token?: string;

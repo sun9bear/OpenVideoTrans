@@ -493,18 +493,36 @@ def run_real_pipeline(
     # A pin needs a CONCRETE provider (not the "auto" auto-route sentinel from defaultPlan) AND a
     # voice id; an "auto" + voice combo is contradictory, so treat it as no pin and auto-route (the
     # orphan voice is ignored) rather than fail closed on a misleading "provider 'auto'" error.
+    # A pin needs a concrete provider AND at least one voice — either a single tts_voice OR a P4c
+    # voice_pool (an ordered list distributed across diarized speakers). The picker sends one voice
+    # form or the other, never both.
     tts_pin = (
         job.plan.tts
-        if ("tts" in kinds and job.plan.tts_voice and job.plan.tts and job.plan.tts != "auto")
+        if (
+            "tts" in kinds
+            and (job.plan.tts_voice or job.plan.voice_pool)
+            and job.plan.tts
+            and job.plan.tts != "auto"
+        )
         else None
     )
     tts_voice = job.plan.tts_voice if tts_pin else None
+    # P4c voice pool (分角色配音): the pinned provider's ordered voices, distributed across diarized
+    # speakers by the kernel. Copied so a reroute can drop it without mutating the Job.
+    voice_pool = list(job.plan.voice_pool) if (tts_pin and job.plan.voice_pool) else None
     voice_substituted = False
-    if tts_pin is not None and not _tts_pin_serviceable(tts_pin, tts_voice, job.target_lang):
+    # Validate EVERY pinned voice (the pool, else the single voice): each must be an installed,
+    # non-paid, locale-covering, CLOSED-preset voice of the pinned provider (open-core §4). A
+    # structural miss is the picker's fault → fail closed (tts_provider_unavailable), unlike a
+    # transient run-time exhaustion (which reroutes + substitutes below).
+    _pinned_voices = voice_pool if voice_pool else ([tts_voice] if tts_voice else [])
+    if tts_pin is not None and not all(
+        _tts_pin_serviceable(tts_pin, v, job.target_lang) for v in _pinned_voices
+    ):
         raise LanguageError(
             "tts_provider_unavailable",
             f"the pinned dub voice provider {tts_pin!r} is unavailable for {job.target_lang!r} on "
-            f"this deployment (not installed, or it does not cover the locale)",
+            f"this deployment (not installed / no locale coverage / an off-catalog voice)",
         )
     # Reroute backstop: at most one rotation per free provider of each active stage. A kind whose
     # providers are ALL excluded fails closed via _pick -> None first; this budget is sized to the
@@ -528,9 +546,12 @@ def run_real_pipeline(
         # SHARED-provider 429 also drops the pin — e.g. cloudflare serving both asr+tts is circuit-
         # broken provider-wide (account-wide quota), so an asr 429 correctly retires its tts too.
         if tts_pin is not None and plan.get("tts") != tts_pin:
-            voice_substituted, tts_voice, tts_pin = True, None, None
-        routed_plan: dict[str, str | bool | None] = {
-            **plan, "tts_voice": tts_voice, "voice_substituted": voice_substituted}
+            # Drop the pool too: its voices belong to the now-dead pinned provider, so the auto
+            # replacement must round-robin ITS own voices, not resurrect off-engine ids.
+            voice_substituted, tts_voice, voice_pool, tts_pin = True, None, None, None
+        routed_plan: dict[str, str | bool | list[str] | None] = {
+            **plan, "tts_voice": tts_voice, "voice_pool": voice_pool,
+            "voice_substituted": voice_substituted}
         routed = job.model_copy(update={"plan": job.plan.model_copy(update=routed_plan)})
         try:
             # target_lang is a REQUIRED kwarg of autodub_core.run_pipeline (it derives the rest from
