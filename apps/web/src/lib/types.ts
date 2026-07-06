@@ -30,6 +30,10 @@ export interface CreateJobBody {
   // auto-routed — red line §1); the server still rejects a paid provider 403.
   tts_provider?: string;
   tts_voice?: string;
+  // P4c diarization (分角色配音): opt-in per-speaker dubbing. Only sent for a dub output_mode (the
+  // server 400s it on subtitle_only). The deployment may not support it (worker available()-gate) —
+  // then it degrades to single-speaker, never fails. Experimental + adds latency (a diarization pass).
+  diarization?: boolean;
   // Cloudflare Turnstile token for the T2.4 abuse gate. Required by the server (admitJob) only when
   // TURNSTILE_SECRET_KEY is configured; omitted when the gate is inert (dev / self-host without it).
   turnstile_token?: string;

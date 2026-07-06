@@ -40,6 +40,7 @@
   let ttsProvider = $state("");
   let ttsVoice = $state("");
   let voicesGen = 0; // race guard: drop a slow fetch for a superseded target language
+  let diarization = $state(false); // P4c: opt-in per-speaker dubbing (分角色配音)
 
   // Live display limits from GET /api/config (operator-tunable via CFG-GUARD); DEFAULT_LIMITS until the
   // fetch resolves / if it fails, so the warnings work offline. The server's ffprobe gate is authoritative.
@@ -259,6 +260,9 @@
         body.tts_provider = ttsProvider;
         body.tts_voice = ttsVoice;
       }
+      // P4c: opt-in diarization, dub modes only (the server 400s it on subtitle_only). Send only when
+      // enabled → a normal job's body stays byte-identical to pre-P4c.
+      if (isDub && diarization) body.diarization = true;
       // The upload is done. If the gate is on but the widget is broken, no token can ever arrive — fail
       // now (don't park forever). Otherwise, if we don't hold a fresh token (never solved, or it expired
       // during a slow upload), park the job; the widget callback resumes it via runCreate.
@@ -473,6 +477,13 @@
           <small class="hint">该引擎为实验性、非商用（微软 Edge 朗读服务），建议仅用于个人 / 测试用途。</small>
         {/if}
       {/if}
+      <label class="field checkbox">
+        <input type="checkbox" bind:checked={diarization} disabled={busy} />
+        <span class="label">分角色配音（实验 · 多说话人自动分配不同音色）</span>
+      </label>
+      {#if diarization}
+        <small class="hint">自动检测说话人并为每人分配不同音色；会增加处理时间。若部署未装分离模型，将自动回退为单一音色（不影响出片）。</small>
+      {/if}
     {/if}
 
     {#if durationWarn}<p class="warn" role="alert">{durationWarn}</p>{/if}
@@ -611,6 +622,15 @@
     padding: 0;
     border: 0;
     min-width: 0;
+  }
+  .field.checkbox {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+  }
+  .field.checkbox .label {
+    cursor: pointer;
   }
   .label {
     font-family: var(--mono);

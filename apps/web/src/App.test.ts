@@ -145,6 +145,32 @@ describe("App — smoke", () => {
     target.remove();
   });
 
+  it("shows the diarization toggle only for a dub mode (P4c)", async () => {
+    expireAnonCookie();
+    const fetchFn = stubMintFetch();
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const app = mount(App, { target });
+    flushSync();
+
+    // Subtitle-only (default): no per-speaker dubbing toggle (it only affects the dub).
+    expect(target.innerHTML).not.toContain("分角色配音");
+
+    // Switch to a dub mode → the toggle appears (a checkbox), default unchecked.
+    const dubRadio = target.querySelector('input[name="mode"][value="dub_only"]') as HTMLInputElement;
+    dubRadio.checked = true;
+    dubRadio.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    expect(target.innerHTML).toContain("分角色配音");
+    const box = target.querySelector(".field.checkbox input[type=checkbox]") as HTMLInputElement;
+    expect(box).toBeTruthy();
+    expect(box.checked).toBe(false); // opt-in: off by default
+
+    expect(fetchFn).toBeTruthy();
+    unmount(app);
+    target.remove();
+  });
+
   it("mode hints reflect the LIVE per-mode cap from /api/config (not a hardcoded value)", async () => {
     expireAnonCookie();
     // Operator raised every mode's cap to 30 min via CFG-GUARD.

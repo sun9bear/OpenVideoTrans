@@ -184,6 +184,16 @@ export async function createJob(ctx: Ctx): Promise<Response> {
     }
     validateProvider(ttsProvider); // paid -> 403 forbidden_provider; unknown -> 400 unknown_provider
   }
+  // Diarization (P4c, 分角色配音): opt-in per-speaker dubbing. It only affects the DUB (the worker's
+  // diarizer relabels transcript speaker_ids so _assign_voices gives each speaker a distinct voice),
+  // so it is meaningless — and a wasted model run — for subtitle_only; reject it there like the pin.
+  // Whether the deployment can actually diarize (sherpa wheel + baked models) is the WORKER's
+  // available()-gate; a box without them degrades to single-speaker (never fails the job). The flag
+  // flows into plan.diarization (JobPlan.diarization, default false) which the kernel gates on.
+  const diarization = optBool(body, "diarization") ?? false;
+  if (diarization && outputMode === "subtitle_only") {
+    throw new HttpError(400, "invalid_field", "diarization requires a dub output mode");
+  }
   // M2.1: burned / both subtitle delivery is implemented end-to-end (kernel libass re-encode ->
   // the worker uploads the burned video as video_key). reqEnum already constrains
   // subtitle_delivery to srt|burned|both, so all three are accepted here.
@@ -233,11 +243,17 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   // Fold the validated dub-voice pin into the plan (dub modes only; validated above). The worker
   // honors an explicit (tts, tts_voice) pin instead of auto-routing (soft-pin, PR #85). voice_substituted
   // defaults false via the schema and is set by the worker only if it must fall back at run time.
-  const plan: { asr: string; mt: string; tts: string | null; tts_voice?: string } =
-    defaultPlan(outputMode);
+  const plan: {
+    asr: string; mt: string; tts: string | null; tts_voice?: string; diarization?: boolean;
+  } = defaultPlan(outputMode);
   if (ttsProvider !== undefined && ttsVoice !== undefined) {
     plan.tts = ttsProvider;
     plan.tts_voice = ttsVoice;
+  }
+  // Only set diarization when opted in — omitting it keeps the plan byte-identical to a pre-P4c job
+  // (JobPlan.diarization defaults false in-schema), so an existing job's manifest/plan doesn't churn.
+  if (diarization) {
+    plan.diarization = true;
   }
   const aigc = defaultAigcMarking(outputMode, ctx.config);
   const deadlineAt = now + ctx.config.deadlineMaxWaitMs;
