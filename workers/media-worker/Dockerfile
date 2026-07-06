@@ -3,11 +3,13 @@
 #
 # Design (backlog §3 DEPLOY):
 #   * CORE models are BAKED: the multi-voice Piper set (P1b — M/F voices per locale, see
-#     PIPER_VOICE_PATHS below) and the faster_whisper "base" weights are downloaded at BUILD time,
-#     each .onnx integrity-verified against supply_chain._PINNED (sha256, fail-closed) + recorded to
+#     PIPER_VOICE_PATHS below), the faster_whisper "base" weights, and the P4b diarizer models
+#     (pyannote-segmentation-3.0 int8 + 3D-Speaker campplus zh) are downloaded at BUILD time, each
+#     .onnx integrity-verified against supply_chain._PINNED (sha256, fail-closed) + recorded to
 #     /opt/ovt/models/MANIFEST.sha256 — the runtime never fetches models from the network (the host
 #     egress allowlist would block it, and a silent model swap upstream must not reach prod). Change
-#     the baked set by editing PIPER_VOICE_PATHS + supply_chain._PIPER_VOICE_SHA256 together.
+#     the baked set by editing PIPER_VOICE_PATHS + supply_chain._PIPER_VOICE_SHA256 (Piper) or the
+#     SEG_TARBALL/EMB_MODEL ARGs + supply_chain._DIARIZER_MODEL_PINS (diarizer) together.
 #   * The worker process is the uv-locked workspace install (same lock CI tests), run as a non-root
 #     user; work dir + model manifest are the only writable paths it needs.
 #   * ffmpeg comes from the distro (pinned by digest via the base image), matching the kernel's
@@ -52,8 +54,13 @@ COPY workers/media-worker ./workers/media-worker
 # NON-COMMERCIAL lane (Microsoft read-aloud ToS; AD-6): installing it makes it AVAILABLE, but routing
 # never auto-selects it — COMMERCIAL_SAFE_TTS excludes it, so it is used ONLY when the user explicitly
 # pins an edge voice (the picker labels it 实验/非商用; the owner bears the ToS risk). No key/weights.
+# sherpa-onnx (P4b diarizer): the pure-ONNX/CPU speaker-diarization runtime the provider-adapters
+# SherpaOnnxDiarizer shells into (no torch/GPU). It pulls numpy (which diarize._read_wav_mono_f32
+# needs). FREE + local; the diarizer is NEVER auto-routed (it is not in select()/AUTO_LADDER — the
+# worker injects it only when the job opts into diarization AND it is available()).
 RUN uv sync --frozen --no-dev --package media-worker \
-    && uv pip install "faster-whisper==1.0.3" "piper-tts==1.2.0" "edge-tts==7.2.8"
+    && uv pip install "faster-whisper==1.0.3" "piper-tts==1.2.0" "edge-tts==7.2.8" \
+       "sherpa-onnx==1.13.3"
 
 # ---- Baked models -------------------------------------------------------------------------------
 # Multi-voice Piper (P1b): the picker offers M/F voices per locale, so the image bakes the full
@@ -109,6 +116,38 @@ RUN set -e; \
     find "$HF_HOME" -type f \( -name '*.bin' -o -name '*.safetensors' \) -exec sha256sum {} + \
       >> "$OVT_MODEL_DIR/MANIFEST.sha256"; \
     cat "$OVT_MODEL_DIR/MANIFEST.sha256"
+
+# ---- Baked diarizer models (P4b) ----------------------------------------------------------------
+# Speaker diarization (分角色配音, opt-in): the pyannote-segmentation-3.0 int8 segmenter (~1.5 MB,
+# MIT/CNRS) + the 3D-Speaker campplus zh-cn embedding (~28 MB, Apache-2.0) — both pure ONNX/CPU.
+# Baked + integrity-verified vs supply_chain._DIARIZER_MODEL_PINS at BUILD (fail-closed; the runtime
+# egress allowlist blocks the model host, so the baked bytes are authoritative). The segmenter ships
+# ONLY inside a .tar.bz2 release asset, so it is extracted (via Python's stdlib tarfile — no bzip2
+# binary needed in slim) and the int8 model renamed to its pin BASENAME; the embedding is a direct
+# .onnx. To repin: update these URLs + supply_chain._DIARIZER_MODEL_PINS together (a drift fails the
+# build). Env FVD_DIARIZE_* below is what provider-adapters' SherpaOnnxDiarizer reads.
+ARG SHERPA_MODELS=https://github.com/k2-fsa/sherpa-onnx/releases/download
+ARG SEG_TARBALL=speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2
+ARG EMB_MODEL=speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
+ENV OVT_DIARIZE_DIR=/opt/ovt/models/diarize \
+    FVD_DIARIZE_SEGMENTATION_MODEL=/opt/ovt/models/diarize/sherpa-onnx-pyannote-segmentation-3-0.int8.onnx \
+    FVD_DIARIZE_EMBEDDING_MODEL=/opt/ovt/models/diarize/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
+RUN set -e; \
+    mkdir -p "$OVT_DIARIZE_DIR" /tmp/seg; \
+    echo "  fetch segmentation tarball"; \
+    curl -fsSL -o /tmp/seg/seg.tar.bz2 "$SHERPA_MODELS/$SEG_TARBALL"; \
+    uv run python -c "import tarfile; tarfile.open('/tmp/seg/seg.tar.bz2').extractall('/tmp/seg')"; \
+    cp /tmp/seg/sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx \
+       "$FVD_DIARIZE_SEGMENTATION_MODEL"; \
+    rm -rf /tmp/seg; \
+    echo "  fetch embedding"; \
+    curl -fsSL -o "$FVD_DIARIZE_EMBEDDING_MODEL" "$SHERPA_MODELS/$EMB_MODEL"; \
+    got=$(ls "$OVT_DIARIZE_DIR"/*.onnx | wc -l); \
+    echo "diarizer models: want=2 got=$got"; \
+    [ "$got" -eq 2 ] || { echo "ERROR: baked $got/2 diarizer models" >&2; exit 1; }; \
+    uv run python -c "import os; from provider_adapters import verify_diarizer_models as _v; print('diarizer models pin OK:', len(_v(os.environ['OVT_DIARIZE_DIR'])), 'verified')"; \
+    uv run python -c "import sherpa_onnx; print('sherpa-onnx', sherpa_onnx.__version__, 'importable')"; \
+    sha256sum "$OVT_DIARIZE_DIR"/*.onnx >> "$OVT_MODEL_DIR/MANIFEST.sha256"
 
 # Baked-model env contract consumed by provider-adapters. Multi-voice Piper (P1b): FVD_PIPER_VOICES_DIR
 # (set above) makes PiperTTS serve EVERY installed <basename>.onnx (voices_for = catalog-covering

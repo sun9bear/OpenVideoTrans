@@ -74,12 +74,34 @@ _PIPER_VOICE_SHA256: dict[str, str] = {
     "it_IT-paola-medium": "6fc918b5a0ea6137382833dddfa567bffbe6a5060c02043c87192ee59c04210c",
 }
 
+# Baked diarizer model pins (P4b-bake): the sherpa-onnx speaker-diarization ONNX models baked into
+# the worker image, keyed by FILE BASENAME (Path.stem) — the pyannote-seg-3.0 int8 segmenter
+# (MIT, CNRS) + the 3D-Speaker campplus zh-cn embedding (Apache-2.0). These sha256 are computed from
+# the exact GitHub-release bytes (k2-fsa/sherpa-onnx releases; no HF-style content-hash API, so
+# they were hashed from the downloaded artifact). Both licenses are permissive (default-image-OK).
+# Dockerfile downloads exactly these + verifies each vs this table at BUILD time (fail-closed);
+# verify_diarizer_models re-checks. To repin: update the sha256 here + the Dockerfile URLs together.
+_DIARIZER_MODEL_PINS: dict[str, PinnedArtifact] = {
+    "sherpa-onnx-pyannote-segmentation-3-0.int8": PinnedArtifact(
+        sha256="d582f4b4c6b48205de7e0643c57df0df5615a3c176189be3fc461e9d18827b5d",
+        license_id="MIT",
+    ),
+    "3dspeaker_speech_campplus_sv_zh-cn_16k-common": PinnedArtifact(
+        sha256="f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
+        license_id="Apache-2.0",
+    ),
+}
+
 # Curated integrity pins for artifacts vendored into the default image (the baked Piper voice set +
-# any future fixed-name artifact). A fixed-name single artifact may ALSO be operator-pinned via
-# FVD_<NAME>_SHA256 (see expected_sha256); baked-voice basenames are the curated set only.
+# the diarizer models + any future fixed-name artifact). A fixed-name single artifact may ALSO be
+# operator-pinned via FVD_<NAME>_SHA256 (see expected_sha256); baked-voice/diarizer basenames use
+# the curated set only (filename-derived pin names must never honor an env override — see verify_*).
 _PINNED: dict[str, PinnedArtifact] = {
-    name: PinnedArtifact(sha256=digest, license_id="MIT")
-    for name, digest in _PIPER_VOICE_SHA256.items()
+    **{
+        name: PinnedArtifact(sha256=digest, license_id="MIT")
+        for name, digest in _PIPER_VOICE_SHA256.items()
+    },
+    **_DIARIZER_MODEL_PINS,
 }
 
 # Bundled-model license classification. Permissive => default-image-OK; the CC-BY-NC family
@@ -89,6 +111,9 @@ _MODEL_LICENSES: dict[str, str] = {
     "whisper": "MIT",
     "faster_whisper": "MIT",
     "edge_tts": "proprietary-free",  # hosted MS service, no bundled weights
+    "pyannote-segmentation": "MIT",  # P4b diarizer segmenter (CNRS)
+    "sherpa_onnx": "Apache-2.0",  # the diarizer runtime wheel
+    "3dspeaker": "Apache-2.0",  # P4b diarizer speaker-embedding (campplus zh)
     "xtts": "coqui-cpml",  # non-commercial
     "xtts-v2": "coqui-cpml",
     "f5-tts": "cc-by-nc-4.0",  # non-commercial
@@ -187,6 +212,40 @@ def verify_piper_voices_dir(voices_dir: str) -> list[ModelRef]:
             f"Piper with no installed model"
         )
     return [verify_piper_voice(p.stem, str(p)) for p in onnx]
+
+
+def verify_diarizer_model(basename: str, path: str) -> ModelRef:
+    """Integrity-pin ONE baked diarizer ``.onnx`` (P4b-bake) against the CURATED ``_PINNED`` table
+    ONLY. Like ``verify_piper_voice``, the pin key is the FILE BASENAME (``Path.stem``) — derived
+    from a filename in the diarizer models dir, which an actor who can drop/rename files there
+    controls. So it deliberately does NOT honor the ``FVD_<NAME>_SHA256`` env override: basename AND
+    env are both attacker-influenceable, and pairing them would let a swapped model carry a forged
+    pin. Fails closed when the basename is unpinned."""
+    pin = _PINNED.get(basename)
+    if pin is None:
+        raise SupplyChainError(
+            f"diarizer model {basename!r} is not pinned in the curated _PINNED table: refusing an "
+            f"unpinned model (the FVD_*_SHA256 env override is intentionally not honored for a "
+            f"filename-derived pin name)"
+        )
+    digest = verify_sha256(path, pin.sha256)
+    return ModelRef(name=basename, version=None, sha256=digest)
+
+
+def verify_diarizer_models(models_dir: str) -> list[ModelRef]:
+    """Integrity-pin EVERY installed ``<models_dir>/*.onnx`` diarizer model (P4b-bake) against the
+    curated pins. ANY unpinned or hash-mismatched model fails closed (``SupplyChainError``) before
+    the diarizer runs; an empty dir raises (enabling diarization with no baked model is a
+    misconfiguration, not a silent no-op). Returns a ``ModelRef`` per model for the manifest. The
+    Dockerfile calls this at BUILD time (the runtime egress allowlist blocks the model host, so the
+    baked bytes are authoritative); a one-shot cost, never a per-job hot path."""
+    onnx = sorted(Path(models_dir).glob("*.onnx"))
+    if not onnx:
+        raise SupplyChainError(
+            f"no *.onnx in diarizer models dir {models_dir!r}: refusing to enable diarization "
+            f"with no installed model"
+        )
+    return [verify_diarizer_model(p.stem, str(p)) for p in onnx]
 
 
 def verify_ffmpeg() -> ModelRef:

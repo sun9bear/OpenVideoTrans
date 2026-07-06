@@ -32,7 +32,7 @@ from .base import ProviderInfo, ProviderUnavailable, _BaseProvider, has_module
 _SEG_MODEL_ENV = "FVD_DIARIZE_SEGMENTATION_MODEL"  # pyannote-segmentation-3.0 .onnx
 _EMB_MODEL_ENV = "FVD_DIARIZE_EMBEDDING_MODEL"  # speaker-embedding .onnx (3D-Speaker zh default)
 _NUM_SPEAKERS_ENV = "FVD_DIARIZE_NUM_SPEAKERS"  # >0 fixes the cluster count; else auto (threshold)
-_THRESHOLD_ENV = "FVD_DIARIZE_CLUSTER_THRESHOLD"  # distance threshold when auto (default 0.5)
+_THRESHOLD_ENV = "FVD_DIARIZE_CLUSTER_THRESHOLD"  # distance threshold when auto (default 0.8)
 _THREADS_ENV = "FVD_DIARIZE_NUM_THREADS"  # onnxruntime intra-op threads (default 1; 2-core box)
 
 
@@ -137,8 +137,11 @@ class SherpaOnnxDiarizer(_BaseProvider):
         self._num_speakers = (
             num_speakers if num_speakers is not None else _int_env(_NUM_SPEAKERS_ENV)
         )
+        # 0.8 = sherpa-onnx's own recommended FastClustering threshold for pyannote-segmentation-3.0
+        # (its bundled example) — validated: on the canonical 4-speaker sample 0.5 over-clusters to
+        # 5, while 0.6-0.8 recover the correct 4. Higher merges more; env-tunable per deployment.
         self._threshold = (
-            cluster_threshold if cluster_threshold is not None else _float_env(_THRESHOLD_ENV, 0.5)
+            cluster_threshold if cluster_threshold is not None else _float_env(_THRESHOLD_ENV, 0.8)
         )
         self._num_threads = (
             num_threads if num_threads is not None else (_int_env(_THREADS_ENV) or 1)

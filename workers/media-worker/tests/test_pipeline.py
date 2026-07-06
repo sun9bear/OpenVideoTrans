@@ -21,6 +21,7 @@ from media_worker.pipeline import (
     run_real_pipeline,
 )
 from mw_fakes import FakeControlPlane, FakeStorage, make_job
+from ovt_schemas import JobPlan
 from provider_adapters import LanguageError, ProviderUnavailable, QuotaExhausted
 
 
@@ -678,3 +679,83 @@ def test_429_reroutes_all_stages_sharing_the_exhausted_provider(tmp_path: Path) 
     assert run.calls[1]["mt"] == "deepl"
     assert cp.exhausted_reports == [("groq", 1000 + 30_000, "429")]
     assert artifacts == {"srt_key": "artifacts/job_x/1/output.srt"}
+
+
+# ── P4b: diarizer injection into the kernel run_pipeline ──────────────────────
+class _CapturingDiarRun:
+    """Fake run_pipeline that records the ``diarizer`` kwarg the worker injected, then writes the
+    dub deliverable."""
+
+    def __init__(self) -> None:
+        self.diarizer: object | None = None
+        self.seen = False
+
+    def __call__(
+        self, paths: Any, resolver: object, *, source: str, target_lang: str,
+        job: Any, diarizer: object | None = None, **_kw: object,
+    ) -> Path:
+        self.diarizer, self.seen = diarizer, True
+        paths.dubbed_video.write_bytes(b"DUB")
+        return paths.dubbed_video
+
+
+def _run_diar_job(tmp_path: Path, *, diarization: bool, factory) -> _CapturingDiarRun:  # noqa: ANN001
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(
+        output_mode="dub_only", target_lang="zh-Hans",
+        plan=JobPlan(asr="auto", mt="auto", tts="auto", diarization=diarization),
+    )
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = _CapturingDiarRun()
+    run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=object(), run_pipeline_fn=run,
+        available_providers=_avail({"asr": {"cloudflare"}, "mt": {"deepl"}, "tts": {"piper"}}),
+        now_ms=lambda: 1000, build_diarizer_fn=factory,
+    )
+    assert run.seen
+    return run
+
+
+class _FakeAvailDiar:
+    def available(self) -> bool:
+        return True
+
+    def diarize(self, audio_path: str) -> list[tuple[int, int, str]]:
+        return []
+
+
+def test_diarization_flag_injects_available_diarizer(tmp_path: Path) -> None:
+    # job opts into diarization + the built diarizer is available() -> injected into the kernel.
+    diar = _FakeAvailDiar()
+    run = _run_diar_job(tmp_path, diarization=True, factory=lambda: diar)
+    assert run.diarizer is diar
+
+
+def test_diarization_flag_but_unavailable_injects_none(tmp_path: Path) -> None:
+    # requested but the diarizer is NOT available (misconfigured box) -> inject None, degrade to
+    # single-speaker rather than fail the dub (diarization can only ADD speakers).
+    class _Unavail:
+        def available(self) -> bool:
+            return False
+
+        def diarize(self, audio_path: str) -> list[tuple[int, int, str]]:
+            return []
+
+    run = _run_diar_job(tmp_path, diarization=True, factory=_Unavail)
+    assert run.diarizer is None
+
+
+def test_no_diarization_flag_never_builds_diarizer(tmp_path: Path) -> None:
+    # flag off (default) -> the factory is never called and no diarizer is injected (byte-identical
+    # to today; the ~30MB model is never even constructed).
+    built: list[int] = []
+
+    def _factory() -> _FakeAvailDiar:
+        built.append(1)
+        return _FakeAvailDiar()
+
+    run = _run_diar_job(tmp_path, diarization=False, factory=_factory)
+    assert run.diarizer is None
+    assert built == []

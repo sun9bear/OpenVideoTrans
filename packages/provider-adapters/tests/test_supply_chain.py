@@ -17,6 +17,8 @@ from provider_adapters import (
 from provider_adapters import supply_chain as sc
 from provider_adapters.supply_chain import (
     PinnedArtifact,
+    verify_diarizer_model,
+    verify_diarizer_models,
     verify_piper_model,
     verify_piper_voices_dir,
 )
@@ -170,3 +172,66 @@ def test_verify_voice_ignores_env_override_for_basename(
     monkeypatch.setenv("FVD_EN_US-RYAN-MEDIUM_SHA256", sha256_file(str(evil)))
     with pytest.raises(SupplyChainError, match="not pinned"):
         verify_piper_voices_dir(str(d))
+
+
+# ── P4b: diarizer model pins (sherpa-onnx) ────────────────────────────────────
+def test_diarizer_pins_shipped_and_permissive() -> None:
+    # The two baked diarizer models must be pinned in the SHIPPED _PINNED table (not monkeypatched)
+    # with permissive licenses, so a Dockerfile bake can verify them fail-closed at build.
+    seg = "sherpa-onnx-pyannote-segmentation-3-0.int8"
+    emb = "3dspeaker_speech_campplus_sv_zh-cn_16k-common"
+    assert seg in sc._PINNED and sc._PINNED[seg].license_id == "MIT"
+    assert emb in sc._PINNED and sc._PINNED[emb].license_id == "Apache-2.0"
+    assert len(sc._PINNED[seg].sha256) == 64 and len(sc._PINNED[emb].sha256) == 64
+    assert not is_non_commercial(sc._PINNED[emb].license_id)  # Apache-2.0 is default-image-OK
+
+
+def test_verify_diarizer_models_passes_when_all_pinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = tmp_path / "diarize"
+    d.mkdir()
+    seg = d / "sherpa-onnx-pyannote-segmentation-3-0.int8.onnx"
+    seg.write_bytes(b"seg-weights")
+    emb = d / "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+    emb.write_bytes(b"emb-weights")
+    _pin(monkeypatch, **{seg.stem: str(seg), emb.stem: str(emb)})
+    refs = verify_diarizer_models(str(d))
+    assert {r.name for r in refs} == {seg.stem, emb.stem}
+    assert all(len(r.sha256 or "") == 64 for r in refs)
+
+
+def test_verify_diarizer_models_fails_closed_on_unpinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = tmp_path / "diarize"
+    d.mkdir()
+    seg = d / "sherpa-onnx-pyannote-segmentation-3-0.int8.onnx"
+    seg.write_bytes(b"seg-weights")
+    (d / "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx").write_bytes(b"emb")
+    _pin(monkeypatch, **{seg.stem: str(seg)})  # only the segmenter is pinned
+    with pytest.raises(SupplyChainError, match="not pinned"):
+        verify_diarizer_models(str(d))  # the unpinned embedding fails the whole set closed
+
+
+def test_verify_diarizer_models_empty_fails_closed(tmp_path: Path) -> None:
+    d = tmp_path / "diarize"
+    d.mkdir()
+    with pytest.raises(SupplyChainError, match="no \\*.onnx"):
+        verify_diarizer_models(str(d))
+
+
+def test_verify_diarizer_model_ignores_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Same SECURITY posture as the piper voice pin: a filename-derived basename must read _PINNED
+    # ONLY, never the FVD_<NAME>_SHA256 env override — else a swapped model could forge its own pin.
+    d = tmp_path / "diarize"
+    d.mkdir()
+    evil = d / "sherpa-onnx-pyannote-segmentation-3-0.int8.onnx"
+    evil.write_bytes(b"attacker-swapped-seg")
+    monkeypatch.setattr(sc, "_PINNED", {})
+    env_key = "FVD_SHERPA-ONNX-PYANNOTE-SEGMENTATION-3-0.INT8_SHA256"
+    monkeypatch.setenv(env_key, sha256_file(str(evil)))
+    with pytest.raises(SupplyChainError, match="not pinned"):
+        verify_diarizer_model(evil.stem, str(evil))
