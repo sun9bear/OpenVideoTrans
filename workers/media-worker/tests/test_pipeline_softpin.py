@@ -127,6 +127,7 @@ def _record_plan(plans: list[dict[str, Any]], job: Any) -> None:
     plans.append({
         "asr": p.asr, "mt": p.mt, "tts": p.tts,
         "tts_voice": p.tts_voice, "voice_substituted": p.voice_substituted,
+        "voice_pool": p.voice_pool,
     })
 
 
@@ -384,3 +385,87 @@ def test_no_pin_leaves_auto_routing_unchanged(
     assert run.plans[0]["tts"] == "piper"  # auto-routed
     assert run.plans[0]["tts_voice"] is None
     assert run.plans[0]["voice_substituted"] is False
+
+
+# ── P4c voice pool: validated per-voice, honored, dropped on a fallback ───────
+def test_voice_pool_honored_when_all_voices_serviceable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A pool of PRESET voices of the pinned provider is honored: the routed plan carries voice_pool
+    # + the pinned provider, and the kernel (tested separately) cycles it across speakers.
+    _install_caps(monkeypatch, available={"cloudflare": True, "piper": True},
+                  presets={"cloudflare": ["zh", "zh2"]})
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(
+        output_mode="dub_only", target_lang="zh-Hans",
+        plan=JobPlan(asr="auto", mt="auto", tts="cloudflare", diarization=True,
+                     voice_pool=["zh", "zh2"]),
+    )
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = _CapturingRun()
+    run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=_InnerResolver(), run_pipeline_fn=run,
+        available_providers=_avail(
+            {"asr": {"cloudflare"}, "mt": {"deepl"}, "tts": {"piper", "cloudflare"}}),
+        now_ms=lambda: 1000,
+    )
+    assert run.plans[0]["tts"] == "cloudflare"  # provider pinned (pool bypasses auto-route)
+    assert run.plans[0]["voice_pool"] == ["zh", "zh2"]
+    assert run.plans[0]["voice_substituted"] is False
+
+
+def test_voice_pool_with_off_catalog_voice_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # EVERY pool voice must be a closed-preset member (open-core §4). One off-catalog voice fails
+    # the whole job closed with tts_provider_unavailable — never a silent drop of the bad voice.
+    _install_caps(monkeypatch, available={"cloudflare": True, "piper": True},
+                  presets={"cloudflare": ["zh"]})  # "zh2" is NOT a preset
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(
+        output_mode="dub_only", target_lang="zh-Hans",
+        plan=JobPlan(asr="auto", mt="auto", tts="cloudflare", diarization=True,
+                     voice_pool=["zh", "zh2"]),
+    )
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    with pytest.raises(LanguageError) as ei:
+        run_real_pipeline(
+            cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+            resolver=_InnerResolver(), run_pipeline_fn=_CapturingRun(),
+            available_providers=_avail({"asr": {"cloudflare"}, "mt": {"deepl"},
+                                        "tts": {"piper", "cloudflare"}}),
+            now_ms=lambda: 1000,
+        )
+    assert ei.value.code == "tts_provider_unavailable"
+
+
+def test_voice_pool_dropped_on_transient_exhaustion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The pinned provider 429s at run time -> reroute to the auto commercial-safe voice and DROP the
+    # pool (its voices belong to the dead engine), flagging voice_substituted.
+    _install_caps(monkeypatch, available={"cloudflare": True, "piper": True},
+                  presets={"cloudflare": ["zh", "zh2"]})
+    cp, storage = FakeControlPlane(), FakeStorage()
+    job = make_job(
+        output_mode="dub_only", target_lang="zh-Hans",
+        plan=JobPlan(asr="auto", mt="auto", tts="cloudflare", diarization=True,
+                     voice_pool=["zh", "zh2"]),
+    )
+    in_path = tmp_path / "input"
+    in_path.write_bytes(b"src")
+    run = _CapturingRun(quota_fail=(("tts", "cloudflare"),))
+    run_real_pipeline(
+        cp, storage, job, 1, in_path=in_path, workdir=tmp_path, make_key=_make_key,
+        resolver=_InnerResolver(), run_pipeline_fn=run,
+        available_providers=_avail(
+            {"asr": {"cloudflare"}, "mt": {"deepl"}, "tts": {"piper", "cloudflare"}}),
+        now_ms=lambda: 1000,
+    )
+    assert run.plans[0]["voice_pool"] == ["zh", "zh2"]  # first attempt honored the pool
+    assert run.plans[1]["tts"] == "piper"  # rerouted
+    assert run.plans[1]["voice_pool"] is None  # pool dropped with the dead provider
+    assert run.plans[1]["voice_substituted"] is True

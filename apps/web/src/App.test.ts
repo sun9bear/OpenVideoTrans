@@ -171,6 +171,73 @@ describe("App — smoke", () => {
     target.remove();
   });
 
+  it("shows the voice pool (multi-select) when diarization + a specific engine are on (P4c)", async () => {
+    expireAnonCookie();
+    const fetchFn = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/tts/voices")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            voices: [
+              { provider: "piper", voice_id: "huayan", target_lang: "zh-Hans", gender: "female", label: "Huayan", commercial_safe: true, experimental: false },
+              { provider: "piper", voice_id: "huayan2", target_lang: "zh-Hans", gender: "male", label: "Huayan2", commercial_safe: true, experimental: false },
+            ],
+            now_ms: 1,
+          }),
+        };
+      }
+      if (u.includes("/api/config")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            maxUploadBytes: 500 * 1024 * 1024,
+            maxVideoDurationMs: { subtitle_only: 1_800_000, dub_only: 300_000, both: 300_000 },
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ anon_id: SIGNED }) };
+    });
+    vi.stubGlobal("fetch", fetchFn);
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const app = mount(App, { target });
+    flushSync();
+
+    // dub mode → voices load
+    const dubRadio = target.querySelector('input[name="mode"][value="dub_only"]') as HTMLInputElement;
+    dubRadio.checked = true;
+    dubRadio.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    await vi.waitFor(() => expect(target.innerHTML).toContain("Piper（离线合成）"));
+
+    // pick the piper engine → single-voice select shows (not the pool yet). Find the engine select
+    // by its options (the first .field select is the target-language one).
+    const engine = [...target.querySelectorAll("select")].find((s) =>
+      [...s.options].some((o) => o.value === "piper"),
+    ) as HTMLSelectElement;
+    engine.value = "piper";
+    engine.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    expect(target.innerHTML).not.toContain("音色池");
+
+    // enable diarization → the single select is replaced by the multi-select voice pool
+    const diar = target.querySelector(".field.checkbox input[type=checkbox]") as HTMLInputElement;
+    diar.checked = true;
+    diar.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    expect(target.innerHTML).toContain("音色池");
+    const poolBoxes = target.querySelectorAll(".pool-opt input[type=checkbox]");
+    expect(poolBoxes.length).toBe(2); // one per piper voice
+    // seeded to all voices by default (per-speaker over the full set)
+    for (const b of poolBoxes) expect((b as HTMLInputElement).checked).toBe(true);
+
+    unmount(app);
+    target.remove();
+  });
+
   it("mode hints reflect the LIVE per-mode cap from /api/config (not a hardcoded value)", async () => {
     expireAnonCookie();
     // Operator raised every mode's cap to 30 min via CFG-GUARD.

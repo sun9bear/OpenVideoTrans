@@ -283,15 +283,21 @@ def translate(paths: JobPaths, resolver: Resolver, provider: str | None, target_
 # --------------------------------------------------------------------------- #
 def _assign_voices(
     provider: TtsProvider, lang: str, speaker_ids: list[str],
-    *, pinned_voice: str | None = None,
+    *, pinned_voice: str | None = None, voice_pool: list[str] | None = None,
 ) -> dict[str, str]:
     speakers = sorted(set(speaker_ids))
+    # P4c voice pool (分角色配音): an ORDERED voice list spread across the distinct speakers (sorted
+    # for determinism), cycling when speakers outnumber voices. Trusted for the SAME reason as the
+    # single pin below — the worker soft-pin router validated every pool voice (installed, not paid,
+    # covers the locale, CLOSED-preset member) and clears it on a fallback. Wins over a single
+    # pinned_voice (alternatives; the picker never sends both). An empty pool is falsy → no pool.
+    if voice_pool:
+        return {sid: voice_pool[i % len(voice_pool)] for i, sid in enumerate(speakers)}
     # An explicit user pin (JobPlan.tts_voice) wins: every speaker uses the pinned voice. The pin is
     # trusted here — the worker soft-pin router already validated it: the provider is installed, not
     # paid, covers the locale, and the voice is a member of the provider's CLOSED preset set (the
     # open-core guardrail, plan §4), and it clears the pin on a fallback. So we skip voices_for and
     # use the pin directly. (The no-worker CLI path is operator-trusted, like FVD_PIPER_MODEL.)
-    # Per-speaker voice_map is P4.
     if pinned_voice:
         return {sid: pinned_voice for sid in speakers}
     voices = provider.voices_for(lang)
@@ -301,7 +307,8 @@ def _assign_voices(
 
 
 def tts(paths: JobPaths, resolver: Resolver, provider: str | None,
-        force: bool = False, *, voice_id: str | None = None) -> TranslationResult:
+        force: bool = False, *, voice_id: str | None = None,
+        voice_pool: list[str] | None = None) -> TranslationResult:
     paths.ensure()  # standalone/resume runs must still have tts/ before writing
     result = TranslationResult.model_validate(read_json(paths.segments))
 
@@ -327,7 +334,7 @@ def tts(paths: JobPaths, resolver: Resolver, provider: str | None,
     _log(f"tts: provider={engine.info.name}")
     voice_map = _assign_voices(engine, result.target_language,
                                [s.speaker_id for s in result.segments],
-                               pinned_voice=voice_id)
+                               pinned_voice=voice_id, voice_pool=voice_pool)
 
     for seg in to_synth:
         # Drop any stale raw variant for this index (e.g. a different extension
@@ -731,6 +738,7 @@ def run_pipeline(
     mt: str | None = None,
     tts_provider: str | None = None,
     tts_voice: str | None = None,
+    voice_pool: list[str] | None = None,
     diarizer: DiarizerProvider | None = None,
     separate: bool = False,
     keep_ambient: bool = True,
@@ -774,6 +782,9 @@ def run_pipeline(
         # Explicit user-pinned dub voice (P0); null unless the picker sent one. The worker soft-pin
         # router has already validated/rerouted it before this Job reaches the kernel.
         tts_voice = job.plan.tts_voice
+        # P4c: an ordered voice pool distributed across diarized speakers (validated + cleared-on-
+        # fallback by the worker soft-pin router, like tts_voice). null on the no-pool path.
+        voice_pool = job.plan.voice_pool
     elif aigc_marking is None:
         # Red line §3: AIGC marking is default-ON. The ad-hoc / no-job path never
         # ships an unmarked deliverable by omission — disabling needs an explicit
@@ -791,7 +802,7 @@ def run_pipeline(
     translate(paths, resolver, mt, target_lang, source_lang, force=force)
     # subtitle_only needs no synthesized/aligned audio — skip tts + align entirely.
     if output_mode in ("dub_only", "both"):
-        tts(paths, resolver, tts_provider, force=force, voice_id=tts_voice)
+        tts(paths, resolver, tts_provider, force=force, voice_id=tts_voice, voice_pool=voice_pool)
         align(paths, force=force)
     # burn_font (per-locale libass name) and watermark_font (a deployment-wide font PATH for the
     # visible AIGC watermark) are caller-supplied, NOT Job-derived — the orchestrator resolves them

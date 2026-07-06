@@ -116,6 +116,11 @@ function defaultPlan(outputMode: string): { asr: string; mt: string; tts: string
   return { asr: "auto", mt: "auto", tts: outputMode === "subtitle_only" ? null : "auto" };
 }
 
+// Upper bound on a P4c voice pool — diarization rarely finds this many distinct speakers, and it
+// bounds a hostile oversized array before it is stored/validated. The worker cycles the pool if
+// there are more speakers than voices, so this is a generous ceiling, not a functional limit.
+const MAX_VOICE_POOL = 16;
+
 // AIGC legal marking is DEFAULT-ON (red line 3). Form is conditioned on output_mode: a dub gets a
 // tail/voice notice; subtitle-only gets light disclosure. The worker sets `applied` once embedded.
 // §14 (owner-authorized §3 reconfiguration, 2026-07-04): the SUBTITLE cue (on/off + text) and the
@@ -172,17 +177,57 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   // this is the request-boundary gate that keeps a bad pin from ever reserving/uploading.
   const ttsProvider = optString(body, "tts_provider");
   const ttsVoice = optString(body, "tts_voice");
-  if ((ttsProvider === undefined) !== (ttsVoice === undefined)) {
-    throw new HttpError(400, "invalid_field", "tts_provider and tts_voice must be provided together");
-  }
-  if (ttsVoice !== undefined && ttsVoice.trim() === "") {
-    throw new HttpError(400, "invalid_field", "tts_voice must not be empty");
-  }
-  if (ttsProvider !== undefined) {
-    if (outputMode === "subtitle_only") {
-      throw new HttpError(400, "invalid_field", "a dub voice pin requires a dub output mode");
+  // P4c voice pool (分角色配音): an ORDERED list of the pinned provider's voices, distributed across
+  // diarized speakers by the worker. It is an ALTERNATIVE to the single tts_voice (send one form, not
+  // both) and needs a pinned provider + diarization. Parse it first so the pin coherence below knows
+  // which voice form the request uses.
+  const rawPool = body["voice_pool"];
+  let voicePool: string[] | undefined;
+  if (rawPool !== undefined) {
+    if (
+      !Array.isArray(rawPool) ||
+      rawPool.length === 0 ||
+      rawPool.some((v) => typeof v !== "string" || v.trim() === "")
+    ) {
+      throw new HttpError(400, "invalid_field", "voice_pool must be a non-empty array of voice ids");
     }
-    validateProvider(ttsProvider); // paid -> 403 forbidden_provider; unknown -> 400 unknown_provider
+    if (rawPool.length > MAX_VOICE_POOL) {
+      throw new HttpError(400, "invalid_field", `voice_pool must be at most ${MAX_VOICE_POOL} voices`);
+    }
+    voicePool = rawPool as string[];
+  }
+  // Pin coherence: the pool form (provider + voice_pool, no single voice) and the single-voice form
+  // (provider + tts_voice) are mutually exclusive; each needs a provider + a dub output; the provider
+  // must be a known FREE provider (validateProvider rejects paid 403 / unknown 400 — red line §1). The
+  // WORKER does the authoritative structural + closed-preset membership check; this is only the
+  // request-boundary gate that keeps a bad pin from ever reserving/uploading.
+  if (voicePool !== undefined) {
+    if (ttsVoice !== undefined) {
+      throw new HttpError(
+        400, "invalid_field", "voice_pool and tts_voice are alternatives; send only one");
+    }
+    if (ttsProvider === undefined) {
+      throw new HttpError(
+        400, "invalid_field", "voice_pool requires a tts_provider (the engine its voices belong to)");
+    }
+    if (outputMode === "subtitle_only") {
+      throw new HttpError(400, "invalid_field", "a dub voice pool requires a dub output mode");
+    }
+    validateProvider(ttsProvider); // paid -> 403; unknown -> 400
+  } else {
+    if ((ttsProvider === undefined) !== (ttsVoice === undefined)) {
+      throw new HttpError(
+        400, "invalid_field", "tts_provider and tts_voice must be provided together");
+    }
+    if (ttsVoice !== undefined && ttsVoice.trim() === "") {
+      throw new HttpError(400, "invalid_field", "tts_voice must not be empty");
+    }
+    if (ttsProvider !== undefined) {
+      if (outputMode === "subtitle_only") {
+        throw new HttpError(400, "invalid_field", "a dub voice pin requires a dub output mode");
+      }
+      validateProvider(ttsProvider); // paid -> 403 forbidden_provider; unknown -> 400 unknown_provider
+    }
   }
   // Diarization (P4c, 分角色配音): opt-in per-speaker dubbing. It only affects the DUB (the worker's
   // diarizer relabels transcript speaker_ids so _assign_voices gives each speaker a distinct voice),
@@ -193,6 +238,12 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   const diarization = optBool(body, "diarization") ?? false;
   if (diarization && outputMode === "subtitle_only") {
     throw new HttpError(400, "invalid_field", "diarization requires a dub output mode");
+  }
+  // A voice pool only distributes across MULTIPLE speakers, which only diarization produces; without
+  // it every line is SPEAKER_00 and only the pool's first voice would ever be used. Require it so the
+  // pool is never a silent no-op.
+  if (voicePool !== undefined && !diarization) {
+    throw new HttpError(400, "invalid_field", "voice_pool requires diarization (per-speaker dubbing)");
   }
   // M2.1: burned / both subtitle delivery is implemented end-to-end (kernel libass re-encode ->
   // the worker uploads the burned video as video_key). reqEnum already constrains
@@ -244,9 +295,14 @@ export async function createJob(ctx: Ctx): Promise<Response> {
   // honors an explicit (tts, tts_voice) pin instead of auto-routing (soft-pin, PR #85). voice_substituted
   // defaults false via the schema and is set by the worker only if it must fall back at run time.
   const plan: {
-    asr: string; mt: string; tts: string | null; tts_voice?: string; diarization?: boolean;
+    asr: string; mt: string; tts: string | null; tts_voice?: string;
+    diarization?: boolean; voice_pool?: string[];
   } = defaultPlan(outputMode);
-  if (ttsProvider !== undefined && ttsVoice !== undefined) {
+  if (voicePool !== undefined) {
+    // Pool form: pin the provider (validated above, so non-undefined here) + carry its ordered voices.
+    plan.tts = ttsProvider!;
+    plan.voice_pool = voicePool;
+  } else if (ttsProvider !== undefined && ttsVoice !== undefined) {
     plan.tts = ttsProvider;
     plan.tts_voice = ttsVoice;
   }

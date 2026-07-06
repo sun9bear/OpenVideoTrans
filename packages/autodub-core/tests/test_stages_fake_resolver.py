@@ -648,3 +648,39 @@ def test_diarize_no_turns_marks_to_skip_reload(tmp_path: Path) -> None:
     assert (paths.root / stages._DIARIZED_MARKER).exists()
     stages.diarize(paths, diar)  # cached -> not re-run
     assert len(diar.calls) == 1
+
+
+# ── P4c: voice pool (ordered voices cycled across diarized speakers) ──────────────────────────────
+def test_tts_voice_pool_cycles_across_speakers(tmp_path: Path) -> None:
+    # An ordered voice_pool is distributed across the distinct (sorted) speakers, cycling when there
+    # are more speakers than voices. Bypasses voices_for — the pool ids are used directly.
+    res = FakeResolver()
+    paths = JobPaths(tmp_path).ensure()
+    _write_transcript(paths, [(0, 1000, "a", "SPEAKER_00"), (1000, 2000, "b", "SPEAKER_01"),
+                              (2000, 3000, "c", "SPEAKER_02")])
+    stages.translate(paths, res, None, "zh", "en")
+    tr = stages.tts(paths, res, None, voice_pool=["px", "py"])
+    assert {s.speaker_id: s.voice_id for s in tr.segments} == {
+        "SPEAKER_00": "px", "SPEAKER_01": "py", "SPEAKER_02": "px"}  # cycles px,py,px
+
+
+def test_tts_voice_pool_wins_over_single_pin(tmp_path: Path) -> None:
+    # voice_pool and a single pinned voice are alternatives; if both reach the kernel, pool wins.
+    res = FakeResolver()
+    paths = JobPaths(tmp_path).ensure()
+    _write_transcript(paths, [(0, 1000, "a", "SPEAKER_00"), (1000, 2000, "b", "SPEAKER_01")])
+    stages.translate(paths, res, None, "zh", "en")
+    tr = stages.tts(paths, res, None, voice_id="single", voice_pool=["px", "py"])
+    assert {s.speaker_id: s.voice_id for s in tr.segments} == {
+        "SPEAKER_00": "px", "SPEAKER_01": "py"}
+
+
+def test_tts_empty_voice_pool_falls_back_to_auto(tmp_path: Path) -> None:
+    # An empty pool is falsy → treated as no pool: auto round-robin over voices_for (voiceA/voiceB).
+    res = FakeResolver()
+    paths = JobPaths(tmp_path).ensure()
+    _write_transcript(paths, [(0, 1000, "a", "SPEAKER_00"), (1000, 2000, "b", "SPEAKER_01")])
+    stages.translate(paths, res, None, "zh", "en")
+    tr = stages.tts(paths, res, None, voice_pool=[])
+    assert {s.speaker_id: s.voice_id for s in tr.segments} == {
+        "SPEAKER_00": "voiceA", "SPEAKER_01": "voiceB"}
