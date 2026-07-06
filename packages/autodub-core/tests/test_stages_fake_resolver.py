@@ -617,3 +617,34 @@ def test_diarize_empty_transcript_is_noop(tmp_path: Path) -> None:
     tr = stages.diarize(paths, diar)
     assert tr.lines == []
     assert diar.calls == []  # no lines -> the diarizer is never even run
+    # No model ran, so no marker is written (cheap to re-check on resume).
+    assert not (paths.root / stages._DIARIZED_MARKER).exists()
+
+
+def test_diarize_resume_skips_model_reload_when_marked(tmp_path: Path) -> None:
+    # P4b resume cache-gate: once the diarizer has run + written the .diarized marker, a non-force
+    # resume must NOT reload the heavy model — the persisted relabel is reused; force re-runs it.
+    paths = JobPaths(tmp_path).ensure()
+    _write_transcript(paths, [(0, 1000, "hello", "SPEAKER_00"),
+                              (1000, 2000, "world", "SPEAKER_00")])
+    diar = _FakeDiarizer([(0, 1000, "SPEAKER_00"), (1000, 2000, "SPEAKER_01")])
+    stages.diarize(paths, diar)  # first run: diarizer called, marker written
+    assert (paths.root / stages._DIARIZED_MARKER).exists()
+    assert len(diar.calls) == 1
+    tr = stages.diarize(paths, diar)  # resume: cached -> diarizer NOT re-run
+    assert len(diar.calls) == 1
+    assert [ln.speaker_id for ln in tr.lines] == ["SPEAKER_00", "SPEAKER_01"]  # persisted relabel
+    stages.diarize(paths, diar, force=True)  # force bypasses the marker
+    assert len(diar.calls) == 2
+
+
+def test_diarize_no_turns_marks_to_skip_reload(tmp_path: Path) -> None:
+    # A diarizer that ran + found no speakers is determinate for this audio; the marker is still
+    # written so a resume doesn't reload the model only to find no speakers again.
+    paths = JobPaths(tmp_path).ensure()
+    _write_transcript(paths, [(0, 1000, "a", "SPEAKER_00")])
+    diar = _FakeDiarizer([])
+    stages.diarize(paths, diar)
+    assert (paths.root / stages._DIARIZED_MARKER).exists()
+    stages.diarize(paths, diar)  # cached -> not re-run
+    assert len(diar.calls) == 1

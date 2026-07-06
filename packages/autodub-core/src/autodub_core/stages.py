@@ -182,6 +182,13 @@ def _dominant_speaker(
     return max(sorted(by_speaker), key=lambda s: by_speaker[s])
 
 
+# Resume skip-gate for diarize(): its existence means the diarizer has ALREADY run against the
+# current (cached) transcript, so a resume must not reload the ~30MB sherpa model to recompute a
+# result it already has. Written LAST (after the relabel is durable) so a crash mid-diarize re-runs
+# rather than skipping a half-applied relabel. ``force`` bypasses it (re-runs the model).
+_DIARIZED_MARKER = ".diarized"
+
+
 def diarize(paths: JobPaths, diarizer: DiarizerProvider, force: bool = False) -> Transcript:
     """Relabel transcript ``speaker_id``s from a diarizer's speaker turns (P4, 分角色配音).
 
@@ -191,16 +198,27 @@ def diarize(paths: JobPaths, diarizer: DiarizerProvider, force: bool = False) ->
     keeps its existing label (``SPEAKER_00``). A diarizer that finds one/zero speakers leaves the
     single-speaker baseline intact — enabling diarization can only ADD speakers, never break a job.
 
-    ``force`` re-runs even a cached (relabeled) transcript; otherwise a resume where transcribe was
-    cached still re-runs the diarizer (idempotent). A resume cache-gate is deferred to P4b (real
-    model cost worth skipping)."""
+    Resume-cached (P4b): once the diarizer has run for the current transcript a ``.diarized`` marker
+    is written, so a non-``force`` resume skips reloading the heavy sourcing model (its result is
+    already persisted in transcript.json). ``force=True`` re-runs the diarizer and rewrites the
+    marker. A ``force`` re-run of transcribe upstream also forces diarize (run_pipeline threads the
+    same ``force``), so the marker can never mask a freshly re-transcribed, unlabeled transcript."""
+    marker = paths.root / _DIARIZED_MARKER
     transcript = Transcript.model_validate(read_json(paths.transcript))
+    if marker.exists() and not force:
+        _log("diarize: cached")
+        return transcript
     if not transcript.lines:
+        # No speech to label: return before loading the model (cheap to re-check on resume, so no
+        # marker is written — the diarizer never ran).
         _log("diarize: no transcript lines; nothing to relabel")
         return transcript
     turns = list(diarizer.diarize(str(paths.speech)))
     if not turns:
         _log("diarize: diarizer found no speaker turns; keeping single-speaker labels")
+        # The model DID run and is determinate for this audio: mark so a resume doesn't reload it
+        # only to find no speakers again.
+        marker.write_text("no-turns", encoding="utf-8")
         return transcript
     for ln in transcript.lines:
         sid = _dominant_speaker(ln.start_ms, ln.end_ms, turns)
@@ -208,6 +226,9 @@ def diarize(paths: JobPaths, diarizer: DiarizerProvider, force: bool = False) ->
             ln.speaker_id = sid
     write_json(paths.transcript, transcript.model_dump())
     n_speakers = len({ln.speaker_id for ln in transcript.lines})
+    # Marker LAST: the relabeled transcript is now durable, so a crash before this line re-runs
+    # diarize on resume (never skips a half-written relabel).
+    marker.write_text(f"speakers={n_speakers}", encoding="utf-8")
     _log(f"diarize: relabeled {len(transcript.lines)} line(s) -> {n_speakers} speaker(s)")
     return transcript
 

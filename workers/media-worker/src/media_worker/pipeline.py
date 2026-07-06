@@ -44,6 +44,7 @@ from provider_adapters import (
     QuotaExhausted,
     Resolver,
     assert_language_pair,
+    build_diarizer,
     deepl_target_code,
     get_capability,
     piper_model_covers,
@@ -417,6 +418,7 @@ def run_real_pipeline(
     available_providers: Callable[[str], frozenset[str]] | None = None,
     now_ms: Callable[[], int] | None = None,
     max_reroutes: int | None = None,
+    build_diarizer_fn: Callable[[], object] | None = None,
 ) -> dict[str, str]:
     """Run one claimed job through the REAL pipeline and return ``{artifact_field: r2_key}``.
 
@@ -457,6 +459,26 @@ def run_real_pipeline(
         )
         watermark_font = None
     paths = JobPaths(Path(workdir) / "pipeline").ensure()
+    # P4 (分角色配音, opt-in): when the job requests diarization, build + inject the diarizer so
+    # the kernel relabels speakers before translate. Gated on available() (wheel + baked ONNX models
+    # present) — never inject a diarizer that would fail mid-job. Requested-but-unavailable (a
+    # misconfigured box) logs + proceeds single-speaker rather than failing the dub (diarization can
+    # only ADD speakers — plan §5). Built ONCE (constant across reroutes); the heavy ~30MB sherpa
+    # model loads lazily INSIDE diarize(), only when the kernel reaches that stage, and runs
+    # sequentially within the job's single pipeline pass — with worker_concurrency=1 (§14 2GB
+    # baseline) two model-loaded CPU tasks never synthesize at once (plan §7 constraint 1).
+    diarizer: object | None = None
+    if job.plan.diarization:
+        factory = build_diarizer_fn if build_diarizer_fn is not None else build_diarizer
+        candidate = factory()
+        available = getattr(candidate, "available", None)
+        if callable(available) and available():
+            diarizer = candidate
+        else:
+            logger.warning(
+                "job %s requested diarization but no diarizer is available on this box; "
+                "proceeding single-speaker", job.job_id,
+            )
     kinds = _stage_kinds(job.output_mode)
     excluded: dict[str, set[str]] = {k: set() for k in _STAGE_KINDS}
     plan: dict[str, str | None] = {"asr": job.plan.asr, "mt": job.plan.mt, "tts": job.plan.tts}
@@ -515,7 +537,7 @@ def run_real_pipeline(
             # `job`, but the signature still requires it) — omitting it raises TypeError (CodeX P1).
             run_fn(paths, kernel_resolver, source=str(in_path),
                    target_lang=routed.target_lang, job=routed, burn_font=burn_font,
-                   watermark_font=watermark_font)
+                   watermark_font=watermark_font, diarizer=diarizer)
             return _collect(storage, job, claim_version, paths, make_key)
         except FreePoolExhausted:
             # A sentinel-routed MT/TTS stage the kernel actually REACHED (the job had speech /
